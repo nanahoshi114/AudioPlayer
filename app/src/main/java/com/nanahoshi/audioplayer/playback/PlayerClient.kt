@@ -9,6 +9,7 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.nanahoshi.audioplayer.data.LibraryRepository
 import com.nanahoshi.audioplayer.data.db.TrackEntity
+import com.nanahoshi.audioplayer.dlsite.RemotePlayable
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -168,17 +169,39 @@ class PlayerClient(
         }
     }
 
-    fun replaceAndPlay(tracks: List<TrackEntity>) = scope.launch {
+    fun clearQueue() = replaceAndPlay(emptyList())
+
+    fun replaceAndPlayRemote(items: List<RemotePlayable>, startIndex: Int = 0) = scope.launch {
+        queueMutex.withLock {
+            val ids = library.replaceRemoteQueue(items)
+            val media = ids.zip(items).map { (queueId, item) -> item.toMediaItem(queueId) }
+            val index = if (media.isEmpty()) 0 else startIndex.coerceIn(0, media.lastIndex)
+            withController {
+                if (media.isEmpty()) {
+                    setMediaItems(emptyList())
+                    pause()
+                } else {
+                    setMediaItems(media, index, 0)
+                    prepare()
+                    play()
+                }
+            }
+        }
+    }
+
+    fun replaceAndPlay(tracks: List<TrackEntity>, startIndex: Int = 0) = scope.launch {
         queueMutex.withLock {
             val ids = library.replaceQueue(tracks.map { it.id })
             val items = ids.zip(tracks).map { (queueId, track) -> track.toPlayableItem(queueId) }
+            val index = if (items.isEmpty()) 0 else startIndex.coerceIn(0, items.lastIndex)
             withController {
-                setMediaItems(items, 0, 0)
-                if (items.isNotEmpty()) {
+                if (items.isEmpty()) {
+                    setMediaItems(emptyList())
+                    pause()
+                } else {
+                    setMediaItems(items, index, 0)
                     prepare()
                     play()
-                } else {
-                    pause()
                 }
             }
         }
@@ -228,7 +251,7 @@ class PlayerClient(
 
     private suspend fun rebuildPlayerFromQueue() {
         val rows = library.queueSnapshot()
-        val items = rows.map { it.toTrack().toPlayableItem(it.queueItemId) }
+        val items = rows.map { it.toMediaItem() }
         withController {
             val currentId = currentMediaItem?.mediaId
             val position = currentPosition

@@ -7,10 +7,12 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -20,18 +22,24 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.runtime.key
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
@@ -47,25 +55,38 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.nanahoshi.audioplayer.data.FolderChoice
+import com.nanahoshi.audioplayer.asmr.WorkFacts
+import com.nanahoshi.audioplayer.data.LibrarySort
 import com.nanahoshi.audioplayer.data.TrackSource
+import com.nanahoshi.audioplayer.data.db.FileKind
 import com.nanahoshi.audioplayer.data.db.FolderEntity
+import com.nanahoshi.audioplayer.data.db.LibraryFileEntity
 import com.nanahoshi.audioplayer.data.db.TrackEntity
 import com.nanahoshi.audioplayer.ui.CoverImage
+import com.nanahoshi.audioplayer.ui.CollapsingTop
 import com.nanahoshi.audioplayer.ui.EmptyHint
+import com.nanahoshi.audioplayer.ui.asmr.WorkFactsBlock
 import com.nanahoshi.audioplayer.ui.formatDuration
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun LibraryScreen(
-    onOpenFavorites: (Long?) -> Unit,
+    onOpenPreview: (Long) -> Unit,
+    onOpenWork: (String) -> Unit,
     viewModel: LibraryViewModel = viewModel(),
 ) {
-    val tracks by viewModel.tracks.collectAsStateWithLifecycle(emptyList())
-    val folders by viewModel.folders.collectAsStateWithLifecycle(emptyList())
+    val listing by viewModel.listing.collectAsStateWithLifecycle(LibraryListing(emptyList(), emptyList()))
+    val folders = listing.folders
+    val entries = listing.entries
+    val sort by viewModel.sort.collectAsStateWithLifecycle()
+    val sourceFilter by viewModel.sourceFilter.collectAsStateWithLifecycle()
+    val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
+    val pendingAsmr by viewModel.pendingAsmr.collectAsStateWithLifecycle()
+    val playlists by viewModel.playlists.collectAsStateWithLifecycle(emptyList())
     val currentFolder by viewModel.currentFolder.collectAsStateWithLifecycle(null)
     val folderId by viewModel.currentFolderId.collectAsStateWithLifecycle()
     val busy by viewModel.busy.collectAsStateWithLifecycle()
@@ -75,13 +96,14 @@ fun LibraryScreen(
     val selecting = selectedTracks.isNotEmpty() || selectedFolders.isNotEmpty()
     val context = LocalContext.current
     var menuOpen by remember { mutableStateOf(false) }
-    var bvDialog by remember { mutableStateOf<Boolean?>(null) }
+    var bvDialog by remember { mutableStateOf(false) }
     var bvText by remember { mutableStateOf("") }
-    var pendingPlay by remember { mutableStateOf(false) }
+    var rjDialog by remember { mutableStateOf(false) }
+    var rjText by remember { mutableStateOf("") }
+    var pickingPlaylist by remember { mutableStateOf(false) }
     var pendingTree by remember { mutableStateOf<Uri?>(null) }
     var namingFolder by remember { mutableStateOf(false) }
     var folderName by remember { mutableStateOf("") }
-    var moveChoices by remember { mutableStateOf<List<FolderChoice>?>(null) }
     var confirmDelete by remember { mutableStateOf(false) }
     var confirmFolderDelete by remember { mutableStateOf<Long?>(null) }
 
@@ -91,7 +113,7 @@ fun LibraryScreen(
     val openFile = rememberLauncherForActivityResult(OpenPersistableDocument()) { uri ->
         if (uri != null) {
             persistRead(context, uri)
-            viewModel.importFile(uri, play = pendingPlay)
+            viewModel.importFile(uri, play = false)
         }
     }
     val openFolder = rememberLauncherForActivityResult(OpenPersistableTree()) { uri ->
@@ -101,7 +123,35 @@ fun LibraryScreen(
         }
     }
 
-    Column(Modifier.fillMaxSize()) {
+    CollapsingTop(
+        header = {
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = viewModel::updateSearch,
+                placeholder = { Text("搜索名称或 RJ 号") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+            )
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                listOf(
+                    LibrarySourceFilter.ALL to "全部",
+                    LibrarySourceFilter.BILIBILI to "B站",
+                    LibrarySourceFilter.ASMR to "asmr.one",
+                    LibrarySourceFilter.LOCAL to "本地",
+                ).forEach { (filter, label) ->
+                    FilterChip(
+                        selected = sourceFilter == filter && searchQuery.isBlank(),
+                        onClick = { viewModel.setSourceFilter(filter) },
+                        label = { Text(label) },
+                        modifier = Modifier.padding(end = 8.dp),
+                    )
+                }
+            }
+        },
+        pinned = {
         if (selecting) {
             Row(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 4.dp),
@@ -111,7 +161,14 @@ fun LibraryScreen(
                 Text("已选 ${selectedTracks.size + selectedFolders.size}", modifier = Modifier.padding(end = 8.dp))
                 TextButton(onClick = viewModel::playNextSelection) { Text("下一个播放") }
                 TextButton(onClick = viewModel::appendSelection) { Text("加到末尾") }
-                TextButton(onClick = { viewModel.loadMoveChoices { moveChoices = it } }) { Text("移动到") }
+                TextButton(onClick = viewModel::downloadSelection) { Text("下载") }
+                TextButton(onClick = {
+                    if (playlists.isEmpty()) {
+                        viewModel.note("请先新建播放列表")
+                    } else {
+                        pickingPlaylist = true
+                    }
+                }) { Text("加入播放列表") }
                 TextButton(onClick = { confirmDelete = true }) { Text("移除") }
             }
         } else {
@@ -122,6 +179,9 @@ fun LibraryScreen(
             ) {
                 if (busy) {
                     CircularProgressIndicator(Modifier.padding(end = 8.dp).size(20.dp))
+                }
+                TextButton(onClick = viewModel::toggleSort) {
+                    Text(if (sort == LibrarySort.NAME) "按名称" else "按时间")
                 }
                 IconButton(onClick = { menuOpen = true }) {
                     Icon(Icons.Default.Add, contentDescription = "导入")
@@ -136,18 +196,9 @@ fun LibraryScreen(
                         },
                     )
                     DropdownMenuItem(
-                        text = { Text("选择文件并播放") },
-                        onClick = {
-                            menuOpen = false
-                            pendingPlay = true
-                            openFile.launch(arrayOf("audio/*"))
-                        },
-                    )
-                    DropdownMenuItem(
                         text = { Text("选择文件导入") },
                         onClick = {
                             menuOpen = false
-                            pendingPlay = false
                             openFile.launch(arrayOf("audio/*"))
                         },
                     )
@@ -159,7 +210,7 @@ fun LibraryScreen(
                         },
                     )
                     DropdownMenuItem(
-                        text = { Text("输入 BV 并播放") },
+                        text = { Text("输入BV号导入") },
                         onClick = {
                             menuOpen = false
                             bvText = ""
@@ -167,34 +218,34 @@ fun LibraryScreen(
                         },
                     )
                     DropdownMenuItem(
-                        text = { Text("输入 BV 仅导入") },
+                        text = { Text("输入 RJ 号导入") },
                         onClick = {
                             menuOpen = false
-                            bvText = ""
-                            bvDialog = false
-                        },
-                    )
-                    DropdownMenuItem(
-                        text = { Text("从收藏夹导入") },
-                        onClick = {
-                            menuOpen = false
-                            onOpenFavorites(folderId)
+                            rjText = ""
+                            rjDialog = true
                         },
                     )
                 }
             }
         }
-        if (folders.isEmpty() && tracks.isEmpty()) {
-            EmptyHint(
-                if (currentFolder == null) {
-                    "还没有音频。点右上角导入本地文件、文件夹，或输入 BV 号。"
-                } else {
-                    "这个文件夹是空的。"
-                },
-            )
+        },
+    ) { topInset ->
+        val openedWork = currentFolder?.takeIf { listing.browsing && !it.asmrSourceId.isNullOrBlank() }
+        if (folders.isEmpty() && entries.isEmpty() && openedWork == null) {
+            Box(topInset.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+                EmptyHint(
+                    when {
+                        !listing.browsing -> "没有符合的内容。"
+                        currentFolder == null -> "还没有音频。点右上角导入本地文件、文件夹、BV 号或 RJ 号。"
+                        else -> "这个文件夹是空的。"
+                    },
+                )
+            }
         } else {
-            LazyColumn(Modifier.fillMaxSize()) {
-                if (currentFolder != null) {
+            val listState = viewModel.listState(folderId, listing.browsing)
+            key(if (listing.browsing) "folder:${folderId ?: "root"}" else "flat") {
+            LazyColumn(topInset.fillMaxSize(), state = listState) {
+                if (listing.browsing && currentFolder != null) {
                     item(key = "up") {
                         ListItem(
                             headlineContent = { Text(currentFolder?.name ?: "返回") },
@@ -203,6 +254,39 @@ fun LibraryScreen(
                             },
                             modifier = Modifier.clickable(onClick = viewModel::up),
                         )
+                    }
+                }
+                val workFolder = currentFolder?.takeIf { !it.asmrSourceId.isNullOrBlank() }
+                if (workFolder != null) {
+                    item(key = "work-facts") {
+                        val facts = WorkFacts.fromJson(workFolder.workMeta) ?: WorkFacts(
+                            title = workFolder.name,
+                            circle = "",
+                            vas = emptyList(),
+                            tags = emptyList(),
+                            release = "",
+                            sourceId = workFolder.asmrSourceId.orEmpty(),
+                        )
+                        WorkFactsBlock(
+                            facts = facts,
+                            coverUrl = workFolder.coverUri,
+                            singleLine = false,
+                        )
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.End,
+                        ) {
+                            Button(onClick = { onOpenWork(workFolder.asmrSourceId.orEmpty()) }) {
+                                Text("详情页")
+                            }
+                        }
+                    }
+                }
+                if (folders.isEmpty() && entries.isEmpty()) {
+                    item(key = "empty-work") {
+                        Box(Modifier.fillMaxWidth().padding(24.dp)) {
+                            EmptyHint(if (busy) "正在读取文件…" else "这个文件夹是空的。")
+                        }
                     }
                 }
                 items(folders, key = { "folder-${it.id}" }) { folder ->
@@ -214,39 +298,122 @@ fun LibraryScreen(
                             if (selecting) viewModel.toggleFolder(folder.id) else viewModel.openFolder(folder)
                         },
                         onLongClick = { viewModel.beginSelection(folderId = folder.id) },
-                        onMove = {
-                            viewModel.beginSelection(folderId = folder.id)
-                            viewModel.loadMoveChoices { moveChoices = it }
+                        onCache = if (folder.asmrWorkId != null) {
+                            { viewModel.cacheFolder(folder.id) }
+                        } else {
+                            null
                         },
                         onDelete = { confirmFolderDelete = folder.id },
                     )
                 }
-                items(tracks, key = { "track-${it.id}" }) { track ->
-                    TrackRow(
-                        track = track,
-                        selected = track.id in selectedTracks,
-                        selecting = selecting,
-                        onClick = {
-                            if (selecting) viewModel.toggleTrack(track.id) else viewModel.play(track)
-                        },
-                        onLongClick = { viewModel.beginSelection(trackId = track.id) },
-                        onAppend = { viewModel.append(track) },
-                        onPlayNext = { viewModel.playNext(track) },
-                        onMove = {
-                            viewModel.beginSelection(trackId = track.id)
-                            viewModel.loadMoveChoices { moveChoices = it }
-                        },
-                        onDelete = { viewModel.deleteTrack(track.id) },
-                    )
+                items(entries, key = { entry ->
+                    when (entry) {
+                        is LibraryEntry.Audio -> "track-${entry.track.id}"
+                        is LibraryEntry.File -> "file-${entry.file.id}"
+                    }
+                }) { entry ->
+                    when (entry) {
+                        is LibraryEntry.Audio -> {
+                            val track = entry.track
+                            TrackRow(
+                                track = track,
+                                hasSubtitle = entry.hasSubtitle,
+                                selected = track.id in selectedTracks,
+                                selecting = selecting,
+                                onClick = {
+                                    if (selecting) viewModel.toggleTrack(track.id) else viewModel.play(track)
+                                },
+                                onLongClick = { viewModel.beginSelection(trackId = track.id) },
+                                onAppend = { viewModel.append(track) },
+                                onPlayNext = { viewModel.playNext(track) },
+                                onDownload = if (track.source == TrackSource.ASMR || track.source == TrackSource.DLSITE) {
+                                    { viewModel.downloadTrack(track) }
+                                } else {
+                                    null
+                                },
+                                onDelete = { viewModel.deleteTrack(track.id) },
+                            )
+                        }
+                        is LibraryEntry.File -> FileRow(
+                            file = entry.file,
+                            onClick = { onOpenPreview(entry.file.id) },
+                            onDelete = { viewModel.deleteFile(entry.file.id) },
+                        )
+                    }
                 }
+            }
             }
         }
     }
 
-    if (bvDialog != null) {
+    pendingAsmr?.let { preview ->
         AlertDialog(
-            onDismissRequest = { bvDialog = null },
-            title = { Text(if (bvDialog == true) "播放 B 站视频的声音" else "导入 B 站视频") },
+            onDismissRequest = viewModel::dismissAsmrPreview,
+            title = { Text("asmr.one查询结果") },
+            text = {
+                Column {
+                    CoverImage(preview.coverUrl)
+                    Text(preview.title, modifier = Modifier.padding(top = 8.dp))
+                    Text("要加入音频库吗？", modifier = Modifier.padding(top = 8.dp))
+                }
+            },
+            confirmButton = { TextButton(onClick = viewModel::confirmAsmrPreview) { Text("确认") } },
+            dismissButton = { TextButton(onClick = viewModel::dismissAsmrPreview) { Text("取消") } },
+        )
+    }
+
+    if (rjDialog) {
+        AlertDialog(
+            onDismissRequest = { rjDialog = false },
+            title = { Text("导入 asmr.one 作品") },
+            text = {
+                OutlinedTextField(
+                    value = rjText,
+                    onValueChange = { rjText = it },
+                    label = { Text("RJ 号") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    rjDialog = false
+                    viewModel.importRj(rjText)
+                }) { Text("确定") }
+            },
+            dismissButton = { TextButton(onClick = { rjDialog = false }) { Text("取消") } },
+        )
+    }
+
+    if (pickingPlaylist) {
+        AlertDialog(
+            onDismissRequest = { pickingPlaylist = false },
+            title = { Text("加入播放列表") },
+            text = {
+                LazyColumn(Modifier.heightIn(max = 420.dp)) {
+                    items(playlists, key = { it.id }) { playlist ->
+                        Text(
+                            playlist.name,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    pickingPlaylist = false
+                                    viewModel.addSelectionToPlaylist(playlist.id)
+                                }
+                                .padding(vertical = 12.dp),
+                        )
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { pickingPlaylist = false }) { Text("取消") } },
+        )
+    }
+
+    if (bvDialog) {
+        AlertDialog(
+            onDismissRequest = { bvDialog = false },
+            title = { Text("导入 B 站视频") },
             text = {
                 OutlinedTextField(
                     value = bvText,
@@ -258,12 +425,11 @@ fun LibraryScreen(
             },
             confirmButton = {
                 TextButton(onClick = {
-                    val play = bvDialog == true
-                    bvDialog = null
-                    viewModel.lookupBvid(bvText, play)
+                    bvDialog = false
+                    viewModel.lookupBvid(bvText, play = false)
                 }) { Text("确定") }
             },
-            dismissButton = { TextButton(onClick = { bvDialog = null }) { Text("取消") } },
+            dismissButton = { TextButton(onClick = { bvDialog = false }) { Text("取消") } },
         )
     }
 
@@ -306,31 +472,6 @@ fun LibraryScreen(
                 }) { Text("确定") }
             },
             dismissButton = { TextButton(onClick = { namingFolder = false }) { Text("取消") } },
-        )
-    }
-
-    moveChoices?.let { choices ->
-        AlertDialog(
-            onDismissRequest = { moveChoices = null },
-            title = { Text("移动到") },
-            text = {
-                LazyColumn(Modifier.heightIn(max = 420.dp)) {
-                    items(choices, key = { it.id ?: -1L }) { choice ->
-                        Text(
-                            choice.label,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    moveChoices = null
-                                    viewModel.moveSelection(choice.id)
-                                }
-                                .padding(vertical = 12.dp),
-                        )
-                    }
-                }
-            },
-            confirmButton = {},
-            dismissButton = { TextButton(onClick = { moveChoices = null }) { Text("取消") } },
         )
     }
 
@@ -388,6 +529,15 @@ fun LibraryScreen(
     }
 }
 
+@Composable
+private fun ItemName(name: String, expanded: Boolean) {
+    Text(
+        name,
+        maxLines = if (expanded) Int.MAX_VALUE else 1,
+        overflow = if (expanded) TextOverflow.Clip else TextOverflow.Ellipsis,
+    )
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun FolderRow(
@@ -396,12 +546,27 @@ private fun FolderRow(
     selecting: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
-    onMove: () -> Unit,
+    onCache: (() -> Unit)?,
     onDelete: () -> Unit,
 ) {
     var menu by remember { mutableStateOf(false) }
+    val work = folder.asmrSourceId != null
+    if (work) {
+        WorkPreviewRow(
+            folder = folder,
+            selected = selected,
+            selecting = selecting,
+            menu = menu,
+            onMenu = { menu = it },
+            onClick = onClick,
+            onLongClick = onLongClick,
+            onCache = onCache,
+            onDelete = onDelete,
+        )
+        return
+    }
     ListItem(
-        headlineContent = { Text(folder.name) },
+        headlineContent = { ItemName(folder.name, selected) },
         supportingContent = { Text("文件夹") },
         leadingContent = {
             if (selecting) {
@@ -416,7 +581,9 @@ private fun FolderRow(
                     Icon(Icons.Default.MoreVert, contentDescription = "更多")
                 }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    DropdownMenuItem(text = { Text("移动到…") }, onClick = { menu = false; onMove() })
+                    if (onCache != null) {
+                        DropdownMenuItem(text = { Text("缓存到本地") }, onClick = { menu = false; onCache() })
+                    }
                     DropdownMenuItem(text = { Text("从音频库移除") }, onClick = { menu = false; onDelete() })
                 }
             }
@@ -434,24 +601,99 @@ private fun FolderRow(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
+private fun WorkPreviewRow(
+    folder: FolderEntity,
+    selected: Boolean,
+    selecting: Boolean,
+    menu: Boolean,
+    onMenu: (Boolean) -> Unit,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    onCache: (() -> Unit)?,
+    onDelete: () -> Unit,
+) {
+    val facts = WorkFacts.fromJson(folder.workMeta) ?: WorkFacts(
+        title = folder.name,
+        circle = "",
+        vas = emptyList(),
+        tags = emptyList(),
+        release = "",
+        sourceId = folder.asmrSourceId.orEmpty(),
+    )
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .then(
+                if (selected) Modifier.background(MaterialTheme.colorScheme.secondaryContainer) else Modifier,
+            )
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick),
+        verticalAlignment = if (selected) Alignment.Top else Alignment.CenterVertically,
+    ) {
+        if (selecting) {
+            Checkbox(
+                checked = selected,
+                onCheckedChange = { onClick() },
+                modifier = Modifier.padding(start = 8.dp),
+            )
+        }
+        WorkFactsBlock(
+            facts = facts,
+            coverUrl = folder.coverUri,
+            singleLine = true,
+            expandTitle = selected,
+            showCover = !selecting,
+            modifier = Modifier.weight(1f),
+        )
+        if (!selecting) {
+            Box {
+                IconButton(onClick = { onMenu(true) }) {
+                    Icon(Icons.Default.MoreVert, contentDescription = "更多")
+                }
+                DropdownMenu(expanded = menu, onDismissRequest = { onMenu(false) }) {
+                    if (onCache != null) {
+                        DropdownMenuItem(text = { Text("缓存到本地") }, onClick = { onMenu(false); onCache() })
+                    }
+                    DropdownMenuItem(text = { Text("从音频库移除") }, onClick = { onMenu(false); onDelete() })
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
 private fun TrackRow(
     track: TrackEntity,
+    hasSubtitle: Boolean,
     selected: Boolean,
     selecting: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     onAppend: () -> Unit,
     onPlayNext: () -> Unit,
-    onMove: () -> Unit,
+    onDownload: (() -> Unit)?,
     onDelete: () -> Unit,
 ) {
     var menu by remember { mutableStateOf(false) }
     ListItem(
-        headlineContent = { Text(track.title) },
+        headlineContent = { ItemName(track.title, selected) },
         supportingContent = {
-            val source = if (track.source == TrackSource.BILIBILI) "B站" else "本地"
+            val source = when (track.source) {
+                TrackSource.BILIBILI -> "B站"
+                TrackSource.ASMR -> "asmr.one"
+                TrackSource.DLSITE -> "DLsite"
+                TrackSource.LOCAL -> "本地"
+            }
             val artist = track.artist?.takeIf { it.isNotBlank() } ?: source
-            Text("$artist · $source · ${formatDuration(track.durationMs)}")
+            val downloaded = (track.source == TrackSource.ASMR || track.source == TrackSource.DLSITE) &&
+                track.localUri?.startsWith("/") == true
+            val mark = if (downloaded) " · 已下载" else ""
+            val subtitle = if (hasSubtitle) " · 有字幕" else ""
+            Text(
+                "$artist · $source · ${formatDuration(track.durationMs)}$mark$subtitle",
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         },
         leadingContent = {
             if (selecting) {
@@ -468,7 +710,9 @@ private fun TrackRow(
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     DropdownMenuItem(text = { Text("下一个播放") }, onClick = { menu = false; onPlayNext() })
                     DropdownMenuItem(text = { Text("加入当前列表末尾") }, onClick = { menu = false; onAppend() })
-                    DropdownMenuItem(text = { Text("移动到…") }, onClick = { menu = false; onMove() })
+                    if (onDownload != null) {
+                        DropdownMenuItem(text = { Text("下载") }, onClick = { menu = false; onDownload() })
+                    }
                     DropdownMenuItem(text = { Text("从音频库移除") }, onClick = { menu = false; onDelete() })
                 }
             }
@@ -481,6 +725,39 @@ private fun TrackRow(
         } else {
             androidx.compose.material3.ListItemDefaults.colors()
         },
+    )
+}
+
+@Composable
+private fun FileRow(
+    file: LibraryFileEntity,
+    onClick: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    var menu by remember { mutableStateOf(false) }
+    val icon = when (file.kind) {
+        FileKind.IMAGE -> Icons.Default.Image
+        FileKind.TEXT -> Icons.Default.Description
+        FileKind.OTHER -> Icons.AutoMirrored.Filled.InsertDriveFile
+    }
+    val label = when (file.kind) {
+        FileKind.IMAGE -> "图片"
+        FileKind.TEXT -> "文本"
+        FileKind.OTHER -> "文件"
+    }
+    ListItem(
+        headlineContent = { Text(file.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        supportingContent = { Text(label) },
+        leadingContent = { Icon(icon, contentDescription = null) },
+        trailingContent = {
+            IconButton(onClick = { menu = true }) {
+                Icon(Icons.Default.MoreVert, contentDescription = "更多")
+            }
+            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                DropdownMenuItem(text = { Text("从音频库移除") }, onClick = { menu = false; onDelete() })
+            }
+        },
+        modifier = Modifier.clickable(onClick = onClick),
     )
 }
 

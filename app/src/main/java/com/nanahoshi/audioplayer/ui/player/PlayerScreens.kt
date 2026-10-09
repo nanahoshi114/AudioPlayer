@@ -1,10 +1,13 @@
 package com.nanahoshi.audioplayer.ui.player
 
 import android.app.Application
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -37,11 +40,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
@@ -50,14 +52,17 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nanahoshi.audioplayer.graph
 import com.nanahoshi.audioplayer.playback.PlayerUiState
+import com.nanahoshi.audioplayer.playback.SubtitleCue
+import com.nanahoshi.audioplayer.playback.textAt
 import com.nanahoshi.audioplayer.ui.CoverImage
 import com.nanahoshi.audioplayer.ui.EmptyHint
 import com.nanahoshi.audioplayer.ui.formatDuration
-import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.isActive
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
 
@@ -66,12 +71,25 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     val state = graph.player.state
     val queue = graph.library.observeQueue()
     val client = graph.player
+    var subtitleCues by mutableStateOf<List<SubtitleCue>>(emptyList())
+        private set
 
     init {
         viewModelScope.launch {
             while (isActive) {
                 client.publishNow()
                 delay(400)
+            }
+        }
+        viewModelScope.launch {
+            client.state.map { it.queueItemId }.distinctUntilChanged().collectLatest { queueItemId ->
+                subtitleCues = emptyList()
+                if (queueItemId <= 0L) return@collectLatest
+                val row = graph.library.queueSnapshot().find { it.queueItemId == queueItemId } ?: return@collectLatest
+                val trackId = row.trackId ?: return@collectLatest
+                val track = graph.library.track(trackId) ?: return@collectLatest
+                val cues = graph.subtitles.cuesFor(track)
+                if (client.state.value.queueItemId == queueItemId) subtitleCues = cues
             }
         }
     }
@@ -109,31 +127,20 @@ fun NowPlayingScreen(onBack: () -> Unit, viewModel: PlayerViewModel = viewModel(
     var sleepDialog by remember { mutableStateOf(false) }
     var queueExpanded by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
-    val scope = rememberCoroutineScope()
-    val expandAfter = with(LocalDensity.current) { 48.dp.toPx() }.toInt()
     val reorderState = rememberReorderableLazyListState(listState) { from, to ->
         viewModel.client.move(from.index, to.index)
     }
-    LaunchedEffect(queueExpanded) {
-        if (queueExpanded) return@LaunchedEffect
-        snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
-            .distinctUntilChanged()
-            .collect { (index, offset) ->
-                if (index > 0 || offset > expandAfter) queueExpanded = true
-            }
-    }
+    val subtitleScroll = rememberScrollState()
+    val subtitle = viewModel.subtitleCues.textAt(state.positionMs)
+    LaunchedEffect(subtitle) { subtitleScroll.scrollTo(0) }
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
             }
             if (queueExpanded) {
-                TextButton(onClick = {
-                    scope.launch {
-                        listState.scrollToItem(0)
-                        queueExpanded = false
-                    }
-                }) { Text("恢复") }
+                TextButton(onClick = { viewModel.client.clearQueue() }) { Text("清空") }
+                TextButton(onClick = { queueExpanded = false }) { Text("恢复") }
             }
         }
         if (!state.hasMedia) {
@@ -144,6 +151,18 @@ fun NowPlayingScreen(onBack: () -> Unit, viewModel: PlayerViewModel = viewModel(
             CoverImage(state.coverUri, Modifier.size(160.dp).align(Alignment.CenterHorizontally))
             Text(state.title, style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(top = 16.dp))
             Text(state.artist, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Box(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (subtitle.isNotEmpty()) {
+                    Text(
+                        subtitle,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth().verticalScroll(subtitleScroll),
+                    )
+                }
+            }
             SeekBar(state, onSeek = viewModel.client::seekTo)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
                 IconButton(onClick = viewModel.client::previous) {
@@ -173,21 +192,9 @@ fun NowPlayingScreen(onBack: () -> Unit, viewModel: PlayerViewModel = viewModel(
                     },
                 )
             }
-        }
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("当前播放列表", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f).padding(vertical = 8.dp))
-            TextButton(onClick = {
-                if (queueExpanded) {
-                    scope.launch {
-                        listState.scrollToItem(0)
-                        queueExpanded = false
-                    }
-                } else {
-                    queueExpanded = true
-                }
-            }) { Text(if (queueExpanded) "恢复" else "全屏") }
-        }
-        LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+            TextButton(onClick = { queueExpanded = true }) { Text("播放列表") }
+        } else {
+        LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth()) {
             itemsIndexed(queue, key = { _, item -> item.queueItemId }) { index, item ->
                 ReorderableItem(reorderState, key = item.queueItemId) {
                     val current = item.queueItemId == state.queueItemId
@@ -215,6 +222,7 @@ fun NowPlayingScreen(onBack: () -> Unit, viewModel: PlayerViewModel = viewModel(
                     )
                 }
             }
+        }
         }
     }
 }

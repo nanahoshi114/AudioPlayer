@@ -2,6 +2,7 @@ package com.nanahoshi.audioplayer.bilibili
 
 import com.nanahoshi.audioplayer.data.CredentialStore
 import com.nanahoshi.audioplayer.data.toHttps
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -10,6 +11,8 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import android.util.Log
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import org.json.JSONArray
+import org.json.JSONObject
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
@@ -123,6 +126,91 @@ class BilibiliClient(
         }
         val hasMore = response.data?.hasMore == true || medias.size >= PAGE_SIZE
         return FavVideoPage(videos, hasMore)
+    }
+
+    suspend fun subtitleDocument(bvid: String, cid: Long): String? = try {
+        val root = playerInfo(bvid, cid)
+        if (root.optInt("code") != 0) {
+            Log.w(TAG, "subtitle skipped code=${root.optInt("code")}")
+            null
+        } else {
+            val data = root.optJSONObject("data")
+            val returnedBvid = data?.optString("bvid").orEmpty()
+            val returnedCid = data?.optLong("cid") ?: 0L
+            if ((returnedBvid.isNotBlank() && returnedBvid != bvid) || (returnedCid != 0L && returnedCid != cid)) {
+                Log.w(TAG, "subtitle skipped mismatched bvid=$returnedBvid cid=$returnedCid")
+                null
+            } else {
+                val list = data?.optJSONObject("subtitle")?.optJSONArray("subtitles")
+                val url = pickSubtitleUrl(list)
+                if (url == null) {
+                    null
+                } else {
+                    get(url, referer = "https://www.bilibili.com/video/$bvid")
+                }
+            }
+        }
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: Exception) {
+        Log.w(TAG, "subtitle skipped: ${error.javaClass.simpleName}")
+        null
+    }
+
+    private suspend fun playerInfo(bvid: String, cid: Long): JSONObject {
+        var root = requestPlayerInfo(bvid, cid, refreshKey = false)
+        val code = root.optInt("code")
+        if (code == -403 || code == -400 || code == -412) {
+            root = requestPlayerInfo(bvid, cid, refreshKey = true)
+        }
+        return root
+    }
+
+    private suspend fun requestPlayerInfo(bvid: String, cid: Long, refreshKey: Boolean): JSONObject {
+        val signed = WbiSigner.sign(
+            mapOf(
+                "bvid" to bvid,
+                "cid" to cid.toString(),
+            ),
+            mixin(refreshKey),
+        )
+        val url = "https://api.bilibili.com/x/player/wbi/v2".toHttpUrl().newBuilder().apply {
+            signed.forEach { (key, value) -> addQueryParameter(key, value) }
+        }.build()
+        return JSONObject(get(url.toString(), referer = "https://www.bilibili.com/video/$bvid"))
+    }
+
+    private fun pickSubtitleUrl(list: JSONArray?): String? {
+        if (list == null || list.length() == 0) return null
+        var chosenUrl: String? = null
+        var chosenRank = Int.MAX_VALUE
+        for (index in 0 until list.length()) {
+            val item = list.optJSONObject(index) ?: continue
+            val url = item.optString("subtitle_url").let { raw ->
+                when {
+                    raw.startsWith("//") -> "https:$raw"
+                    raw.startsWith("http://") -> raw.replaceFirst("http://", "https://")
+                    raw.startsWith("https://") -> raw
+                    else -> ""
+                }
+            }
+            if (url.isBlank()) continue
+            val rank = subtitleLanguageRank(item.optString("lan"))
+            if (rank < chosenRank) {
+                chosenRank = rank
+                chosenUrl = url
+            }
+        }
+        return chosenUrl
+    }
+
+    private fun subtitleLanguageRank(language: String): Int {
+        val value = language.lowercase()
+        return when {
+            value.startsWith("zh") -> 0
+            "zh" in value -> 1
+            else -> 2
+        }
     }
 
     private fun requireSession() {

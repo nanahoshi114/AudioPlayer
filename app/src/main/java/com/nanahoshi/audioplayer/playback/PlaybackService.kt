@@ -30,7 +30,9 @@ class PlaybackService : MediaSessionService() {
         val graph = (application as AudioPlayerApplication).graph
         val exoPlayer = ExoPlayer.Builder(this)
             .setMediaSourceFactory(
-                DefaultMediaSourceFactory(BiliPlaybackDataSource.Factory(this, graph.bilibili)),
+                DefaultMediaSourceFactory(
+                    BiliPlaybackDataSource.Factory(this, graph.bilibili, graph.asmr, graph.dlsite, graph.db),
+                ),
             )
             .setAudioAttributes(AudioAttributes.DEFAULT, true)
             .setHandleAudioBecomingNoisy(true)
@@ -44,7 +46,7 @@ class PlaybackService : MediaSessionService() {
         val (rows, state) = restored
         if (rows.isNotEmpty()) {
             try {
-                val items = rows.map { it.toTrack().toPlayableItem(it.queueItemId) }
+                val items = rows.map { it.toMediaItem() }
                 val index = rows.indexOfFirst { it.queueItemId == state?.queueItemId }.coerceAtLeast(0)
                 exoPlayer.setMediaItems(items, index, state?.positionMs ?: 0L)
                 exoPlayer.prepare()
@@ -62,7 +64,10 @@ class PlaybackService : MediaSessionService() {
             override fun onPlayerError(error: PlaybackException) {
                 val item = exoPlayer.currentMediaItem ?: return
                 val uri = item.localConfiguration?.uri
-                if (uri?.scheme == "bilibili" && retriedMediaId != item.mediaId) {
+                val scheme = uri?.scheme
+                if ((scheme == "bilibili" || scheme == "asmr" || scheme == "dlsite" || scheme == "remote") &&
+                    retriedMediaId != item.mediaId
+                ) {
                     retriedMediaId = item.mediaId
                     val index = exoPlayer.currentMediaItemIndex
                     val position = exoPlayer.currentPosition.coerceAtLeast(0L)
@@ -107,7 +112,7 @@ class PlaybackService : MediaSessionService() {
         val detail = generateSequence<Throwable>(error) { it.cause }
             .mapNotNull { it.message?.trim() }
             .lastOrNull { it.isNotBlank() && !it.contains("Source error") && !it.startsWith("androidx.media3") }
-        return detail ?: "播放失败，请检查网络、BV 号或登录信息"
+        return detail ?: "播放失败，请检查网络或作品是否还能打开"
     }
 
     private fun saveProgress(exoPlayer: ExoPlayer) {

@@ -11,8 +11,14 @@ interface FolderDao {
     @Query("SELECT * FROM folders WHERE parentId IS :parentId ORDER BY position ASC, name ASC")
     fun observeChildren(parentId: Long?): Flow<List<FolderEntity>>
 
+    @Query("SELECT * FROM folders WHERE parentId IS :parentId ORDER BY position ASC, name ASC")
+    suspend fun childrenOf(parentId: Long?): List<FolderEntity>
+
     @Query("SELECT * FROM folders ORDER BY position ASC, name ASC")
     suspend fun all(): List<FolderEntity>
+
+    @Query("SELECT * FROM folders")
+    fun observeAll(): Flow<List<FolderEntity>>
 
     @Query("SELECT * FROM folders WHERE id = :id")
     suspend fun get(id: Long): FolderEntity?
@@ -22,6 +28,12 @@ interface FolderDao {
 
     @Query("SELECT COALESCE(MAX(position), -1) FROM folders WHERE parentId IS :parentId")
     suspend fun maxPosition(parentId: Long?): Int
+
+    @Query("SELECT * FROM folders WHERE asmrSourceId = :sourceId LIMIT 1")
+    suspend fun findBySourceId(sourceId: String): FolderEntity?
+
+    @Query("UPDATE folders SET workMeta = :workMeta WHERE id = :id")
+    suspend fun setWorkMeta(id: Long, workMeta: String)
 
     @Insert
     suspend fun insert(folder: FolderEntity): Long
@@ -67,6 +79,87 @@ interface TrackDao {
 
     @Query("UPDATE tracks SET folderId = :folderId WHERE id = :id")
     suspend fun setFolder(id: Long, folderId: Long?)
+
+    @Query("SELECT * FROM tracks WHERE asmrWorkId = :workId AND fileHash = :hash LIMIT 1")
+    suspend fun findAsmr(workId: Long, hash: String): TrackEntity?
+
+    @Query("UPDATE tracks SET remoteUrl = :url WHERE id = :id")
+    suspend fun updateRemoteUrl(id: Long, url: String)
+
+    @Query("UPDATE tracks SET localUri = :path WHERE id = :id")
+    suspend fun updateLocalUri(id: Long, path: String)
+}
+
+@Dao
+interface LibraryFileDao {
+    @Query("SELECT * FROM library_files WHERE folderId IS :folderId")
+    fun observeIn(folderId: Long?): Flow<List<LibraryFileEntity>>
+
+    @Query("SELECT * FROM library_files WHERE folderId IS :folderId")
+    suspend fun listIn(folderId: Long?): List<LibraryFileEntity>
+
+    @Query("SELECT * FROM library_files")
+    fun observeAll(): Flow<List<LibraryFileEntity>>
+
+    @Query("SELECT * FROM library_files WHERE id = :id")
+    suspend fun get(id: Long): LibraryFileEntity?
+
+    @Query("SELECT * FROM library_files WHERE asmrWorkId = :workId AND fileHash = :hash LIMIT 1")
+    suspend fun findAsmr(workId: Long, hash: String): LibraryFileEntity?
+
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insert(file: LibraryFileEntity): Long
+
+    @Query("DELETE FROM library_files WHERE id = :id")
+    suspend fun delete(id: Long)
+}
+
+@Dao
+interface DownloadDao {
+    @Query("SELECT * FROM downloads ORDER BY id DESC")
+    fun observe(): Flow<List<DownloadEntity>>
+
+    @Query("SELECT * FROM downloads WHERE status = 'QUEUED' ORDER BY id ASC LIMIT 1")
+    suspend fun nextQueued(): DownloadEntity?
+
+    @Query("SELECT * FROM downloads WHERE trackId = :trackId AND status IN ('QUEUED', 'RUNNING') LIMIT 1")
+    suspend fun activeForTrack(trackId: Long): DownloadEntity?
+
+    @Query("SELECT * FROM downloads WHERE remoteUrl = :url AND status IN ('QUEUED', 'RUNNING') LIMIT 1")
+    suspend fun activeForUrl(url: String): DownloadEntity?
+
+    @Query("SELECT * FROM downloads WHERE status = 'DONE' AND source = :source AND workKey = :workKey")
+    suspend fun finishedForWork(source: String, workKey: String): List<DownloadEntity>
+
+    @Query(
+        "SELECT * FROM downloads WHERE source = :source AND workKey = :workKey AND fileKey = :fileKey " +
+            "AND status IN ('QUEUED', 'RUNNING') LIMIT 1",
+    )
+    suspend fun activeForFile(source: String, workKey: String, fileKey: String): DownloadEntity?
+
+    @Query("UPDATE downloads SET localPath = :path WHERE id = :id")
+    suspend fun setLocalPath(id: Long, path: String)
+
+    @Insert
+    suspend fun insert(item: DownloadEntity): Long
+
+    @Query("UPDATE downloads SET status = 'RUNNING' WHERE id = :id")
+    suspend fun markRunning(id: Long)
+
+    @Query("UPDATE downloads SET bytesDone = :done, bytesTotal = :total WHERE id = :id")
+    suspend fun progress(id: Long, done: Long, total: Long)
+
+    @Query("UPDATE downloads SET status = 'DONE', bytesDone = :done, bytesTotal = :total, error = NULL WHERE id = :id")
+    suspend fun finish(id: Long, done: Long, total: Long)
+
+    @Query("UPDATE downloads SET status = 'FAILED', error = :error WHERE id = :id")
+    suspend fun fail(id: Long, error: String)
+
+    @Query("UPDATE downloads SET status = 'FAILED', error = :error WHERE status IN ('QUEUED', 'RUNNING')")
+    suspend fun failActive(error: String)
+
+    @Query("UPDATE downloads SET status = 'QUEUED', bytesDone = 0, bytesTotal = 0, error = NULL WHERE id = :id")
+    suspend fun requeue(id: Long)
 }
 
 @Dao
@@ -141,11 +234,17 @@ interface QueueDao {
     @Query(
         """
         SELECT queue_items.id AS queueItemId, queue_items.position AS position,
-            tracks.id AS trackId, tracks.source AS source, tracks.title AS title,
-            tracks.artist AS artist, tracks.durationMs AS durationMs, tracks.coverUri AS coverUri,
-            tracks.localUri AS localUri, tracks.bvid AS bvid, tracks.cid AS cid, tracks.page AS page
+            tracks.id AS trackId,
+            COALESCE(tracks.source, queue_items.source) AS source,
+            COALESCE(tracks.title, queue_items.title, '') AS title,
+            COALESCE(tracks.artist, queue_items.artist) AS artist,
+            COALESCE(tracks.durationMs, 0) AS durationMs,
+            COALESCE(tracks.coverUri, queue_items.coverUri) AS coverUri,
+            tracks.localUri AS localUri, tracks.bvid AS bvid, tracks.cid AS cid, tracks.page AS page,
+            queue_items.remoteUrl AS remoteUrl, queue_items.referer AS referer,
+            queue_items.workno AS workno, queue_items.fileKey AS fileKey
         FROM queue_items
-        INNER JOIN tracks ON tracks.id = queue_items.trackId
+        LEFT JOIN tracks ON tracks.id = queue_items.trackId
         ORDER BY queue_items.position ASC
         """,
     )
@@ -154,11 +253,17 @@ interface QueueDao {
     @Query(
         """
         SELECT queue_items.id AS queueItemId, queue_items.position AS position,
-            tracks.id AS trackId, tracks.source AS source, tracks.title AS title,
-            tracks.artist AS artist, tracks.durationMs AS durationMs, tracks.coverUri AS coverUri,
-            tracks.localUri AS localUri, tracks.bvid AS bvid, tracks.cid AS cid, tracks.page AS page
+            tracks.id AS trackId,
+            COALESCE(tracks.source, queue_items.source) AS source,
+            COALESCE(tracks.title, queue_items.title, '') AS title,
+            COALESCE(tracks.artist, queue_items.artist) AS artist,
+            COALESCE(tracks.durationMs, 0) AS durationMs,
+            COALESCE(tracks.coverUri, queue_items.coverUri) AS coverUri,
+            tracks.localUri AS localUri, tracks.bvid AS bvid, tracks.cid AS cid, tracks.page AS page,
+            queue_items.remoteUrl AS remoteUrl, queue_items.referer AS referer,
+            queue_items.workno AS workno, queue_items.fileKey AS fileKey
         FROM queue_items
-        INNER JOIN tracks ON tracks.id = queue_items.trackId
+        LEFT JOIN tracks ON tracks.id = queue_items.trackId
         ORDER BY queue_items.position ASC
         """,
     )

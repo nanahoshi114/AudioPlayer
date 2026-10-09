@@ -3,9 +3,11 @@ package com.nanahoshi.audioplayer.ui.playlist
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.nanahoshi.audioplayer.data.sortedForLibrary
 import com.nanahoshi.audioplayer.graph
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.launch
 
@@ -14,8 +16,16 @@ class PlaylistViewModel(app: Application) : AndroidViewModel(app) {
     private val graph = app.graph()
     val playlists = graph.library.observePlaylists()
     private val pickerFolderId = MutableStateFlow<Long?>(null)
-    val pickerFolders = pickerFolderId.flatMapLatest { graph.library.observeChildFolders(it) }
-    val pickerTracks = pickerFolderId.flatMapLatest { graph.library.observeTracksIn(it) }
+    val pickerFolders = pickerFolderId.flatMapLatest { id ->
+        combine(graph.library.observeChildFolders(id), graph.librarySort.sort) { folders, sort ->
+            folders.sortedForLibrary(sort)
+        }
+    }
+    val pickerTracks = pickerFolderId.flatMapLatest { id ->
+        combine(graph.library.observeTracksIn(id), graph.librarySort.sort) { tracks, sort ->
+            tracks.sortedForLibrary(sort)
+        }
+    }
     val pickerFolder = pickerFolderId.flatMapLatest { id ->
         if (id == null) kotlinx.coroutines.flow.flowOf(null) else graph.library.observeFolder(id)
     }
@@ -68,6 +78,14 @@ class PlaylistViewModel(app: Application) : AndroidViewModel(app) {
     fun playReplacing(playlistId: Long) {
         viewModelScope.launch {
             graph.player.replaceAndPlay(graph.library.playlistTracks(playlistId))
+        }
+    }
+
+    fun playFrom(playlistId: Long, index: Int) {
+        viewModelScope.launch {
+            val tracks = graph.library.playlistTracks(playlistId)
+            if (tracks.isEmpty()) return@launch
+            graph.player.replaceAndPlay(tracks, index)
         }
     }
 

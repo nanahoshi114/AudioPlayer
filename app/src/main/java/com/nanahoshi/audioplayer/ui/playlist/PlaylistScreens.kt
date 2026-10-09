@@ -149,11 +149,12 @@ fun PlaylistDetailScreen(
             EmptyHint("这个列表还是空的。")
         } else {
             LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-                itemsIndexed(rows, key = { _, row -> row.itemId }) { _, row ->
+                itemsIndexed(rows, key = { _, row -> row.itemId }) { index, row ->
                     ReorderableItem(reorderState, key = row.itemId) {
                         PlaylistTrackRow(
                             row = row,
                             handleModifier = Modifier.draggableHandle(),
+                            onClick = { viewModel.playFrom(playlistId, index) },
                             onDelete = { viewModel.removeItem(playlistId, row.itemId) },
                         )
                     }
@@ -191,10 +192,13 @@ fun PlaylistDetailScreen(
                         }
                     }
                     items(pickerFolders, key = { "folder-${it.id}" }) { folder ->
+                        val work = folder.asmrSourceId != null
                         ListItem(
                             headlineContent = { Text(folder.name) },
-                            supportingContent = { Text("文件夹") },
-                            leadingContent = { Icon(Icons.Default.Folder, contentDescription = null) },
+                            supportingContent = { Text(if (work) "作品" else "文件夹") },
+                            leadingContent = {
+                                if (work) CoverImage(folder.coverUri) else Icon(Icons.Default.Folder, contentDescription = null)
+                            },
                             modifier = Modifier.clickable { viewModel.openPickerFolder(folder.id) },
                         )
                     }
@@ -232,11 +236,13 @@ fun PlaylistDetailScreen(
 private fun PlaylistTrackRow(
     row: PlaylistTrack,
     handleModifier: Modifier,
+    onClick: () -> Unit,
     onDelete: () -> Unit,
 ) {
     ListItem(
         headlineContent = { Text(row.title) },
         supportingContent = { Text(row.artist?.ifBlank { null } ?: formatDuration(row.durationMs)) },
+        modifier = Modifier.clickable(onClick = onClick),
         leadingContent = {
             Icon(Icons.Default.DragHandle, contentDescription = "拖动排序", modifier = handleModifier)
         },

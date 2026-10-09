@@ -28,6 +28,21 @@ class CredentialStore(context: Context) {
 
     fun hasCookie(): Boolean = cookie() != null
 
+    fun dlsiteCookie(): String? = secretPrefs.getString(KEY_DLSITE_COOKIE, null)?.takeIf { it.isNotBlank() }
+
+    fun saveDlsiteCookie(raw: String) {
+        val value = raw.trim()
+        if (value.isEmpty()) {
+            clearDlsiteCookie()
+        } else {
+            secretPrefs.edit().putString(KEY_DLSITE_COOKIE, value).apply()
+        }
+    }
+
+    fun clearDlsiteCookie() {
+        secretPrefs.edit().remove(KEY_DLSITE_COOKIE).apply()
+    }
+
     fun buvid3(): String = plainPrefs.getString(KEY_BUVID, null).orEmpty()
 
     fun buvid4(): String = plainPrefs.getString(KEY_BUVID4, null).orEmpty()
@@ -107,6 +122,7 @@ class CredentialStore(context: Context) {
     private companion object {
         const val SECRET_FILE = "bili_secret_prefs"
         const val KEY_COOKIE = "bili_cookie"
+        const val KEY_DLSITE_COOKIE = "dlsite_cookie"
         const val KEY_BUVID = "buvid3"
         const val KEY_BUVID4 = "buvid4"
         const val KEY_TICKET = "bili_ticket"
