@@ -20,6 +20,12 @@ enum class DownloadStatus {
     FAILED,
 }
 
+object TranslateMark {
+    const val RUNNING = "RUNNING"
+    const val FAILED = "FAILED"
+    const val DONE = "DONE"
+}
+
 @Entity(
     tableName = "folders",
     foreignKeys = [
@@ -45,6 +51,7 @@ data class FolderEntity(
     val asmrSourceId: String? = null,
     val coverUri: String? = null,
     val workMeta: String? = null,
+    val contentSource: String? = null,
 )
 
 @Entity(
@@ -255,3 +262,32 @@ data class PlaylistTrack(
         addedAt = 0,
     )
 }
+
+@Entity(tableName = "whisper_jobs")
+data class WhisperJobEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val title: String,
+    val fingerprint: String,
+    val trackId: Long?,
+    val localPath: String?,
+    val remoteJobId: String?,
+    val status: DownloadStatus,
+    val progress: Float,
+    val error: String?,
+    val awaitRemoteUrl: String?,
+    val endpoint: String? = null,
+    val translatedAt: Long? = null,
+    val translateStatus: String? = null,
+    val skipTranslate: Boolean? = null,
+)
+
+@Entity(tableName = "translation_jobs")
+data class TranslationJobEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val title: String,
+    val trackId: Long?,
+    val remoteUrl: String?,
+    val queueItemId: Long?,
+    val status: DownloadStatus,
+    val error: String?,
+)

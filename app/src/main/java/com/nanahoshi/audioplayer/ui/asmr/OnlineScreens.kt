@@ -6,6 +6,8 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,6 +17,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.layout.size
@@ -29,6 +32,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
+import androidx.compose.material.icons.automirrored.outlined.HelpOutline
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
@@ -80,6 +84,7 @@ import com.nanahoshi.audioplayer.dlsite.DlsiteClient
 import com.nanahoshi.audioplayer.asmr.AsmrCatalogItem
 import com.nanahoshi.audioplayer.asmr.AsmrNode
 import com.nanahoshi.audioplayer.asmr.AsmrWork
+import com.nanahoshi.audioplayer.asmr.CatalogLookup
 import com.nanahoshi.audioplayer.asmr.WorkFacts
 import com.nanahoshi.audioplayer.data.LibrarySort
 import com.nanahoshi.audioplayer.data.TrackSource
@@ -105,6 +110,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
@@ -167,7 +173,7 @@ data class OnlineHit(
     val release: String,
     val coverUrl: String?,
     val fromAsmr: Boolean = true,
-    val alsoOnDlsite: Boolean = false,
+    val asmrMissing: Boolean = false,
 ) {
     fun facts() = WorkFacts(title, circle, vas, tags, release, sourceId)
 }
@@ -306,39 +312,28 @@ class OnlineSearchViewModel(app: Application) : AndroidViewModel(app) {
                     asmrHasMore = false
                 }
                 if (dlsitePage != null) {
-                    dlsiteHasMore = dlsitePage.works.isNotEmpty() && dlsitePage.works.size >= 20 &&
-                        (nextPage * 20) < dlsitePage.total
+                    dlsiteHasMore = dlsitePage.fetched >= 20 && (nextPage * 20) < dlsitePage.total
                 } else if (dlsiteResult != null) {
                     dlsiteHasMore = false
                 }
                 val merged = linkedMapOf<String, OnlineHit>()
                 if (!reset) works.forEach { merged[dedupeKey(it.sourceId)] = it }
                 asmrPage?.works?.forEach { item ->
+                    if (item.isStub()) return@forEach
                     val key = dedupeKey(item.sourceId)
                     val existing = merged[key]
                     if (existing == null || !existing.fromAsmr) {
-                        merged[key] = item.toHit().copy(alsoOnDlsite = existing != null)
+                        merged[key] = item.toHit()
                     }
                 }
                 dlsitePage?.works?.forEach { item ->
                     val key = dedupeKey(item.workno)
                     val existing = merged[key]
-                    if (existing == null) {
-                        merged[key] = OnlineHit(
-                            item.workno,
-                            item.title,
-                            item.circle,
-                            emptyList(),
-                            emptyList(),
-                            "",
-                            item.coverUrl,
-                            fromAsmr = false,
-                        )
-                    } else {
-                        merged[key] = existing.copy(alsoOnDlsite = true)
+                    if (existing == null || !existing.fromAsmr) {
+                        merged[key] = item.toHit()
                     }
                 }
-                works = merged.values.toList()
+                works = markListed(merged.values.toList())
                 page = nextPage
                 if (works.isEmpty()) {
                     error = asmrResult?.exceptionOrNull()?.message
@@ -357,11 +352,33 @@ class OnlineSearchViewModel(app: Application) : AndroidViewModel(app) {
         job = next
     }
 
+    private suspend fun markListed(hits: List<OnlineHit>): List<OnlineHit> {
+        if (hits.all { it.fromAsmr }) return hits
+        val checked = coroutineScope {
+            hits.map { hit ->
+                async {
+                    if (hit.fromAsmr) return@async hit
+                    when (val lookup = graph.asmr.lookupCatalog(hit.sourceId)) {
+                        is CatalogLookup.Found -> if (lookup.item.isStub()) hit else lookup.item.toHit()
+                        CatalogLookup.Missing -> hit.copy(asmrMissing = true)
+                        CatalogLookup.Unknown -> hit
+                    }
+                }
+            }.awaitAll()
+        }
+        val seen = linkedSetOf<String>()
+        return checked.filter { seen.add(dedupeKey(it.sourceId)) }
+    }
+
     private fun creatorKeyword(): String = pieces
         .filter { it.kind == PieceKind.VA || it.kind == PieceKind.CIRCLE }
         .joinToString(" ") { it.name }
 
-    private fun dedupeKey(sourceId: String) = com.nanahoshi.audioplayer.dlsite.DlsiteClient.canonicalWorkno(sourceId)
+    private fun dedupeKey(sourceId: String): String {
+        val canonical = com.nanahoshi.audioplayer.dlsite.DlsiteClient.canonicalWorkno(sourceId)
+        val digits = canonical.filter { it.isDigit() }
+        return if (digits.isNotEmpty() && canonical.all { it.isDigit() }) "RJ$digits" else canonical
+    }
 }
 
 enum class WorkFileSource {
@@ -978,7 +995,7 @@ fun OnlineSearchScreen(
                         facts = item.facts(),
                         coverUrl = item.coverUrl,
                         singleLine = true,
-                        footnote = if (item.alsoOnDlsite) "DLsite 也有" else null,
+                        footnote = if (item.asmrMissing) "asmr.one未收录" else null,
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable { if (item.sourceId.isNotBlank()) onOpenWork(item.sourceId) }
@@ -1588,6 +1605,45 @@ class MineViewModel(app: Application) : AndroidViewModel(app) {
     var error by mutableStateOf<String?>(null)
         private set
     val biliSaved = graph.credentials.cookie().orEmpty()
+    var whisperBase by mutableStateOf(graph.credentials.whisperBaseUrl().orEmpty())
+    var whisperToken by mutableStateOf(graph.credentials.whisperToken().orEmpty())
+    var whisperSaved by mutableStateOf(graph.credentials.hasWhisper())
+        private set
+    var translateBase by mutableStateOf(graph.credentials.translateBaseUrl().orEmpty())
+    var translateToken by mutableStateOf(graph.credentials.translateToken().orEmpty())
+    var translateModel by mutableStateOf(graph.credentials.translateModel().orEmpty())
+    var translateSaved by mutableStateOf(graph.credentials.hasTranslate())
+        private set
+
+    fun saveWhisper() {
+        graph.credentials.saveWhisper(whisperBase, whisperToken)
+        whisperBase = graph.credentials.whisperBaseUrl().orEmpty()
+        whisperToken = graph.credentials.whisperToken().orEmpty()
+        whisperSaved = graph.credentials.hasWhisper()
+    }
+
+    fun clearWhisper() {
+        graph.credentials.clearWhisper()
+        whisperBase = ""
+        whisperToken = ""
+        whisperSaved = false
+    }
+
+    fun saveTranslate() {
+        graph.credentials.saveTranslate(translateBase, translateToken, translateModel)
+        translateBase = graph.credentials.translateBaseUrl().orEmpty()
+        translateToken = graph.credentials.translateToken().orEmpty()
+        translateModel = graph.credentials.translateModel().orEmpty()
+        translateSaved = graph.credentials.hasTranslate()
+    }
+
+    fun clearTranslate() {
+        graph.credentials.clearTranslate()
+        translateBase = ""
+        translateToken = ""
+        translateModel = ""
+        translateSaved = false
+    }
 
     fun login() {
         viewModelScope.launch {
@@ -1667,6 +1723,14 @@ fun MineScreen(
 ) {
     var biliText by remember { mutableStateOf(viewModel.biliSaved) }
     var biliSavedHint by remember { mutableStateOf(viewModel.biliSaved.isNotBlank()) }
+    var whisperHelp by remember { mutableStateOf(false) }
+    var translateHelp by remember { mutableStateOf(false) }
+    if (whisperHelp) {
+        WhisperHelpDialog(onDismiss = { whisperHelp = false })
+    }
+    if (translateHelp) {
+        TranslateHelpDialog(onDismiss = { translateHelp = false })
+    }
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         item(key = "dlsite") {
             Text("DLsite", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
@@ -1749,10 +1813,172 @@ fun MineScreen(
             }
             Button(
                 onClick = onOpenFavorites,
-                modifier = Modifier.padding(top = 16.dp, bottom = 24.dp),
+                modifier = Modifier.padding(top = 16.dp),
             ) { Text("查看收藏夹") }
         }
+        item(key = "whisper") {
+            Row(
+                Modifier.padding(top = 20.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("听写", style = MaterialTheme.typography.titleMedium)
+                IconButton(onClick = { whisperHelp = true }) {
+                    Icon(Icons.AutoMirrored.Outlined.HelpOutline, contentDescription = "听写说明")
+                }
+            }
+            OutlinedTextField(
+                value = viewModel.whisperBase,
+                onValueChange = { viewModel.whisperBase = it },
+                label = { Text("地址") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = viewModel.whisperToken,
+                onValueChange = { viewModel.whisperToken = it },
+                label = { Text("口令") },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            )
+            Button(
+                onClick = viewModel::saveWhisper,
+                modifier = Modifier.padding(top = 8.dp),
+            ) { Text("保存") }
+            TextButton(onClick = viewModel::clearWhisper) { Text("清除") }
+            if (viewModel.whisperSaved) {
+                Text("已保存", modifier = Modifier.padding(top = 8.dp))
+            }
+        }
+        item(key = "translate") {
+            Row(
+                Modifier.padding(top = 20.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("翻译", style = MaterialTheme.typography.titleMedium)
+                IconButton(onClick = { translateHelp = true }) {
+                    Icon(Icons.AutoMirrored.Outlined.HelpOutline, contentDescription = "翻译说明")
+                }
+            }
+            OutlinedTextField(
+                value = viewModel.translateBase,
+                onValueChange = { viewModel.translateBase = it },
+                label = { Text("地址") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = viewModel.translateToken,
+                onValueChange = { viewModel.translateToken = it },
+                label = { Text("口令") },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            )
+            OutlinedTextField(
+                value = viewModel.translateModel,
+                onValueChange = { viewModel.translateModel = it },
+                label = { Text("模型名") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            )
+            Button(
+                onClick = viewModel::saveTranslate,
+                modifier = Modifier.padding(top = 8.dp),
+            ) { Text("保存") }
+            TextButton(onClick = viewModel::clearTranslate) { Text("清除") }
+            if (viewModel.translateSaved) {
+                Text("已保存", modifier = Modifier.padding(top = 8.dp))
+            }
+            Box(Modifier.padding(bottom = 24.dp))
+        }
     }
+}
+
+@Composable
+private fun WhisperHelpDialog(onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("听写") },
+        text = {
+            Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
+                Text("本地部署", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "应用不发送模型名。服务加载 faster-whisper，或其他遵循同一接口的 Whisper 模型即可，例如各尺寸的 Whisper 与 Kotoba-Whisper。",
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                Text(
+                    "地址填写服务基址，包含协议和端口，不要以 /v1 结尾，末尾也不要加斜杠。例如 http://192.168.1.20:8765。口令填写在下方，请求时通过 Authorization 发送。语言固定为日语。",
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                Text(
+                    "接口以 docs/whisper-api.md 为准。应用将音频提交到 POST /jobs，用 GET /jobs/{id} 查询进度，用 GET /jobs/{id}/cues 读取字幕。地址若以 /v1 结尾，则不会使用这套接口。",
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                Text(
+                    "线上模型",
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.padding(top = 16.dp),
+                )
+                Text(
+                    "地址以 /v1 结尾时走线上接口，例如 https://api.openai.com/v1。应用固定使用模型名 whisper-1，语言为日语，并要求返回带分段时间的结果。",
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                Text(
+                    "线上接口不能在应用内更换模型名。服务若不接受 whisper-1，听写会失败。音频超过 25MB 不会上传。单次请求会等待转写结束，最长 10 分钟。返回内容必须包含每个分段的开始时间、结束时间和文本。",
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        },
+    )
+}
+
+@Composable
+private fun TranslateHelpDialog(onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("翻译") },
+        text = {
+            Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
+                Text("本地部署", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "本地与线上使用同一套接口，只支持通用大模型。服务需提供 OpenAI 兼容的对话接口。Ollama 默认提供该接口。",
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                Text(
+                    "模型名必须与服务中已加载的名称一致，应用会原样发送。",
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                Text(
+                    "地址填写服务基址。未以 /v1 结尾时，保存后会自动补上，末尾斜杠会被去掉。不要写到 /chat/completions。例如 http://192.168.1.20:11434。口令不能为空，请求时通过 Authorization 发送；服务不校验口令时，填写任意非空内容即可。",
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                Text(
+                    "应用请求 POST {基址}/chat/completions。选择「生成字幕和翻译」时，听写完成后会自动把日文译成简体中文。只选择「生成字幕」时不会请求翻译。",
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                Text(
+                    "线上模型",
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.padding(top = 16.dp),
+                )
+                Text(
+                    "地址同样填写到 /v1，例如 https://api.openai.com/v1，或服务商提供的兼容地址。模型名填写该服务商的对话模型名称。",
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                Text(
+                    "只把日语字幕译成简体中文。每批最多 40 句，超出部分会分成多次请求并按顺序发送。每一行必须是「编号|译文」，编号从 1 连续排到本批句数，不能缺行、空行或附加说明。任一批格式不符，整次翻译失败，已完成的批次不会保存。单次请求最长等待 3 分钟。模型若仍进行思考，可能超过该时限而失败。",
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        },
+    )
 }
 
 @Composable
@@ -1805,6 +2031,23 @@ private fun Context.onMeteredNetwork(): Boolean {
     val caps = manager.getNetworkCapabilities(network) ?: return true
     return !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
 }
+
+private fun AsmrCatalogItem.isStub(): Boolean {
+    val id = com.nanahoshi.audioplayer.dlsite.DlsiteClient.canonicalWorkno(sourceId)
+    val titleIsId = title.isBlank() || com.nanahoshi.audioplayer.dlsite.DlsiteClient.canonicalWorkno(title) == id
+    return titleIsId && circle.isBlank() && vas.isEmpty() && tags.isEmpty() && release.isBlank()
+}
+
+private fun com.nanahoshi.audioplayer.dlsite.DlsiteHit.toHit() = OnlineHit(
+    sourceId = workno,
+    title = title,
+    circle = circle,
+    vas = vas,
+    tags = tags,
+    release = release,
+    coverUrl = coverUrl,
+    fromAsmr = false,
+)
 
 private fun AsmrCatalogItem.toHit() = OnlineHit(
     sourceId = sourceId,

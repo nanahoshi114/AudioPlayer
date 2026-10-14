@@ -10,6 +10,8 @@ import com.nanahoshi.audioplayer.dlsite.RemotePreview
 import com.nanahoshi.audioplayer.data.CredentialStore
 import com.nanahoshi.audioplayer.data.DownloadCenter
 import com.nanahoshi.audioplayer.data.LibraryPreferences
+import com.nanahoshi.audioplayer.data.TranslateCenter
+import com.nanahoshi.audioplayer.data.WhisperCenter
 import com.nanahoshi.audioplayer.data.LibraryRepository
 import com.nanahoshi.audioplayer.data.db.AppDatabase
 import com.nanahoshi.audioplayer.playback.PlayerClient
@@ -29,6 +31,8 @@ class AppGraph(app: Application) {
     val library = LibraryRepository(app, db, bilibili, asmr, dlsite)
     val downloads = DownloadCenter(app, db, asmr, dlsite)
     val subtitles = SubtitleSource(app, db, bilibili, asmr)
+    val translator = TranslateCenter(app, db, credentials, subtitles)
+    val whisper = WhisperCenter(app, db, credentials, downloads, translator)
     val player = PlayerClient(app, library)
 }
 

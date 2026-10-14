@@ -45,8 +45,10 @@ class DownloadStatusConverter {
         PlaybackStateEntity::class,
         LibraryFileEntity::class,
         DownloadEntity::class,
+        WhisperJobEntity::class,
+        TranslationJobEntity::class,
     ],
-    version = 6,
+    version = 11,
     exportSchema = false,
 )
 @TypeConverters(TrackSourceConverter::class, FileKindConverter::class, DownloadStatusConverter::class)
@@ -57,11 +59,24 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun queue(): QueueDao
     abstract fun files(): LibraryFileDao
     abstract fun downloads(): DownloadDao
+    abstract fun whisper(): WhisperDao
+    abstract fun translations(): TranslationDao
 
     companion object {
         fun create(context: Context): AppDatabase =
             Room.databaseBuilder(context, AppDatabase::class.java, "audio_player.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                .addMigrations(
+                    MIGRATION_1_2,
+                    MIGRATION_2_3,
+                    MIGRATION_3_4,
+                    MIGRATION_4_5,
+                    MIGRATION_5_6,
+                    MIGRATION_6_7,
+                    MIGRATION_7_8,
+                    MIGRATION_8_9,
+                    MIGRATION_9_10,
+                    MIGRATION_10_11,
+                )
                 .build()
 
         private val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -178,6 +193,65 @@ abstract class AppDatabase : RoomDatabase() {
                 connection.execSQL(
                     "CREATE INDEX IF NOT EXISTS `index_queue_items_trackId` ON `queue_items` (`trackId`)",
                 )
+            }
+        }
+
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("ALTER TABLE `folders` ADD COLUMN `contentSource` TEXT")
+            }
+        }
+
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `whisper_jobs` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `title` TEXT NOT NULL,
+                        `fingerprint` TEXT NOT NULL,
+                        `trackId` INTEGER,
+                        `localPath` TEXT,
+                        `remoteJobId` TEXT,
+                        `status` TEXT NOT NULL,
+                        `progress` REAL NOT NULL,
+                        `error` TEXT,
+                        `awaitRemoteUrl` TEXT
+                    )
+                    """.trimIndent(),
+                )
+            }
+        }
+
+        private val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("ALTER TABLE `whisper_jobs` ADD COLUMN `endpoint` TEXT")
+                connection.execSQL("ALTER TABLE `whisper_jobs` ADD COLUMN `translatedAt` INTEGER")
+            }
+        }
+
+        private val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("ALTER TABLE `whisper_jobs` ADD COLUMN `translateStatus` TEXT")
+                connection.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `translation_jobs` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `title` TEXT NOT NULL,
+                        `trackId` INTEGER,
+                        `remoteUrl` TEXT,
+                        `queueItemId` INTEGER,
+                        `status` TEXT NOT NULL,
+                        `error` TEXT
+                    )
+                    """.trimIndent(),
+                )
+            }
+        }
+
+        private val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("ALTER TABLE `whisper_jobs` ADD COLUMN `skipTranslate` INTEGER")
             }
         }
     }

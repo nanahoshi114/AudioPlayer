@@ -89,6 +89,8 @@ fun LibraryScreen(
     val playlists by viewModel.playlists.collectAsStateWithLifecycle(emptyList())
     val currentFolder by viewModel.currentFolder.collectAsStateWithLifecycle(null)
     val folderId by viewModel.currentFolderId.collectAsStateWithLifecycle()
+    val workFileSource by viewModel.workFileSource.collectAsStateWithLifecycle()
+    val workSources by viewModel.workSources.collectAsStateWithLifecycle()
     val busy by viewModel.busy.collectAsStateWithLifecycle()
     val pending by viewModel.pendingBili.collectAsStateWithLifecycle()
     val selectedTracks by viewModel.selectedTrackIds.collectAsStateWithLifecycle()
@@ -162,6 +164,7 @@ fun LibraryScreen(
                 TextButton(onClick = viewModel::playNextSelection) { Text("下一个播放") }
                 TextButton(onClick = viewModel::appendSelection) { Text("加到末尾") }
                 TextButton(onClick = viewModel::downloadSelection) { Text("下载") }
+                TextButton(onClick = viewModel::deleteDownloadedSelection) { Text("删除已下载的文件") }
                 TextButton(onClick = {
                     if (playlists.isEmpty()) {
                         viewModel.note("请先新建播放列表")
@@ -243,7 +246,7 @@ fun LibraryScreen(
             }
         } else {
             val listState = viewModel.listState(folderId, listing.browsing)
-            key(if (listing.browsing) "folder:${folderId ?: "root"}" else "flat") {
+            key(if (listing.browsing) "folder:${folderId ?: "root"}:${workFileSource ?: ""}" else "flat") {
             LazyColumn(topInset.fillMaxSize(), state = listState) {
                 if (listing.browsing && currentFolder != null) {
                     item(key = "up") {
@@ -279,6 +282,25 @@ fun LibraryScreen(
                             Button(onClick = { onOpenWork(workFolder.asmrSourceId.orEmpty()) }) {
                                 Text("详情页")
                             }
+                        }
+                    }
+                }
+                if (workSources && listing.browsing) {
+                    item(key = "work-source") {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            FilterChip(
+                                selected = workFileSource == TrackSource.DLSITE,
+                                onClick = { viewModel.useWorkSource(TrackSource.DLSITE) },
+                                label = { Text("DLSite Play") },
+                            )
+                            FilterChip(
+                                selected = workFileSource == TrackSource.ASMR,
+                                onClick = { viewModel.useWorkSource(TrackSource.ASMR) },
+                                label = { Text("asmr.one") },
+                            )
                         }
                     }
                 }
@@ -328,6 +350,11 @@ fun LibraryScreen(
                                 onPlayNext = { viewModel.playNext(track) },
                                 onDownload = if (track.source == TrackSource.ASMR || track.source == TrackSource.DLSITE) {
                                     { viewModel.downloadTrack(track) }
+                                } else {
+                                    null
+                                },
+                                onDeleteDownloaded = if (track.source == TrackSource.ASMR || track.source == TrackSource.DLSITE) {
+                                    { viewModel.deleteDownloadedTrack(track) }
                                 } else {
                                     null
                                 },
@@ -672,9 +699,12 @@ private fun TrackRow(
     onAppend: () -> Unit,
     onPlayNext: () -> Unit,
     onDownload: (() -> Unit)?,
+    onDeleteDownloaded: (() -> Unit)?,
     onDelete: () -> Unit,
 ) {
     var menu by remember { mutableStateOf(false) }
+    val downloaded = (track.source == TrackSource.ASMR || track.source == TrackSource.DLSITE) &&
+        track.localUri?.startsWith("/") == true
     ListItem(
         headlineContent = { ItemName(track.title, selected) },
         supportingContent = {
@@ -685,8 +715,6 @@ private fun TrackRow(
                 TrackSource.LOCAL -> "本地"
             }
             val artist = track.artist?.takeIf { it.isNotBlank() } ?: source
-            val downloaded = (track.source == TrackSource.ASMR || track.source == TrackSource.DLSITE) &&
-                track.localUri?.startsWith("/") == true
             val mark = if (downloaded) " · 已下载" else ""
             val subtitle = if (hasSubtitle) " · 有字幕" else ""
             Text(
@@ -710,8 +738,14 @@ private fun TrackRow(
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     DropdownMenuItem(text = { Text("下一个播放") }, onClick = { menu = false; onPlayNext() })
                     DropdownMenuItem(text = { Text("加入当前列表末尾") }, onClick = { menu = false; onAppend() })
-                    if (onDownload != null) {
+                    if (!downloaded && onDownload != null) {
                         DropdownMenuItem(text = { Text("下载") }, onClick = { menu = false; onDownload() })
+                    }
+                    if (downloaded && onDeleteDownloaded != null) {
+                        DropdownMenuItem(
+                            text = { Text("删除已下载的文件") },
+                            onClick = { menu = false; onDeleteDownloaded() },
+                        )
                     }
                     DropdownMenuItem(text = { Text("从音频库移除") }, onClick = { menu = false; onDelete() })
                 }

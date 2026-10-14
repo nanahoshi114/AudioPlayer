@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import com.nanahoshi.audioplayer.data.TrackSource
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -34,6 +35,9 @@ interface FolderDao {
 
     @Query("UPDATE folders SET workMeta = :workMeta WHERE id = :id")
     suspend fun setWorkMeta(id: Long, workMeta: String)
+
+    @Query("UPDATE folders SET contentSource = :source WHERE id = :id")
+    suspend fun setContentSource(id: Long, source: String)
 
     @Insert
     suspend fun insert(folder: FolderEntity): Long
@@ -83,11 +87,17 @@ interface TrackDao {
     @Query("SELECT * FROM tracks WHERE asmrWorkId = :workId AND fileHash = :hash LIMIT 1")
     suspend fun findAsmr(workId: Long, hash: String): TrackEntity?
 
+    @Query("SELECT COUNT(*) FROM tracks WHERE asmrWorkId = :workId AND source = :source")
+    suspend fun countByWorkSource(workId: Long, source: TrackSource): Int
+
     @Query("UPDATE tracks SET remoteUrl = :url WHERE id = :id")
     suspend fun updateRemoteUrl(id: Long, url: String)
 
     @Query("UPDATE tracks SET localUri = :path WHERE id = :id")
     suspend fun updateLocalUri(id: Long, path: String)
+
+    @Query("UPDATE tracks SET localUri = NULL WHERE id = :id")
+    suspend fun clearLocalUri(id: Long)
 }
 
 @Dao
@@ -106,6 +116,9 @@ interface LibraryFileDao {
 
     @Query("SELECT * FROM library_files WHERE asmrWorkId = :workId AND fileHash = :hash LIMIT 1")
     suspend fun findAsmr(workId: Long, hash: String): LibraryFileEntity?
+
+    @Query("SELECT * FROM library_files WHERE asmrWorkId = :workId")
+    suspend fun forWork(workId: Long): List<LibraryFileEntity>
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insert(file: LibraryFileEntity): Long
@@ -160,6 +173,223 @@ interface DownloadDao {
 
     @Query("UPDATE downloads SET status = 'QUEUED', bytesDone = 0, bytesTotal = 0, error = NULL WHERE id = :id")
     suspend fun requeue(id: Long)
+
+    @Query("DELETE FROM downloads WHERE trackId = :trackId AND status = 'DONE'")
+    suspend fun deleteFinishedForTrack(trackId: Long)
+
+    @Query("SELECT * FROM downloads WHERE trackId = :trackId ORDER BY id DESC LIMIT 1")
+    suspend fun latestForTrack(trackId: Long): DownloadEntity?
+
+    @Query("SELECT * FROM downloads WHERE remoteUrl = :url ORDER BY id DESC LIMIT 1")
+    suspend fun latestForUrl(url: String): DownloadEntity?
+}
+
+@Dao
+interface WhisperDao {
+    @Query("SELECT * FROM whisper_jobs ORDER BY id DESC")
+    fun observe(): Flow<List<WhisperJobEntity>>
+
+    @Query("SELECT * FROM whisper_jobs WHERE id = :id")
+    suspend fun get(id: Long): WhisperJobEntity?
+
+    @Query("SELECT * FROM whisper_jobs WHERE fingerprint = :fingerprint ORDER BY id ASC")
+    suspend fun forFingerprint(fingerprint: String): List<WhisperJobEntity>
+
+    @Query("SELECT * FROM whisper_jobs WHERE trackId = :trackId AND status IN ('QUEUED', 'RUNNING') LIMIT 1")
+    suspend fun activeForTrack(trackId: Long): WhisperJobEntity?
+
+    @Query("SELECT * FROM whisper_jobs WHERE awaitRemoteUrl = :url AND status IN ('QUEUED', 'RUNNING') LIMIT 1")
+    suspend fun activeForUrl(url: String): WhisperJobEntity?
+
+    @Query("SELECT * FROM whisper_jobs WHERE status = 'QUEUED' AND fingerprint = '' ORDER BY id ASC")
+    suspend fun waitingForFile(): List<WhisperJobEntity>
+
+    @Query(
+        """
+        SELECT * FROM whisper_jobs
+        WHERE status IN ('QUEUED', 'RUNNING') AND fingerprint != '' AND localPath IS NOT NULL
+        ORDER BY CASE status WHEN 'RUNNING' THEN 0 ELSE 1 END, id ASC
+        LIMIT 1
+        """,
+    )
+    suspend fun nextUploadable(): WhisperJobEntity?
+
+    @Query("SELECT * FROM whisper_jobs WHERE status = 'DONE' AND trackId = :trackId")
+    suspend fun doneForTrack(trackId: Long): List<WhisperJobEntity>
+
+    @Query("SELECT * FROM whisper_jobs WHERE status = 'DONE' AND awaitRemoteUrl = :url")
+    suspend fun doneForUrl(url: String): List<WhisperJobEntity>
+
+    @Query("SELECT * FROM whisper_jobs WHERE status = 'DONE' AND localPath = :path")
+    suspend fun doneForPath(path: String): List<WhisperJobEntity>
+
+    @Query("DELETE FROM whisper_jobs WHERE status = 'DONE' AND fingerprint = :fingerprint")
+    suspend fun deleteDoneForFingerprint(fingerprint: String)
+
+    @Query("DELETE FROM whisper_jobs WHERE status = 'DONE' AND trackId = :trackId")
+    suspend fun deleteDoneForTrack(trackId: Long)
+
+    @Query("DELETE FROM whisper_jobs WHERE status = 'DONE' AND awaitRemoteUrl = :url")
+    suspend fun deleteDoneForUrl(url: String)
+
+    @Query("DELETE FROM whisper_jobs WHERE status = 'DONE' AND localPath = :path")
+    suspend fun deleteDoneForPath(path: String)
+
+    @Query("SELECT * FROM whisper_jobs WHERE status = 'DONE' AND trackId = :trackId ORDER BY id DESC LIMIT 1")
+    suspend fun latestDoneForTrack(trackId: Long): WhisperJobEntity?
+
+    @Query("SELECT * FROM whisper_jobs WHERE status = 'DONE' AND localPath = :path ORDER BY id DESC LIMIT 1")
+    suspend fun latestDoneForPath(path: String): WhisperJobEntity?
+
+    @Query("SELECT * FROM whisper_jobs WHERE status = 'DONE' AND awaitRemoteUrl = :url ORDER BY id DESC LIMIT 1")
+    suspend fun latestDoneForUrl(url: String): WhisperJobEntity?
+
+    @Insert
+    suspend fun insert(job: WhisperJobEntity): Long
+
+    @Query("UPDATE whisper_jobs SET status = 'RUNNING', progress = :progress, error = NULL, translateStatus = NULL WHERE id = :id")
+    suspend fun markRunning(id: Long, progress: Float)
+
+    @Query(
+        """
+        UPDATE whisper_jobs
+        SET status = 'RUNNING', progress = :progress, error = NULL, translateStatus = NULL
+        WHERE id = :id AND status IN ('QUEUED', 'RUNNING')
+        """,
+    )
+    suspend fun markRunningIfActive(id: Long, progress: Float): Int
+
+    @Query("UPDATE whisper_jobs SET progress = :progress WHERE id = :id")
+    suspend fun setProgress(id: Long, progress: Float)
+
+    @Query("UPDATE whisper_jobs SET remoteJobId = :remoteId WHERE id = :id")
+    suspend fun setRemoteId(id: Long, remoteId: String)
+
+    @Query("UPDATE whisper_jobs SET fingerprint = :fingerprint, localPath = :path WHERE id = :id")
+    suspend fun attachFile(id: Long, fingerprint: String, path: String)
+
+    @Query("UPDATE whisper_jobs SET status = 'DONE', progress = 1, error = NULL, translateStatus = NULL WHERE id = :id")
+    suspend fun finish(id: Long)
+
+    @Query(
+        """
+        UPDATE whisper_jobs
+        SET status = 'DONE', progress = 1, error = NULL, translateStatus = NULL
+        WHERE id = :id AND status IN ('QUEUED', 'RUNNING')
+        """,
+    )
+    suspend fun finishIfActive(id: Long): Int
+
+    @Query("UPDATE whisper_jobs SET status = 'DONE', progress = 1, error = NULL, translateStatus = 'RUNNING' WHERE id = :id")
+    suspend fun markTranslating(id: Long)
+
+    @Query(
+        """
+        UPDATE whisper_jobs
+        SET status = 'DONE', progress = 1, error = NULL, translateStatus = 'RUNNING'
+        WHERE id = :id AND status IN ('QUEUED', 'RUNNING')
+        """,
+    )
+    suspend fun markTranslatingIfActive(id: Long): Int
+
+    @Query("UPDATE whisper_jobs SET status = 'DONE', progress = 1, error = NULL, translateStatus = 'DONE', translatedAt = :at WHERE id = :id")
+    suspend fun markTranslated(id: Long, at: Long)
+
+    @Query(
+        """
+        UPDATE whisper_jobs
+        SET status = 'DONE', progress = 1, error = NULL, translateStatus = 'DONE', translatedAt = :at
+        WHERE id = :id AND translateStatus = 'RUNNING'
+        """,
+    )
+    suspend fun markTranslatedIfRunning(id: Long, at: Long): Int
+
+    @Query("UPDATE whisper_jobs SET status = 'DONE', progress = 1, error = :error, translateStatus = 'FAILED' WHERE id = :id")
+    suspend fun markTranslateFailed(id: Long, error: String)
+
+    @Query("UPDATE whisper_jobs SET translatedAt = :at WHERE id = :id")
+    suspend fun setTranslatedAt(id: Long, at: Long)
+
+    @Query("UPDATE whisper_jobs SET status = 'FAILED', error = :error WHERE id = :id")
+    suspend fun fail(id: Long, error: String)
+
+    @Query(
+        """
+        UPDATE whisper_jobs
+        SET title = :title, fingerprint = :fingerprint, trackId = :trackId, localPath = :path,
+            awaitRemoteUrl = :url, endpoint = :endpoint, skipTranslate = :skipTranslate,
+            status = 'QUEUED', remoteJobId = NULL, progress = 0, error = NULL, translateStatus = NULL
+        WHERE id = :id
+        """,
+    )
+    suspend fun requeueWithFile(
+        id: Long,
+        title: String,
+        fingerprint: String,
+        trackId: Long?,
+        path: String,
+        url: String?,
+        endpoint: String?,
+        skipTranslate: Boolean?,
+    )
+
+    @Query(
+        """
+        UPDATE whisper_jobs
+        SET status = 'QUEUED', fingerprint = '', localPath = NULL, remoteJobId = NULL, progress = 0, error = NULL,
+            translateStatus = NULL
+        WHERE id = :id
+        """,
+    )
+    suspend fun requeueForDownload(id: Long)
+}
+
+@Dao
+interface TranslationDao {
+    @Query("SELECT * FROM translation_jobs ORDER BY id DESC")
+    fun observe(): Flow<List<TranslationJobEntity>>
+
+    @Query("SELECT * FROM translation_jobs WHERE trackId = :trackId ORDER BY id DESC LIMIT 1")
+    suspend fun latestForTrack(trackId: Long): TranslationJobEntity?
+
+    @Query("SELECT * FROM translation_jobs WHERE remoteUrl = :url ORDER BY id DESC LIMIT 1")
+    suspend fun latestForUrl(url: String): TranslationJobEntity?
+
+    @Query("SELECT * FROM translation_jobs WHERE queueItemId = :queueItemId ORDER BY id DESC LIMIT 1")
+    suspend fun latestForQueue(queueItemId: Long): TranslationJobEntity?
+
+    @Query("SELECT * FROM translation_jobs WHERE id = :id")
+    suspend fun get(id: Long): TranslationJobEntity?
+
+    @Insert
+    suspend fun insert(job: TranslationJobEntity): Long
+
+    @Query("UPDATE translation_jobs SET status = 'RUNNING', title = :title, error = NULL WHERE id = :id")
+    suspend fun markRunning(id: Long, title: String)
+
+    @Query("UPDATE translation_jobs SET status = 'DONE', error = NULL WHERE id = :id")
+    suspend fun finish(id: Long)
+
+    @Query(
+        """
+        UPDATE translation_jobs
+        SET status = 'DONE', error = NULL
+        WHERE id = :id AND status IN ('QUEUED', 'RUNNING')
+        """,
+    )
+    suspend fun finishIfActive(id: Long): Int
+
+    @Query("UPDATE translation_jobs SET status = 'FAILED', error = :error WHERE id = :id")
+    suspend fun fail(id: Long, error: String)
+
+    @Query("DELETE FROM translation_jobs WHERE trackId = :trackId")
+    suspend fun deleteForTrack(trackId: Long)
+
+    @Query("DELETE FROM translation_jobs WHERE remoteUrl = :url")
+    suspend fun deleteForUrl(url: String)
+
+    @Query("DELETE FROM translation_jobs WHERE queueItemId = :queueItemId")
+    suspend fun deleteForQueue(queueItemId: Long)
 }
 
 @Dao

@@ -43,6 +43,67 @@ class CredentialStore(context: Context) {
         secretPrefs.edit().remove(KEY_DLSITE_COOKIE).apply()
     }
 
+    fun whisperBaseUrl(): String? = normalizeWhisperBase(plainPrefs.getString(KEY_WHISPER_BASE, null))
+
+    fun whisperToken(): String? = secretPrefs.getString(KEY_WHISPER_TOKEN, null)?.trim()?.takeIf { it.isNotEmpty() }
+
+    fun hasWhisper(): Boolean = whisperBaseUrl() != null && whisperToken() != null
+
+    fun saveWhisper(baseUrl: String, token: String) {
+        val base = normalizeWhisperBase(baseUrl)
+        if (base == null) {
+            plainPrefs.edit().remove(KEY_WHISPER_BASE).apply()
+        } else {
+            plainPrefs.edit().putString(KEY_WHISPER_BASE, base).apply()
+        }
+        val secret = token.trim()
+        if (secret.isEmpty()) {
+            secretPrefs.edit().remove(KEY_WHISPER_TOKEN).apply()
+        } else {
+            secretPrefs.edit().putString(KEY_WHISPER_TOKEN, secret).apply()
+        }
+    }
+
+    fun clearWhisper() {
+        plainPrefs.edit().remove(KEY_WHISPER_BASE).apply()
+        secretPrefs.edit().remove(KEY_WHISPER_TOKEN).apply()
+    }
+
+    fun translateBaseUrl(): String? = normalizeTranslateBase(plainPrefs.getString(KEY_TRANSLATE_BASE, null))
+
+    fun translateToken(): String? = secretPrefs.getString(KEY_TRANSLATE_TOKEN, null)?.trim()?.takeIf { it.isNotEmpty() }
+
+    fun translateModel(): String? = plainPrefs.getString(KEY_TRANSLATE_MODEL, null)?.trim()?.takeIf { it.isNotEmpty() }
+
+    fun hasTranslate(): Boolean =
+        translateBaseUrl() != null && translateToken() != null && translateModel() != null
+
+    fun saveTranslate(baseUrl: String, token: String, model: String) {
+        val base = normalizeTranslateBase(baseUrl)
+        if (base == null) {
+            plainPrefs.edit().remove(KEY_TRANSLATE_BASE).apply()
+        } else {
+            plainPrefs.edit().putString(KEY_TRANSLATE_BASE, base).apply()
+        }
+        val secret = token.trim()
+        if (secret.isEmpty()) {
+            secretPrefs.edit().remove(KEY_TRANSLATE_TOKEN).apply()
+        } else {
+            secretPrefs.edit().putString(KEY_TRANSLATE_TOKEN, secret).apply()
+        }
+        val name = model.trim()
+        if (name.isEmpty()) {
+            plainPrefs.edit().remove(KEY_TRANSLATE_MODEL).apply()
+        } else {
+            plainPrefs.edit().putString(KEY_TRANSLATE_MODEL, name).apply()
+        }
+    }
+
+    fun clearTranslate() {
+        plainPrefs.edit().remove(KEY_TRANSLATE_BASE).remove(KEY_TRANSLATE_MODEL).apply()
+        secretPrefs.edit().remove(KEY_TRANSLATE_TOKEN).apply()
+    }
+
     fun buvid3(): String = plainPrefs.getString(KEY_BUVID, null).orEmpty()
 
     fun buvid4(): String = plainPrefs.getString(KEY_BUVID4, null).orEmpty()
@@ -123,7 +184,22 @@ class CredentialStore(context: Context) {
         const val SECRET_FILE = "bili_secret_prefs"
         const val KEY_COOKIE = "bili_cookie"
         const val KEY_DLSITE_COOKIE = "dlsite_cookie"
+        const val KEY_WHISPER_BASE = "whisper_base_url"
+        const val KEY_WHISPER_TOKEN = "whisper_token"
+        const val KEY_TRANSLATE_BASE = "translate_base_url"
+        const val KEY_TRANSLATE_TOKEN = "translate_token"
+        const val KEY_TRANSLATE_MODEL = "translate_model"
         const val KEY_BUVID = "buvid3"
+
+        fun normalizeWhisperBase(raw: String?): String? {
+            val value = raw?.trim()?.trimEnd('/')?.takeIf { it.isNotEmpty() } ?: return null
+            return value
+        }
+
+        fun normalizeTranslateBase(raw: String?): String? {
+            val value = raw?.trim()?.trimEnd('/')?.takeIf { it.isNotEmpty() } ?: return null
+            return if (value.endsWith("/v1")) value else "$value/v1"
+        }
         const val KEY_BUVID4 = "buvid4"
         const val KEY_TICKET = "bili_ticket"
         const val KEY_TICKET_EXPIRES = "bili_ticket_expires"

@@ -1,5 +1,6 @@
 package com.nanahoshi.audioplayer.asmr
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -14,6 +15,12 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 class AsmrException(message: String) : Exception(message)
+
+sealed class CatalogLookup {
+    data class Found(val item: AsmrCatalogItem) : CatalogLookup()
+    data object Missing : CatalogLookup()
+    data object Unknown : CatalogLookup()
+}
 
 data class AsmrPreview(
     val sourceId: String,
@@ -149,6 +156,21 @@ class AsmrClient {
         val path = "/api/search/$encoded?order=$order&sort=$sort&page=$page&pageSize=$PAGE_SIZE" +
             "&subtitle=$subtitle&includeTranslationWorks=true"
         parsePage(get(path))
+    }
+
+    suspend fun lookupCatalog(input: String): CatalogLookup = withContext(Dispatchers.IO) {
+        try {
+            CatalogLookup.Found(workInfo(input).toCatalog())
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: AsmrException) {
+            when (error.message) {
+                "未找到该作品", "RJ 号不正确" -> CatalogLookup.Missing
+                else -> CatalogLookup.Unknown
+            }
+        } catch (_: Exception) {
+            CatalogLookup.Unknown
+        }
     }
 
     private fun workInfo(input: String): WorkInfo {

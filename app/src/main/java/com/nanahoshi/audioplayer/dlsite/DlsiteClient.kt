@@ -9,6 +9,9 @@ import com.nanahoshi.audioplayer.data.isAsmrAudio
 import com.nanahoshi.audioplayer.data.previewKind
 import com.nanahoshi.audioplayer.data.toHttps
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import okhttp3.Cookie
 import okhttp3.CookieJar
@@ -32,11 +35,16 @@ data class DlsiteHit(
     val title: String,
     val circle: String,
     val coverUrl: String?,
+    val vas: List<String> = emptyList(),
+    val tags: List<String> = emptyList(),
+    val release: String = "",
+    val workType: String = "",
 )
 
 data class DlsitePage(
     val works: List<DlsiteHit>,
     val total: Int,
+    val fetched: Int = works.size,
 )
 
 data class DlsiteShowcase(
@@ -99,7 +107,7 @@ class DlsiteClient(private val credentials: CredentialStore) {
         if (allAges) parts += "age_category[0]" to "general"
         genreIds.forEachIndexed { index, id -> parts += "genre[$index]" to id }
         parts += "order" to order
-        parts += "work_type_category[0]" to "movie_audio"
+        parts += "work_type" to "SOU"
         parts += "per_page" to PAGE_SIZE.toString()
         parts += "page" to page.toString()
         val path = parts.joinToString("/") { (key, value) -> "$key/${encode(value)}" }
@@ -107,7 +115,97 @@ class DlsiteClient(private val credentials: CredentialStore) {
         val root = JSONObject(body)
         val html = root.optString("search_result")
         val total = root.optJSONObject("page_info")?.optInt("count") ?: 0
-        DlsitePage(parseHits(html), total)
+        val parsed = parseHits(html)
+        val works = fillFromProducts(parsed.works)
+        DlsitePage(works, total, parsed.fetched)
+    }
+
+    private suspend fun fillFromProducts(hits: List<DlsiteHit>): List<DlsiteHit> {
+        if (hits.isEmpty()) return hits
+        val details = try {
+            productCards(hits.map { it.workno })
+        } catch (_: DlsiteException) {
+            emptyList()
+        }
+        if (details.isEmpty()) return hits
+        val byId = details.associateBy { canonicalWorkno(it.workno) }
+        return hits.mapNotNull { hit ->
+            val detail = byId[canonicalWorkno(hit.workno)] ?: return@mapNotNull hit
+            if (detail.workType.isNotBlank() && detail.workType != "SOU") return@mapNotNull null
+            detail.copy(
+                title = detail.title.ifBlank { hit.title },
+                circle = detail.circle.ifBlank { hit.circle },
+                coverUrl = detail.coverUrl ?: hit.coverUrl,
+                vas = detail.vas.ifEmpty { hit.vas },
+                tags = detail.tags.ifEmpty { hit.tags },
+                release = detail.release.ifBlank { hit.release },
+            )
+        }
+    }
+
+    private suspend fun productCards(worknos: List<String>): List<DlsiteHit> = coroutineScope {
+        val ids = worknos.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        ids.map { id ->
+            async {
+                try {
+                    resolveCard(id)
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    null
+                }
+            }
+        }.awaitAll().filterNotNull()
+    }
+
+    private fun resolveCard(workno: String): DlsiteHit? {
+        var blank: DlsiteHit? = null
+        for (id in worknoCandidates(workno)) {
+            val hit = try {
+                loadProductCards(listOf(id)).firstOrNull()
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                null
+            } ?: continue
+            if (hit.workType.isNotBlank() && hit.workType != "SOU") return hit
+            if (readable(hit)) return hit
+            if (blank == null) blank = hit
+        }
+        return pageCard(workno) ?: blank
+    }
+
+    private fun readable(hit: DlsiteHit): Boolean {
+        val titleIsId = hit.title.isBlank() || canonicalWorkno(hit.title) == canonicalWorkno(hit.workno)
+        return !titleIsId || hit.circle.isNotBlank()
+    }
+
+    private fun pageCard(workno: String): DlsiteHit? {
+        for (id in worknoCandidates(workno)) {
+            val html = workHtml("maniax", id)
+            if (html.isBlank()) continue
+            val title = titleOf(html)
+            val circle = circleOf(html)
+            val cover = galleryOf(html).firstOrNull()
+            if (title.isBlank() && circle.isBlank() && cover == null) continue
+            return DlsiteHit(
+                workno = workno.uppercase(),
+                title = title.ifBlank { workno.uppercase() },
+                circle = circle,
+                coverUrl = cover,
+            )
+        }
+        return null
+    }
+
+    private fun loadProductCards(worknos: List<String>): List<DlsiteHit> {
+        val joined = worknos.joinToString(",") { encode(it) }
+        val body = get(
+            "https://www.dlsite.com/maniax/api/=/product.json?workno=$joined&locale=zh_CN",
+            STORE_REFERER,
+            acceptJson = true,
+        )
+        return parseProductCards(body)
     }
 
     suspend fun showcase(input: String): DlsiteShowcase = withContext(Dispatchers.IO) {
@@ -530,9 +628,11 @@ class DlsiteClient(private val credentials: CredentialStore) {
         private val TOKEN = Regex("""name="_token"[^>]*value="([^"]+)"""")
         private val TOKEN_ALT = Regex("""value="([^"]+)"[^>]*name="_token"""")
         private val PRODUCT_ID = Regex("""data-(?:list_item_)?product_id="([^"]+)"""")
-        private val WORK_NAME = Regex("""class="work_name"[\s\S]*?<a[^>]*title="([^"]*)"""")
-        private val MAKER = Regex("""class="maker_name"[\s\S]*?<a[^>]*>([^<]*)</a>""")
         private val THUMB = Regex("""class="work_thumb[\s\S]*?(?:data-src|src)="([^"]+)"""")
+        private val WORK_TYPE = Regex("""\btype_([A-Z]{2,4})\b""")
+        private val CLASS_NAME = { name: String -> Regex("""class="[^"]*\b$name\b[^"]*"""") }
+        private val ANCHOR = Regex("""<a\b([^>]*)>([\s\S]*?)</a>""")
+        private val TITLE_ATTR = Regex("""\btitle="([^"]*)"""")
         private val MEDIA = Regex("""(?i)(?:https?:)?//[^"'\\\s>]+\.(?:mp3|m4a|aac|wav|ogg)(?:\?[^"'\\\s]*)?""")
         private val CHOBIT_EMBED = Regex("""(?i)(?:https?:)?//chobit\.cc/embed/[0-9A-Za-z]+/[0-9A-Za-z]+""")
         private val AUDIO_EXT = setOf("mp3", "m4a", "aac", "wav", "ogg")
@@ -602,18 +702,97 @@ class DlsiteClient(private val credentials: CredentialStore) {
             return map.entries.joinToString("; ") { "${it.key}=${it.value}" }
         }
 
-        private fun parseHits(html: String): List<DlsiteHit> {
-            val marks = PRODUCT_ID.findAll(html).toList()
-            return marks.mapIndexed { index, mark ->
-                val end = marks.getOrNull(index + 1)?.range?.first ?: html.length
-                val chunk = html.substring(mark.range.first, end)
-                val workno = mark.groupValues[1].uppercase()
-                val title = unescape(WORK_NAME.find(chunk)?.groupValues?.get(1).orEmpty()).ifBlank { workno }
-                val circle = unescape(MAKER.find(chunk)?.groupValues?.get(1).orEmpty())
-                val cover = THUMB.find(chunk)?.groupValues?.get(1).orEmpty().toHttps().ifBlank { null }
-                DlsiteHit(workno, title, circle, cover)
+        internal fun parseSearchCards(html: String): List<DlsiteHit> = parseHits(html).works
+
+        internal fun parseProductCards(body: String): List<DlsiteHit> {
+            val trimmed = body.trim()
+            if (trimmed.isEmpty() || trimmed == "[]") return emptyList()
+            val array = JSONArray(trimmed)
+            return buildList {
+                for (index in 0 until array.length()) {
+                    val item = array.optJSONObject(index) ?: continue
+                    val workno = item.optString("workno").ifBlank { item.optString("product_id") }.uppercase()
+                    if (workno.isBlank()) continue
+                    val makers = item.optJSONObject("creaters")
+                    val gallery = sampleImages(item)
+                    add(
+                        DlsiteHit(
+                            workno = workno,
+                            title = localized(item.opt("work_name")).ifBlank { workno },
+                            circle = localized(item.opt("maker_name")),
+                            coverUrl = gallery.firstOrNull(),
+                            vas = people(makers?.optJSONArray("voice_by")),
+                            tags = people(item.optJSONArray("genres")),
+                            release = item.optString("regist_date").substringBefore('T').substringBefore(' '),
+                            workType = item.optString("work_type"),
+                        ),
+                    )
+                }
             }
         }
+
+        private data class ParsedSearch(val works: List<DlsiteHit>, val fetched: Int)
+
+        private fun parseHits(html: String): ParsedSearch {
+            val marks = PRODUCT_ID.findAll(html).toList()
+            val works = marks.mapIndexedNotNull { index, mark ->
+                val start = html.lastIndexOf('<', mark.range.first).let { if (it < 0) mark.range.first else it }
+                val next = marks.getOrNull(index + 1)?.range?.first
+                val end = if (next == null) {
+                    html.length
+                } else {
+                    html.lastIndexOf('<', next).let { if (it <= start) next else it }
+                }
+                val chunk = html.substring(start, end)
+                if (!isVoiceCard(chunk)) return@mapIndexedNotNull null
+                val workno = mark.groupValues[1].uppercase()
+                val title = cardTitle(chunk).ifBlank { workno }
+                val circle = cardText(chunk, "maker_name", listOf("author", "work_price", "work_genre", "work_text"))
+                val vas = cardTexts(chunk, "author", listOf("work_price", "work_genre", "work_text"))
+                val cover = THUMB.find(chunk)?.groupValues?.get(1).orEmpty().toHttps().ifBlank { null }
+                DlsiteHit(workno, title, circle, cover, vas)
+            }
+            return ParsedSearch(works, marks.size)
+        }
+
+        private fun isVoiceCard(chunk: String): Boolean {
+            val types = WORK_TYPE.findAll(chunk).map { it.groupValues[1] }.toSet()
+            if (types.isEmpty()) return true
+            return "SOU" in types
+        }
+
+        private fun cardTitle(chunk: String): String {
+            val named = cardText(chunk, "work_name", listOf("maker_name", "author", "work_price", "work_text"))
+            if (named.isNotBlank()) return named
+            val alt = Regex("""<img\b[^>]*\balt="([^"]+)"""").find(chunk)?.groupValues?.get(1).orEmpty()
+            return unescape(alt)
+        }
+
+        private fun cardText(chunk: String, className: String, stops: List<String>): String =
+            classBlock(chunk, className, stops)?.let(::firstAnchor).orEmpty()
+
+        private fun cardTexts(chunk: String, className: String, stops: List<String>): List<String> =
+            classBlock(chunk, className, stops)?.let(::allAnchors).orEmpty()
+
+        private fun classBlock(chunk: String, className: String, stops: List<String>): String? {
+            val mark = CLASS_NAME(className).find(chunk) ?: return null
+            val start = chunk.lastIndexOf('<', mark.range.first).let { if (it < 0) mark.range.first else it }
+            var end = minOf(chunk.length, start + 2500)
+            for (stop in stops) {
+                val next = CLASS_NAME(stop).find(chunk, mark.range.last + 1) ?: continue
+                if (next.range.first in (start + 1) until end) end = next.range.first
+            }
+            return chunk.substring(start, end)
+        }
+
+        private fun firstAnchor(window: String): String =
+            allAnchors(window).maxByOrNull { it.length }.orEmpty()
+
+        private fun allAnchors(window: String): List<String> = ANCHOR.findAll(window).map { anchor ->
+            val titled = TITLE_ATTR.find(anchor.groupValues[1])?.groupValues?.get(1).orEmpty()
+            val text = anchor.groupValues[2].replace(Regex("<[^>]+>"), "")
+            unescape(titled.ifBlank { text })
+        }.filter { it.isNotBlank() }.distinct().toList()
 
         private fun sampleImages(item: JSONObject): List<String> {
             val urls = mutableListOf<String>()
@@ -739,6 +918,17 @@ class DlsiteClient(private val credentials: CredentialStore) {
                 coverUrl = cover,
                 release = item.optString("regist_date").substringBefore('T').substringBefore(' '),
             )
+        }
+
+        private fun people(array: JSONArray?): List<String> {
+            if (array == null) return emptyList()
+            return buildList {
+                for (index in 0 until array.length()) {
+                    val item = array.optJSONObject(index) ?: continue
+                    val name = localized(item.opt("name"))
+                    if (name.isNotBlank()) add(name)
+                }
+            }
         }
 
         private fun localized(value: Any?): String = when (value) {

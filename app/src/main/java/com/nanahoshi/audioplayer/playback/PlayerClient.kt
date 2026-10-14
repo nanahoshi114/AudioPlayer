@@ -117,8 +117,20 @@ class PlayerClient(
                         play()
                     }
                 }
-            } else {
+            } else if (track.id > 0L) {
                 appendLocked(listOf(track), startPlaying = true)
+            }
+        }
+    }
+
+    fun playQueueItem(queueItemId: Long) = scope.launch {
+        queueMutex.withLock {
+            withController {
+                val index = indexOfQueueItem(queueItemId)
+                if (index >= 0) {
+                    seekTo(index, 0)
+                    play()
+                }
             }
         }
     }

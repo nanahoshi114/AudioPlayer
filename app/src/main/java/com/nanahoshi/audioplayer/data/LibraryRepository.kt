@@ -20,6 +20,7 @@ import com.nanahoshi.audioplayer.data.db.PlaylistTrack
 import com.nanahoshi.audioplayer.data.db.QueueItemEntity
 import com.nanahoshi.audioplayer.data.db.QueuedTrack
 import com.nanahoshi.audioplayer.data.db.TrackEntity
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
@@ -29,6 +30,12 @@ enum class WorkFill {
     FILLED,
     EMPTY,
 }
+
+data class WorkSources(
+    val purchased: Boolean,
+    val hasPlay: Boolean,
+    val hasAsmr: Boolean,
+)
 
 class LibraryRepository(
     private val context: Context,
@@ -80,6 +87,8 @@ class LibraryRepository(
         if (purchased) {
             val nodes = try {
                 dlsite.playTree(sourceId, facts.circle.ifBlank { null }, folder.coverUri)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (_: Exception) {
                 emptyList()
             }
@@ -98,6 +107,64 @@ class LibraryRepository(
             return@withContext WorkFill.FILLED
         }
         WorkFill.EMPTY
+    }
+
+    suspend fun prepareWorkSources(folderId: Long): WorkSources? = withContext(Dispatchers.IO) {
+        val folder = db.folders().get(folderId) ?: return@withContext null
+        val sourceId = folder.asmrSourceId ?: return@withContext null
+        val workId = workIdOf(folder)
+        backfillContentSources(folderId)
+        val purchased = try {
+            dlsite.isPurchased(sourceId)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            false
+        }
+        WorkSources(
+            purchased = purchased,
+            hasPlay = workHasSource(workId, TrackSource.DLSITE),
+            hasAsmr = workHasSource(workId, TrackSource.ASMR),
+        )
+    }
+
+    suspend fun ensureWorkSource(folderId: Long, source: TrackSource): WorkFill = withContext(Dispatchers.IO) {
+        val folder = db.folders().get(folderId) ?: return@withContext WorkFill.UNCHANGED
+        val sourceId = folder.asmrSourceId ?: return@withContext WorkFill.UNCHANGED
+        val workId = workIdOf(folder)
+        if (workHasSource(workId, source)) return@withContext WorkFill.UNCHANGED
+        val facts = WorkFacts.fromJson(folder.workMeta) ?: WorkFacts(
+            title = folder.name,
+            circle = "",
+            vas = emptyList(),
+            tags = emptyList(),
+            release = "",
+            sourceId = sourceId,
+        )
+        if (source == TrackSource.DLSITE) {
+            val purchased = try {
+                dlsite.isPurchased(sourceId)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                false
+            }
+            if (!purchased) return@withContext WorkFill.EMPTY
+            val nodes = try {
+                dlsite.playTree(sourceId, facts.circle.ifBlank { null }, folder.coverUri)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                emptyList()
+            }
+            if (nodes.isEmpty()) return@withContext WorkFill.EMPTY
+            importPlayNodes(nodes, folderId, workId, facts, folder.coverUri, "")
+            return@withContext WorkFill.FILLED
+        }
+        val loaded = asmr.loadWork(sourceId)
+        if (loaded.nodes.isEmpty()) return@withContext WorkFill.EMPTY
+        importAsmrNodes(loaded.nodes, folderId, loaded, "")
+        WorkFill.FILLED
     }
 
     suspend fun ensureWorkMeta(folderId: Long) = withContext(Dispatchers.IO) {
@@ -488,6 +555,7 @@ class LibraryRepository(
                         position = db.folders().maxPosition(parentId) + 1,
                         addedAt = System.currentTimeMillis(),
                         asmrWorkId = workId,
+                        contentSource = TrackSource.DLSITE.name,
                     ),
                 )
                 importPlayNodes(node.children, id, workId, facts, coverUrl, here)
@@ -551,6 +619,7 @@ class LibraryRepository(
                         position = position,
                         addedAt = System.currentTimeMillis(),
                         asmrWorkId = work.id,
+                        contentSource = TrackSource.ASMR.name,
                     ),
                 )
                 importAsmrNodes(node.children, id, work, here)
@@ -617,6 +686,35 @@ class LibraryRepository(
     private suspend fun trackIdsIn(folderIds: Set<Long>): Set<Long> {
         if (folderIds.isEmpty()) return emptySet()
         return db.tracks().inFolders(folderIds.toList()).map { it.id }.toSet()
+    }
+
+    private fun workIdOf(folder: FolderEntity): Long =
+        folder.asmrWorkId ?: folder.asmrSourceId?.filter { it.isDigit() }?.toLongOrNull() ?: 0L
+
+    private suspend fun workHasSource(workId: Long, source: TrackSource): Boolean {
+        if (db.tracks().countByWorkSource(workId, source) > 0) return true
+        return db.files().forWork(workId).any { libraryFileSource(it.fileHash) == source }
+    }
+
+    private suspend fun backfillContentSources(rootId: Long) {
+        val folders = db.folders().all()
+        val children = folders.groupBy { it.parentId }
+        suspend fun visit(id: Long) {
+            for (child in children[id].orEmpty()) visit(child.id)
+            if (id == rootId) return
+            val folder = db.folders().get(id) ?: return
+            if (folder.asmrWorkId == null || folder.contentSource != null) return
+            val fromTrack = db.tracks().inFolder(id)
+                .firstOrNull { it.source == TrackSource.DLSITE || it.source == TrackSource.ASMR }
+                ?.source
+            val fromFile = db.files().listIn(id).firstNotNullOfOrNull { libraryFileSource(it.fileHash) }
+            val fromChild = children[id].orEmpty().firstNotNullOfOrNull { child ->
+                db.folders().get(child.id)?.contentSource?.let { runCatching { TrackSource.valueOf(it) }.getOrNull() }
+            }
+            val chosen = fromTrack ?: fromFile ?: fromChild ?: return
+            db.folders().setContentSource(id, chosen.name)
+        }
+        visit(rootId)
     }
 
     private fun descendantFolderIds(folders: List<FolderEntity>, roots: Set<Long>): Set<Long> {

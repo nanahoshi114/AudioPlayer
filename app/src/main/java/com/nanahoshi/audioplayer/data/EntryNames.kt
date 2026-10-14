@@ -18,6 +18,13 @@ fun scopedFileHash(source: TrackSource, raw: String): String = when (source) {
     else -> raw
 }
 
+fun libraryFileSource(hash: String): TrackSource? = when {
+    hash.startsWith("dlsite:") -> TrackSource.DLSITE
+    hash.startsWith("asmr:") -> TrackSource.ASMR
+    hash.isNotBlank() -> TrackSource.ASMR
+    else -> null
+}
+
 fun rawFileKey(hash: String?): String? {
     if (hash.isNullOrBlank()) return null
     return when {

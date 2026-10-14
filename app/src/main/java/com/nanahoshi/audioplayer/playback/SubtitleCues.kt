@@ -10,10 +10,79 @@ data class SubtitleCue(
     val startMs: Long,
     val endMs: Long,
     val text: String,
+    val translation: String? = null,
 )
 
+fun SubtitleCue.line(chinese: Boolean): String {
+    if (!chinese) return text
+    val translated = translation?.trim().orEmpty()
+    return translated.ifEmpty { text }
+}
+
+fun List<SubtitleCue>.hasTranslation(): Boolean = any { !it.translation.isNullOrBlank() }
+
 fun List<SubtitleCue>.textAt(positionMs: Long): String =
-    lastOrNull { positionMs in it.startMs until it.endMs }?.text.orEmpty()
+    textAt(positionMs, chinese = false)
+
+fun List<SubtitleCue>.textAt(positionMs: Long, chinese: Boolean): String =
+    lastOrNull { positionMs in it.startMs until it.endMs }?.line(chinese).orEmpty()
+
+fun List<SubtitleCue>.indexAt(positionMs: Long): Int =
+    indexOfLast { positionMs in it.startMs until it.endMs }
+
+fun parseGeneratedCues(raw: String): List<SubtitleCue> {
+    val text = raw.trim().removePrefix("\uFEFF")
+    if (text.isEmpty() || !text.startsWith("{")) return emptyList()
+    val array = try {
+        Json.parseToJsonElement(text).jsonObject["cues"]?.jsonArray
+    } catch (_: Exception) {
+        null
+    } ?: return emptyList()
+    return array.mapNotNull { element ->
+        val item = try {
+            element.jsonObject
+        } catch (_: Exception) {
+            return@mapNotNull null
+        }
+        val line = item["text"]?.jsonPrimitive?.content?.trim().orEmpty()
+        if (line.isEmpty()) return@mapNotNull null
+        val start = item["startMs"]?.jsonPrimitive?.content?.toLongOrNull() ?: return@mapNotNull null
+        val end = item["endMs"]?.jsonPrimitive?.content?.toLongOrNull() ?: return@mapNotNull null
+        if (end <= start) return@mapNotNull null
+        val translation = item["translation"]?.jsonPrimitive?.content?.trim()?.takeIf { it.isNotEmpty() }
+        SubtitleCue(start, end, line, translation)
+    }.sortedBy { it.startMs }
+}
+
+fun encodeGeneratedCues(cues: List<SubtitleCue>): String = buildString {
+    append("{\"cues\":[")
+    cues.forEachIndexed { index, cue ->
+        if (index > 0) append(',')
+        append("{\"startMs\":").append(cue.startMs)
+        append(",\"endMs\":").append(cue.endMs)
+        append(",\"text\":").append(jsonEscape(cue.text))
+        val translation = cue.translation?.trim()?.takeIf { it.isNotEmpty() }
+        if (translation != null) {
+            append(",\"translation\":").append(jsonEscape(translation))
+        }
+        append('}')
+    }
+    append("]}")
+}
+
+private fun jsonEscape(value: String): String = buildString {
+    append('"')
+    value.forEach { ch ->
+        when (ch) {
+            '\\' -> append("\\\\")
+            '"' -> append("\\\"")
+            '\n' -> append("\\n")
+            '\r' -> append("\\r")
+            else -> append(ch)
+        }
+    }
+    append('"')
+}
 
 fun parseSubtitleDocument(raw: String): List<SubtitleCue> {
     val text = raw.trim().removePrefix("\uFEFF")

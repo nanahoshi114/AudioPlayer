@@ -12,6 +12,7 @@ import com.nanahoshi.audioplayer.bilibili.BilibiliException
 import com.nanahoshi.audioplayer.data.LibrarySort
 import com.nanahoshi.audioplayer.data.TrackSource
 import com.nanahoshi.audioplayer.data.WorkFill
+import com.nanahoshi.audioplayer.data.libraryFileSource
 import com.nanahoshi.audioplayer.data.isSubtitleFile
 import com.nanahoshi.audioplayer.data.sortedForLibrary
 import com.nanahoshi.audioplayer.data.db.FolderEntity
@@ -80,12 +81,21 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     val playlists = graph.library.observePlaylists()
     val sourceFilter = MutableStateFlow(LibrarySourceFilter.ALL)
     val searchQuery = MutableStateFlow("")
+    val workFileSource = MutableStateFlow<TrackSource?>(null)
+    val workSources = MutableStateFlow(false)
+    private val workRootId = MutableStateFlow<Long?>(null)
     val pendingAsmr = MutableStateFlow<AsmrPreview?>(null)
     private var rjLookup: Job? = null
     private var openJob: Job? = null
     private var openGeneration = 0
-    val listing = combine(currentFolderId, sourceFilter, searchQuery, sort) { folderId, filter, query, sortMode ->
-        LibraryRequest(folderId, filter, query.trim(), sortMode)
+    val listing = combine(
+        currentFolderId,
+        sourceFilter,
+        searchQuery,
+        sort,
+        workFileSource,
+    ) { folderId, filter, query, sortMode, workSource ->
+        LibraryRequest(folderId, filter, query.trim(), sortMode, workSource)
     }.flatMapLatest { request ->
         when {
             request.query.isNotEmpty() -> acrossLibrary { folders, tracks, files ->
@@ -126,7 +136,22 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
                 graph.library.observeTracksIn(request.folderId),
                 graph.library.observeFilesIn(request.folderId),
             ) { folders, tracks, files ->
-                LibraryListing(folders.sortedForLibrary(request.sort), mixedEntries(tracks, files, request.sort))
+                val source = request.workSource
+                val shownFolders = if (source == null) {
+                    folders
+                } else {
+                    folders.filter { it.contentSource == source.name || it.asmrWorkId == null }
+                }
+                val shownTracks = if (source == null) tracks else tracks.filter { it.source == source }
+                val shownFiles = if (source == null) {
+                    files
+                } else {
+                    files.filter { libraryFileSource(it.fileHash) == source }
+                }
+                LibraryListing(
+                    shownFolders.sortedForLibrary(request.sort),
+                    mixedEntries(shownTracks, shownFiles, request.sort),
+                )
             }
         }
     }
@@ -136,7 +161,18 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     val selectedFolderIds = MutableStateFlow<Set<Long>>(emptySet())
     private val metaRequested = mutableSetOf<Long>()
 
-    init {
+        init {
+        viewModelScope.launch {
+            combine(currentFolderId, currentFolder) { id, folder -> id to folder }.collect { (id, folder) ->
+                if (id == null) {
+                    clearWorkSource()
+                    return@collect
+                }
+                if (folder == null || folder.id != id) return@collect
+                val inside = folder.asmrSourceId != null || folder.asmrWorkId != null
+                if (!inside) clearWorkSource()
+            }
+        }
         viewModelScope.launch {
             listing.collect { current ->
                 current.folders.forEach { folder ->
@@ -167,12 +203,24 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         openGeneration += 1
         val generation = openGeneration
         val work = !folder.asmrSourceId.isNullOrBlank()
+        if (work) {
+            workRootId.value = folder.id
+            workFileSource.value = null
+            workSources.value = false
+        } else if (folder.asmrWorkId == null) {
+            workRootId.value = null
+            workFileSource.value = null
+            workSources.value = false
+        }
         openJob = viewModelScope.launch {
             if (work) busy.value = true
             try {
                 graph.library.ensureWorkMeta(folder.id)
                 if (work && graph.library.ensureWorkFiles(folder.id) == WorkFill.EMPTY) {
                     graph.messages.value = "没有读到这个作品的文件"
+                }
+                if (work && generation == openGeneration && currentFolderId.value == folder.id) {
+                    applyWorkSources(folder.id)
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -181,6 +229,51 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             } finally {
                 if (generation == openGeneration) busy.value = false
             }
+        }
+    }
+
+    fun useWorkSource(source: TrackSource) {
+        if (workFileSource.value == source && currentFolderId.value == workRootId.value) return
+        val root = workRootId.value ?: return
+        folderScroll[root] = LazyListState()
+        if (currentFolderId.value != root) currentFolderId.value = root
+        workFileSource.value = source
+        clearSelection()
+        openJob?.cancel()
+        openGeneration += 1
+        val generation = openGeneration
+        openJob = viewModelScope.launch {
+            busy.value = true
+            try {
+                val fill = graph.library.ensureWorkSource(root, source)
+                if (fill == WorkFill.EMPTY) {
+                    graph.messages.value = if (source == TrackSource.DLSITE) {
+                        "无法读取已购买文件"
+                    } else {
+                        "没有读到这个作品的文件"
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                graph.messages.value = if (failure.message == "未找到该作品") {
+                    "asmr.one未收录"
+                } else {
+                    failure.message ?: "没有读到这个作品的文件"
+                }
+            } finally {
+                if (generation == openGeneration) busy.value = false
+            }
+        }
+    }
+
+    private suspend fun applyWorkSources(folderId: Long) {
+        val sources = graph.library.prepareWorkSources(folderId) ?: return
+        if (!sources.purchased && !sources.hasPlay) return
+        workSources.value = true
+        workFileSource.value = when {
+            sources.hasPlay -> TrackSource.DLSITE
+            else -> TrackSource.ASMR
         }
     }
 
@@ -242,10 +335,18 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     fun up() {
         val id = currentFolderId.value ?: return
+        openJob?.cancel()
+        openGeneration += 1
         viewModelScope.launch {
             currentFolderId.value = graph.library.folder(id)?.parentId
             clearSelection()
         }
+    }
+
+    private fun clearWorkSource() {
+        workRootId.value = null
+        workFileSource.value = null
+        workSources.value = false
     }
 
     fun importFile(uri: Uri, play: Boolean) = launch {
@@ -277,6 +378,18 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         clearSelection()
         val count = graph.downloads.enqueue(tracks)
         graph.messages.value = if (count == 0) "没有需要下载的音频" else "已加入 $count 个下载"
+    }
+
+    fun deleteDownloadedTrack(track: TrackEntity) = launch {
+        val count = graph.downloads.deleteDownloaded(listOf(track))
+        graph.messages.value = if (count == 0) "没有已下载的文件" else "已删除已下载的文件"
+    }
+
+    fun deleteDownloadedSelection() = launch {
+        val tracks = selectedTracks()
+        clearSelection()
+        val count = graph.downloads.deleteDownloaded(tracks)
+        graph.messages.value = if (count == 0) "没有已下载的文件" else "已删除 $count 个已下载文件"
     }
 
     fun cacheFolder(folderId: Long) = launch {
@@ -469,6 +582,7 @@ private data class LibraryRequest(
     val filter: LibrarySourceFilter,
     val query: String,
     val sort: LibrarySort,
+    val workSource: TrackSource?,
 )
 
 private val RJ_QUERY = Regex("\\d{1,7}")

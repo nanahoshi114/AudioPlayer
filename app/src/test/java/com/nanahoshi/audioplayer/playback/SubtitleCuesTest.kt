@@ -22,7 +22,9 @@ class SubtitleCuesTest {
         assertEquals(3000L, cues[0].endMs)
         assertEquals("你好", cues[0].text)
         assertEquals("你好", cues.textAt(2000))
+        assertEquals(0, cues.indexAt(2000))
         assertEquals("", cues.textAt(3000))
+        assertEquals(-1, cues.indexAt(3000))
     }
 
     @Test
@@ -51,5 +53,30 @@ class SubtitleCuesTest {
         assertEquals(2500L, lrc[0].endMs)
         assertEquals(Long.MAX_VALUE, lrc[1].endMs)
         assertEquals("后面", lrc.textAt(9000))
+    }
+
+    @Test
+    fun parsesGeneratedCues() {
+        val cues = parseGeneratedCues(
+            """{"language":"ja","cues":[{"startMs":1200,"endMs":3400,"text":"こんにちは"}]}""",
+        )
+        assertEquals(1, cues.size)
+        assertEquals(1200L, cues[0].startMs)
+        assertEquals(3400L, cues[0].endMs)
+        assertEquals("こんにちは", cues[0].text)
+        assertEquals(emptyList<SubtitleCue>(), parseGeneratedCues("""{"cues":[]}"""))
+    }
+
+    @Test
+    fun keepsTranslationBesideJapanese() {
+        val encoded = encodeGeneratedCues(
+            listOf(SubtitleCue(1200, 3400, "こんにちは", "你好")),
+        )
+        val cues = parseGeneratedCues(encoded)
+        assertEquals("こんにちは", cues[0].text)
+        assertEquals("你好", cues[0].translation)
+        assertEquals("你好", cues.textAt(1200, chinese = true))
+        assertEquals("こんにちは", cues.textAt(1200, chinese = false))
+        assertEquals("只今日文", SubtitleCue(1, 2, "只今日文").line(chinese = true))
     }
 }

@@ -71,6 +71,21 @@ class DownloadCenter(
         true
     }
 
+    suspend fun deleteDownloaded(tracks: List<TrackEntity>): Int = withContext(Dispatchers.IO) {
+        var removed = 0
+        for (track in tracks) {
+            if (track.source != TrackSource.ASMR && track.source != TrackSource.DLSITE) continue
+            val path = track.localUri
+            if (!localFileReady(path)) continue
+            val file = File(path!!)
+            if (file.exists() && !file.delete()) continue
+            db.tracks().clearLocalUri(track.id)
+            db.downloads().deleteFinishedForTrack(track.id)
+            removed += 1
+        }
+        removed
+    }
+
     suspend fun enqueue(tracks: List<TrackEntity>): Int = withContext(Dispatchers.IO) {
         var added = 0
         for (track in tracks) {
@@ -287,6 +302,10 @@ class DownloadCenter(
             ?: error("没有可下载的地址")
         db.tracks().updateRemoteUrl(track.id, fresh)
         return fresh
+    }
+
+    suspend fun savedRemotePath(source: TrackSource, workKey: String, fileKey: String?): String? = withContext(Dispatchers.IO) {
+        workKeys(workKey).firstNotNullOfOrNull { key -> localCopy(source.name, key, fileKey) }
     }
 
     suspend fun downloadedKeys(source: TrackSource, workKey: String): Set<String> = withContext(Dispatchers.IO) {
