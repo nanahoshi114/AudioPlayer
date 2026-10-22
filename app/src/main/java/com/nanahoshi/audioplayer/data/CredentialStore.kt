@@ -17,13 +17,43 @@ class CredentialStore(context: Context) {
         val value = raw.trim()
         if (value.isEmpty()) {
             clearCookie()
-        } else {
-            secretPrefs.edit().putString(KEY_COOKIE, value).apply()
+            return
         }
+        val changed = value != cookie()
+        val edit = secretPrefs.edit().putString(KEY_COOKIE, value)
+        if (changed) edit.remove(KEY_BILI_REFRESH)
+        edit.apply()
+        if (changed) plainPrefs.edit().remove(KEY_BILI_REFRESH_CHECKED).apply()
+    }
+
+    fun saveBiliSession(cookie: String, refreshToken: String) {
+        val value = cookie.trim()
+        if (value.isEmpty()) {
+            clearCookie()
+            return
+        }
+        val edit = secretPrefs.edit().putString(KEY_COOKIE, value)
+        val token = refreshToken.trim()
+        if (token.isEmpty()) edit.remove(KEY_BILI_REFRESH) else edit.putString(KEY_BILI_REFRESH, token)
+        edit.apply()
     }
 
     fun clearCookie() {
-        secretPrefs.edit().remove(KEY_COOKIE).apply()
+        secretPrefs.edit().remove(KEY_COOKIE).remove(KEY_BILI_REFRESH).apply()
+        plainPrefs.edit().remove(KEY_BILI_REFRESH_CHECKED).apply()
+    }
+
+    fun biliRefreshToken(): String? = secretPrefs.getString(KEY_BILI_REFRESH, null)?.takeIf { it.isNotBlank() }
+
+    fun hasBiliRefresh(): Boolean = biliRefreshToken() != null
+
+    fun biliRefreshDue(): Boolean {
+        val checked = plainPrefs.getLong(KEY_BILI_REFRESH_CHECKED, 0L)
+        return System.currentTimeMillis() - checked >= BILI_REFRESH_INTERVAL_MS
+    }
+
+    fun markBiliRefreshChecked() {
+        plainPrefs.edit().putLong(KEY_BILI_REFRESH_CHECKED, System.currentTimeMillis()).apply()
     }
 
     fun hasCookie(): Boolean = cookie() != null
@@ -183,6 +213,9 @@ class CredentialStore(context: Context) {
     private companion object {
         const val SECRET_FILE = "bili_secret_prefs"
         const val KEY_COOKIE = "bili_cookie"
+        const val KEY_BILI_REFRESH = "bili_refresh_token"
+        const val KEY_BILI_REFRESH_CHECKED = "bili_refresh_checked_at"
+        const val BILI_REFRESH_INTERVAL_MS = 20 * 60 * 60 * 1000L
         const val KEY_DLSITE_COOKIE = "dlsite_cookie"
         const val KEY_WHISPER_BASE = "whisper_base_url"
         const val KEY_WHISPER_TOKEN = "whisper_token"

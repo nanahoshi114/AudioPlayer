@@ -8,6 +8,8 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
 import androidx.activity.compose.BackHandler
+import android.graphics.Bitmap
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -65,6 +67,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -82,6 +86,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.nanahoshi.audioplayer.bilibili.BilibiliException
+import com.nanahoshi.audioplayer.bilibili.QrPoll
+import com.nanahoshi.audioplayer.bilibili.qrBitmap
 import com.nanahoshi.audioplayer.data.toHttps
 import com.nanahoshi.audioplayer.dlsite.DlsiteClient
 import com.nanahoshi.audioplayer.asmr.AsmrCatalogItem
@@ -120,6 +127,8 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.coroutines.coroutineContext
 
@@ -1673,7 +1682,20 @@ class MineViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var error by mutableStateOf<String?>(null)
         private set
-    val biliSaved = graph.credentials.cookie().orEmpty()
+    var biliReady by mutableStateOf(graph.credentials.hasCookie())
+        private set
+    var biliCanRefresh by mutableStateOf(graph.credentials.hasBiliRefresh())
+        private set
+    var qrVisible by mutableStateOf(false)
+        private set
+    var qrImage by mutableStateOf<Bitmap?>(null)
+        private set
+    var qrMessage by mutableStateOf("")
+        private set
+    var qrExpired by mutableStateOf(false)
+        private set
+    private var qrJob: Job? = null
+    private var qrGeneration = 0
     var whisperBase by mutableStateOf(graph.credentials.whisperBaseUrl().orEmpty())
     var whisperToken by mutableStateOf(graph.credentials.whisperToken().orEmpty())
     var whisperSaved by mutableStateOf(graph.credentials.hasWhisper())
@@ -1755,9 +1777,77 @@ class MineViewModel(app: Application) : AndroidViewModel(app) {
         loggedIn = false
     }
 
-    fun saveBili(value: String) = graph.credentials.saveCookie(value)
+    fun savedBiliCookie(): String = graph.credentials.cookie().orEmpty()
 
-    fun clearBili() = graph.credentials.clearCookie()
+    fun saveBili(value: String) {
+        graph.credentials.saveCookie(value)
+        biliReady = graph.credentials.hasCookie()
+        biliCanRefresh = graph.credentials.hasBiliRefresh()
+    }
+
+    fun clearBili() {
+        graph.credentials.clearCookie()
+        biliReady = false
+        biliCanRefresh = false
+    }
+
+    fun startBiliQr() {
+        qrJob?.cancel()
+        val generation = ++qrGeneration
+        qrVisible = true
+        qrImage = null
+        qrExpired = false
+        qrMessage = "正在获取二维码"
+        qrJob = viewModelScope.launch {
+            try {
+                val login = graph.bilibili.requestQrLogin()
+                if (generation != qrGeneration) return@launch
+                qrImage = qrBitmap(login.url)
+                qrMessage = "请用 B 站 App 扫码"
+                while (isActive) {
+                    delay(2_000)
+                    val state = graph.bilibili.pollQrLogin(login.key)
+                    if (state == QrPoll.Confirmed) {
+                        biliReady = true
+                        biliCanRefresh = graph.credentials.hasBiliRefresh()
+                        if (generation == qrGeneration) {
+                            qrVisible = false
+                            qrImage = null
+                        }
+                        return@launch
+                    }
+                    if (generation != qrGeneration) return@launch
+                    when (state) {
+                        QrPoll.Waiting -> Unit
+                        QrPoll.Scanned -> qrMessage = "已扫码，请在 B 站 App 里确认"
+                        QrPoll.Expired -> {
+                            qrExpired = true
+                            qrMessage = "二维码已过期"
+                            return@launch
+                        }
+                        QrPoll.Confirmed -> Unit
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                if (generation != qrGeneration) return@launch
+                qrMessage = if (failure is BilibiliException) {
+                    failure.message ?: "扫码登录失败"
+                } else {
+                    "无法连接 B 站"
+                }
+            }
+        }
+    }
+
+    fun stopBiliQr() {
+        qrGeneration++
+        qrJob?.cancel()
+        qrJob = null
+        qrVisible = false
+        qrImage = null
+    }
 }
 
 class PurchasesViewModel(app: Application) : AndroidViewModel(app) {
@@ -1790,10 +1880,33 @@ fun MineScreen(
     onOpenFavorites: () -> Unit,
     viewModel: MineViewModel = viewModel(),
 ) {
-    var biliText by remember { mutableStateOf(viewModel.biliSaved) }
-    var biliSavedHint by remember { mutableStateOf(viewModel.biliSaved.isNotBlank()) }
+    var biliHelp by remember { mutableStateOf(false) }
+    var sessdataLogin by remember { mutableStateOf(false) }
     var whisperHelp by remember { mutableStateOf(false) }
     var translateHelp by remember { mutableStateOf(false) }
+    if (viewModel.qrVisible) {
+        BiliQrDialog(
+            image = viewModel.qrImage,
+            message = viewModel.qrMessage,
+            expired = viewModel.qrExpired,
+            onRefresh = viewModel::startBiliQr,
+            onDismiss = viewModel::stopBiliQr,
+        )
+    }
+    if (biliHelp) {
+        BiliLoginHelpDialog(onDismiss = { biliHelp = false })
+    }
+    if (sessdataLogin) {
+        BiliSessdataDialog(
+            saved = viewModel.savedBiliCookie(),
+            scanLogin = viewModel.biliCanRefresh,
+            onSave = { value ->
+                viewModel.saveBili(value)
+                sessdataLogin = false
+            },
+            onDismiss = { sessdataLogin = false },
+        )
+    }
     if (whisperHelp) {
         WhisperHelpDialog(onDismiss = { whisperHelp = false })
     }
@@ -1853,33 +1966,29 @@ fun MineScreen(
             }
         }
         item(key = "bilibili") {
-            Text("B站登录", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 28.dp))
-            Text(
-                "只保存在这台手机里，用来播放你的账号能听的声音，包括需要登录或大会员的视频。可以粘贴 SESSDATA，或整段 Cookie。不会上传到别处。",
-                modifier = Modifier.padding(vertical = 12.dp),
-            )
-            OutlinedTextField(
-                value = biliText,
-                onValueChange = { biliText = it },
-                label = { Text("SESSDATA 或 Cookie") },
-                visualTransformation = PasswordVisualTransformation(),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Button(
-                onClick = {
-                    viewModel.saveBili(biliText)
-                    biliSavedHint = biliText.isNotBlank()
-                },
-                modifier = Modifier.padding(top = 16.dp),
-            ) { Text("保存") }
-            TextButton(onClick = {
-                viewModel.clearBili()
-                biliText = ""
-                biliSavedHint = false
-            }) { Text("清除") }
-            if (biliSavedHint) {
-                Text("已保存登录信息", modifier = Modifier.padding(top = 8.dp))
+            Row(
+                Modifier.padding(top = 20.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("B站登录", style = MaterialTheme.typography.titleMedium)
+                IconButton(onClick = { biliHelp = true }) {
+                    Icon(Icons.AutoMirrored.Outlined.HelpOutline, contentDescription = "B站登录说明")
+                }
             }
+            Row(
+                Modifier.padding(top = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Button(onClick = viewModel::startBiliQr) { Text("扫码登录") }
+                Button(onClick = { sessdataLogin = true }) { Text("SESSDATA登录") }
+            }
+            if (viewModel.biliReady) {
+                Text(
+                    if (viewModel.biliCanRefresh) "已扫码登录，会在需要时自动更新" else "已保存登录信息",
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
+            TextButton(onClick = viewModel::clearBili) { Text("清除") }
             Button(
                 onClick = onOpenFavorites,
                 modifier = Modifier.padding(top = 16.dp),
@@ -1962,6 +2071,119 @@ fun MineScreen(
             Box(Modifier.padding(bottom = 24.dp))
         }
     }
+}
+
+@Composable
+private fun BiliLoginHelpDialog(onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("B站登录") },
+        text = {
+            Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
+                Text("只保存在这台手机里，用来播放你的账号能听的声音，包括需要登录或大会员的视频。不会上传到别处。")
+                Text(
+                    "扫码登录后，登录信息会在需要时自动更新。也可以在「SESSDATA登录」里粘贴 SESSDATA，或整段 Cookie；粘贴的内容不会自动更新。",
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        },
+    )
+}
+
+@Composable
+private fun BiliSessdataDialog(
+    saved: String,
+    scanLogin: Boolean,
+    onSave: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var text by remember { mutableStateOf(saved) }
+    var confirming by remember { mutableStateOf(false) }
+    fun submit() {
+        val value = text.trim()
+        if (value.isEmpty()) return
+        if (scanLogin && value != saved.trim()) {
+            confirming = true
+        } else {
+            onSave(value)
+        }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("SESSDATA登录") },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                label = { Text("SESSDATA 或 Cookie") },
+                visualTransformation = PasswordVisualTransformation(),
+                maxLines = 4,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = ::submit, enabled = text.isNotBlank()) { Text("保存") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
+    if (confirming) {
+        AlertDialog(
+            onDismissRequest = { confirming = false },
+            title = { Text("改用文字框里的登录？") },
+            text = {
+                Text("当前已扫码登录，登录信息会在需要时自动更新。保存后将改用文字框里的内容，之后不会自动更新。")
+            },
+            confirmButton = {
+                TextButton(onClick = { onSave(text.trim()) }) { Text("保存") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirming = false }) { Text("取消") }
+            },
+        )
+    }
+}
+
+@Composable
+private fun BiliQrDialog(
+    image: Bitmap?,
+    message: String,
+    expired: Boolean,
+    onRefresh: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("扫码登录") },
+        text = {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                if (image != null) {
+                    Surface(color = Color.White) {
+                        Image(
+                            bitmap = image.asImageBitmap(),
+                            contentDescription = "B站登录二维码",
+                            modifier = Modifier.size(220.dp),
+                        )
+                    }
+                } else if (!expired && message == "正在获取二维码") {
+                    CircularProgressIndicator(modifier = Modifier.padding(vertical = 24.dp))
+                }
+                if (message.isNotBlank()) {
+                    Text(message, modifier = Modifier.padding(top = 12.dp))
+                }
+            }
+        },
+        confirmButton = {
+            if (expired) {
+                TextButton(onClick = onRefresh) { Text("刷新二维码") }
+            }
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
 }
 
 @Composable

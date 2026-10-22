@@ -10,6 +10,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import android.util.Log
+import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.json.JSONArray
 import org.json.JSONObject
@@ -32,6 +33,15 @@ data class BiliPart(
 )
 
 class BilibiliException(val code: Int, message: String) : Exception(message)
+
+data class QrLogin(val url: String, val key: String)
+
+sealed interface QrPoll {
+    data object Waiting : QrPoll
+    data object Scanned : QrPoll
+    data object Expired : QrPoll
+    data object Confirmed : QrPoll
+}
 
 data class FavFolder(
     val id: Long,
@@ -79,6 +89,54 @@ class BilibiliClient(
 
     @Volatile private var mixinKey: String? = null
     @Volatile private var mixinFetchedAt: Long = 0
+    private val sessionRefreshLock = Any()
+
+    suspend fun requestQrLogin(): QrLogin = withContext(Dispatchers.IO) {
+        prepareIdentity()
+        val body = execute(
+            Request.Builder().url("https://passport.bilibili.com/x/passport-login/web/qrcode/generate").get(),
+            "https://passport.bilibili.com/login",
+            guestOnly = true,
+        )
+        val response = json.decodeFromString<ApiResponse<QrGenerateData>>(body)
+        val url = response.data?.url.orEmpty()
+        val key = response.data?.qrcodeKey.orEmpty()
+        if (response.code != 0 || url.isBlank() || key.isBlank()) {
+            throw BilibiliException(response.code, "没有拿到登录二维码")
+        }
+        QrLogin(url, key)
+    }
+
+    suspend fun pollQrLogin(key: String): QrPoll = withContext(Dispatchers.IO) {
+        val url = "https://passport.bilibili.com/x/passport-login/web/qrcode/poll".toHttpUrl()
+            .newBuilder()
+            .addQueryParameter("qrcode_key", key)
+            .build()
+        val exchange = exchange(
+            Request.Builder().url(url).get(),
+            "https://passport.bilibili.com/login",
+            guestOnly = true,
+        )
+        val response = json.decodeFromString<ApiResponse<QrPollData>>(exchange.body)
+        val data = response.data ?: throw BilibiliException(response.code, "登录状态没有返回")
+        when (data.code) {
+            QR_WAITING -> QrPoll.Waiting
+            QR_SCANNED -> QrPoll.Scanned
+            QR_EXPIRED -> QrPoll.Expired
+            0 -> {
+                val cookie = combineSessionCookies(
+                    sessionCookiesFromSetCookie(exchange.setCookies),
+                    sessionCookiesFromUrl(data.url),
+                )
+                if (cookieField(cookie, "SESSDATA") == null) {
+                    throw BilibiliException(0, "登录没有返回有效信息")
+                }
+                credentials.saveBiliSession(cookie, data.refreshToken)
+                QrPoll.Confirmed
+            }
+            else -> throw BilibiliException(data.code, "扫码登录失败")
+        }
+    }
 
     suspend fun favoriteFolders(): List<FavFolder> {
         requireSession()
@@ -377,6 +435,83 @@ class BilibiliClient(
                 Log.w(TAG, "ticket skipped: ${error.javaClass.simpleName}")
             }
         }
+        maybeRefreshSession()
+    }
+
+    private fun maybeRefreshSession() {
+        if (!credentials.hasBiliRefresh() || !credentials.biliRefreshDue()) return
+        synchronized(sessionRefreshLock) {
+            val token = credentials.biliRefreshToken() ?: return
+            if (!credentials.biliRefreshDue()) return
+            val info = try {
+                val csrf = cookieField(credentials.cookie().orEmpty(), "bili_jct").orEmpty()
+                val url = "https://passport.bilibili.com/x/passport-login/web/cookie/info".toHttpUrl()
+                    .newBuilder()
+                    .apply { if (csrf.isNotBlank()) addQueryParameter("csrf", csrf) }
+                    .build()
+                val body = execute(Request.Builder().url(url).get(), "https://www.bilibili.com")
+                json.decodeFromString<ApiResponse<CookieInfoData>>(body)
+            } catch (error: Exception) {
+                Log.w(TAG, "session check skipped: ${error.javaClass.simpleName}")
+                return
+            }
+            val needsRefresh = info.code == -101 || info.data?.refresh == true
+            try {
+                if (needsRefresh) refreshSession(token, info.data?.timestamp ?: 0L)
+                credentials.markBiliRefreshChecked()
+            } catch (error: Exception) {
+                Log.w(TAG, "session refresh skipped: ${error.javaClass.simpleName}")
+            }
+        }
+    }
+
+    private fun refreshSession(oldToken: String, timestamp: Long) {
+        val csrf = cookieField(credentials.cookie().orEmpty(), "bili_jct") ?: return
+        val stamp = timestamp.takeIf { it > 0L } ?: System.currentTimeMillis()
+        val page = exchange(
+            Request.Builder().url("https://www.bilibili.com/correspond/1/${correspondPath(stamp)}").get(),
+            "https://www.bilibili.com",
+            allowHtml = true,
+        )
+        val refreshCsrf = refreshCsrf(page.body) ?: return
+        val refreshed = exchange(
+            Request.Builder()
+                .url("https://passport.bilibili.com/x/passport-login/web/cookie/refresh")
+                .post(
+                    FormBody.Builder()
+                        .add("csrf", csrf)
+                        .add("refresh_csrf", refreshCsrf)
+                        .add("source", "main_web")
+                        .add("refresh_token", oldToken)
+                        .build(),
+                ),
+            "https://www.bilibili.com",
+        )
+        val response = json.decodeFromString<ApiResponse<RefreshTokenData>>(refreshed.body)
+        val newToken = response.data?.refreshToken.orEmpty()
+        val newCookie = combineSessionCookies(
+            sessionCookiesFromSetCookie(refreshed.setCookies),
+            credentials.cookie().orEmpty(),
+        )
+        if (response.code != 0 || newToken.isBlank() || cookieField(newCookie, "SESSDATA") == null) {
+            Log.w(TAG, "session refresh rejected code=${response.code}")
+            return
+        }
+        credentials.saveBiliSession(newCookie, newToken)
+        val newCsrf = cookieField(newCookie, "bili_jct") ?: return
+        val confirmed = execute(
+            Request.Builder()
+                .url("https://passport.bilibili.com/x/passport-login/web/confirm/refresh")
+                .post(
+                    FormBody.Builder()
+                        .add("csrf", newCsrf)
+                        .add("refresh_token", oldToken)
+                        .build(),
+                ),
+            "https://www.bilibili.com",
+        )
+        val confirmCode = JSONObject(confirmed).optInt("code", -1)
+        if (confirmCode != 0) Log.w(TAG, "session confirm code=$confirmCode")
     }
 
     private fun fetchTicket() {
@@ -412,7 +547,19 @@ class BilibiliClient(
             .joinToString("") { "%02x".format(it.toInt() and 0xff) }
     }
 
-    private fun execute(builder: Request.Builder, referer: String, guestOnly: Boolean = false): String {
+    private fun execute(
+        builder: Request.Builder,
+        referer: String,
+        guestOnly: Boolean = false,
+        allowHtml: Boolean = false,
+    ): String = exchange(builder, referer, guestOnly, allowHtml).body
+
+    private fun exchange(
+        builder: Request.Builder,
+        referer: String,
+        guestOnly: Boolean = false,
+        allowHtml: Boolean = false,
+    ): Exchange {
         val cookie = if (guestOnly) credentials.guestCookieHeader() else credentials.cookieHeader()
         if (cookie.isNotBlank()) builder.header("Cookie", cookie)
         val request = builder
@@ -424,13 +571,13 @@ class BilibiliClient(
             .build()
         http.newCall(request).execute().use { response ->
             val body = response.body?.string().orEmpty()
-            if (body.trimStart().startsWith("<")) {
+            if (!allowHtml && body.trimStart().startsWith("<")) {
                 throw BilibiliException(-412, "B站没有返回播放数据，请检查登录信息或稍后再试")
             }
             if (response.code in 300..399 || (!response.isSuccessful && body.isBlank())) {
                 throw BilibiliException(response.code, "网络请求失败")
             }
-            return body
+            return Exchange(body, response.headers("Set-Cookie"))
         }
     }
 
@@ -451,8 +598,13 @@ class BilibiliClient(
         private const val KEY_TTL_MS = 30 * 60 * 1000L
         private const val DEFAULT_TICKET_TTL_SEC = 259200L
         private const val PAGE_SIZE = 20
+        private const val QR_WAITING = 86101
+        private const val QR_SCANNED = 86090
+        private const val QR_EXPIRED = 86038
     }
 }
+
+private data class Exchange(val body: String, val setCookies: List<String>)
 
 @Serializable
 private data class ApiResponse<T>(
@@ -565,6 +717,30 @@ private data class AudioStream(
 private data class SpiData(
     @SerialName("b_3") val b3: String = "",
     @SerialName("b_4") val b4: String = "",
+)
+
+@Serializable
+private data class QrGenerateData(
+    val url: String = "",
+    @SerialName("qrcode_key") val qrcodeKey: String = "",
+)
+
+@Serializable
+private data class QrPollData(
+    val url: String = "",
+    @SerialName("refresh_token") val refreshToken: String = "",
+    val code: Int = -1,
+)
+
+@Serializable
+private data class CookieInfoData(
+    val refresh: Boolean = false,
+    val timestamp: Long = 0,
+)
+
+@Serializable
+private data class RefreshTokenData(
+    @SerialName("refresh_token") val refreshToken: String = "",
 )
 
 @Serializable
