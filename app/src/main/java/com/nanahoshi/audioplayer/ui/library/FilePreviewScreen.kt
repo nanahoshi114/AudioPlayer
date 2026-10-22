@@ -147,7 +147,8 @@ fun RemotePreviewScreen(
                         .data(request.url.toHttps())
                         .addHeader("Referer", request.referer.ifBlank { DlsiteClient.STORE_REFERER })
                         .addHeader("User-Agent", if (request.authed) DlsiteClient.USER_AGENT else AsmrClient.USER_AGENT)
-                        .apply {
+                        .apply
+                        {
                             if (request.authed) {
                                 viewModel.cookie()?.let { addHeader("Cookie", it) }
                             }

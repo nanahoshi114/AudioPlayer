@@ -197,11 +197,52 @@ class WhisperClient(
         fallback
     }
 
-    private fun uploadName(file: File): String =
-        file.name.replace(Regex("""[\r\n"]"""), "_").ifBlank { "audio" }
+    private fun uploadName(file: File): String {
+        val header = file.inputStream().use { input ->
+            val buffer = ByteArray(16)
+            val count = input.read(buffer)
+            if (count <= 0) ByteArray(0) else buffer.copyOf(count)
+        }
+        return audioUploadName(file.name, header)
+    }
 
     private companion object {
         const val AUDIO = "application/octet-stream"
         const val ONLINE_LIMIT = 25L * 1024L * 1024L
     }
 }
+
+internal fun audioUploadName(fileName: String, header: ByteArray): String {
+    val cleaned = fileName.replace(Regex("""[\r\n"]"""), "_").ifBlank { "audio" }
+    val current = cleaned.substringAfterLast('.', "").lowercase()
+    if ('.' in cleaned && current in AUDIO_EXTENSIONS) {
+        val base = cleaned.substringBeforeLast('.')
+        return "$base.$current"
+    }
+    val sniffed = sniffAudioExtension(header) ?: return cleaned
+    return "${cleaned.substringBeforeLast('.').ifBlank { cleaned }}.$sniffed"
+}
+
+internal fun sniffAudioExtension(header: ByteArray): String? {
+    if (header.size >= 3 && header[0] == 'I'.code.toByte() && header[1] == 'D'.code.toByte() && header[2] == '3'.code.toByte()) {
+        return "mp3"
+    }
+    if (header.size >= 2 && header[0] == 0xFF.toByte()) {
+        val second = header[1].toInt() and 0xFF
+        if (second and 0xE0 == 0xE0 && second and 0x06 == 0x02) return "mp3"
+        if (second and 0xF6 == 0xF0) return "aac"
+    }
+    if (startsWith(header, "fLaC")) return "flac"
+    if (startsWith(header, "OggS")) return "ogg"
+    if (startsWith(header, "RIFF") && header.size >= 12 && header.copyOfRange(8, 12).decodeToString() == "WAVE") return "wav"
+    if (header.size >= 8 && header.copyOfRange(4, 8).decodeToString() == "ftyp") return "m4a"
+    return null
+}
+
+private fun startsWith(header: ByteArray, text: String): Boolean {
+    val bytes = text.encodeToByteArray()
+    return header.size >= bytes.size && header.copyOfRange(0, bytes.size).contentEquals(bytes)
+}
+
+private val AUDIO_EXTENSIONS = setOf("mp3", "m4a", "aac", "wav", "ogg", "flac")
+

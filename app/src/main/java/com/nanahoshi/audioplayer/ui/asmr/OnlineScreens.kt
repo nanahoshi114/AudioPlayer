@@ -1,9 +1,12 @@
 package com.nanahoshi.audioplayer.ui.asmr
 
 import android.app.Application
+import android.content.ActivityNotFoundException
 import android.content.Context
+import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
@@ -399,6 +402,8 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var asmrMissing by mutableStateOf(false)
         private set
+    var dlsiteSite by mutableStateOf("maniax")
+        private set
     var gallery by mutableStateOf<List<String>>(emptyList())
         private set
     var trials by mutableStateOf<List<com.nanahoshi.audioplayer.dlsite.RemotePlayable>>(emptyList())
@@ -536,6 +541,7 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
                     return@launch
                 }
                 facts = nextFacts
+                dlsiteSite = page?.siteId?.filter { it.isLetter() }?.ifBlank { null } ?: "maniax"
                 coverUrl = loaded?.coverUrl ?: page?.coverUrl
                 gallery = page?.gallery.orEmpty()
                 trials = page?.trials.orEmpty().map { clip ->
@@ -1185,6 +1191,35 @@ private fun TagPicker(
     )
 }
 
+private fun asmrWorkUrl(sourceId: String): String? {
+    val id = worknoOf(sourceId) ?: return null
+    return "https://asmr.one/work/$id"
+}
+
+private fun dlsiteWorkUrl(sourceId: String, site: String): String? {
+    val id = worknoOf(sourceId) ?: return null
+    val name = site.filter { it.isLetter() }.ifBlank { "maniax" }
+    return "https://www.dlsite.com/$name/work/=/product_id/$id.html?locale=zh_CN"
+}
+
+private fun worknoOf(sourceId: String): String? = try {
+    com.nanahoshi.audioplayer.dlsite.DlsiteClient.worknoOf(sourceId).takeIf { it.isNotBlank() }
+} catch (_: Exception) {
+    sourceId.trim().takeIf { it.isNotEmpty() }
+}
+
+private fun Context.openWorkSite(url: String?) {
+    if (url.isNullOrBlank()) {
+        (applicationContext as Application).graph().messages.value = "没有作品编号"
+        return
+    }
+    try {
+        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+    } catch (_: ActivityNotFoundException) {
+        (applicationContext as Application).graph().messages.value = "没有可用的浏览器"
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun OnlineWorkScreen(
@@ -1195,10 +1230,38 @@ fun OnlineWorkScreen(
     viewModel: OnlineWorkViewModel = viewModel(),
 ) {
     val context = LocalContext.current
+    var browserChoice by remember { mutableStateOf(false) }
     LaunchedEffect(sourceId) { viewModel.load(sourceId, context.onMeteredNetwork()) }
     BackHandler(enabled = viewModel.canGoUp()) { viewModel.up() }
     val facts = viewModel.facts
     val canSave = facts != null && !viewModel.asmrMissing || viewModel.purchased
+    if (browserChoice && facts != null) {
+        AlertDialog(
+            onDismissRequest = { browserChoice = false },
+            title = { Text("打开外部浏览器") },
+            text = {
+                Column(Modifier.fillMaxWidth()) {
+                    TextButton(
+                        onClick = {
+                            browserChoice = false
+                            context.openWorkSite(asmrWorkUrl(facts.sourceId))
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("asmr.one") }
+                    TextButton(
+                        onClick = {
+                            browserChoice = false
+                            context.openWorkSite(dlsiteWorkUrl(facts.sourceId, viewModel.dlsiteSite))
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("DLsite") }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { browserChoice = false }) { Text("取消") }
+            },
+        )
+    }
     Column(Modifier.fillMaxSize()) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(8.dp)) {
             IconButton(onClick = onBack) {
@@ -1219,6 +1282,12 @@ fun OnlineWorkScreen(
                     ) { Text("保存") }
                 }
             }
+        }
+        if (facts != null) {
+            TextButton(
+                onClick = { browserChoice = true },
+                modifier = Modifier.padding(start = 8.dp),
+            ) { Text("打开外部浏览器") }
         }
         when {
             facts == null && viewModel.busy -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -1908,7 +1977,7 @@ private fun WhisperHelpDialog(onDismiss: () -> Unit) {
                     modifier = Modifier.padding(top = 8.dp),
                 )
                 Text(
-                    "地址填写服务基址，包含协议和端口，不要以 /v1 结尾，末尾也不要加斜杠。例如 http://192.168.1.20:8765。口令填写在下方，请求时通过 Authorization 发送。语言固定为日语。",
+                    "地址填写服务基址，包含协议和端口，不要以 /v1 结尾，末尾也不要加斜杠。例如 http://192.168.1.20:8765。口令填写在下方，请求时通过 Authorization 发送。语言固定为日语。连到局域网时，系统会询问是否允许访问本地网络，需要允许。",
                     modifier = Modifier.padding(top = 8.dp),
                 )
                 Text(

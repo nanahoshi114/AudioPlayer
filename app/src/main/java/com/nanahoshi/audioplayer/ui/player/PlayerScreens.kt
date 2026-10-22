@@ -1,7 +1,20 @@
 package com.nanahoshi.audioplayer.ui.player
 
+import android.Manifest
+import android.app.Activity
 import android.app.Application
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -46,6 +59,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
@@ -58,6 +72,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nanahoshi.audioplayer.data.TrackSource
+import com.nanahoshi.audioplayer.data.isLocalNetworkAddress
 import com.nanahoshi.audioplayer.data.WhisperStart
 import com.nanahoshi.audioplayer.data.db.DownloadStatus
 import com.nanahoshi.audioplayer.graph
@@ -139,6 +154,18 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     fun dismissTranslatePrompt() {
         translatePrompt = false
+    }
+
+    fun generateNeedsLocalNetwork(translate: Boolean): Boolean {
+        if (isLocalNetworkAddress(graph.credentials.whisperBaseUrl())) return true
+        return translate && isLocalNetworkAddress(graph.credentials.translateBaseUrl())
+    }
+
+    fun translateNeedsLocalNetwork(): Boolean =
+        isLocalNetworkAddress(graph.credentials.translateBaseUrl())
+
+    fun reportLocalNetworkDenied() {
+        graph.messages.value = "需要允许访问本地网络，才能连接这台设备"
     }
 
     fun requestTranslation() {
@@ -322,6 +349,7 @@ fun NowPlayingScreen(onBack: () -> Unit, viewModel: PlayerViewModel = viewModel(
     val subtitle = cues.textAt(state.positionMs, viewModel.showChinese)
     var showSubtitles by remember { mutableStateOf(false) }
     var discardPrompt by remember { mutableStateOf(false) }
+    val localNetwork = rememberLocalNetworkAccess { viewModel.reportLocalNetworkDenied() }
     LaunchedEffect(subtitle) { subtitleScroll.scrollTo(0) }
     WhisperPromptDialog(viewModel)
     if (discardPrompt) {
@@ -349,7 +377,9 @@ fun NowPlayingScreen(onBack: () -> Unit, viewModel: PlayerViewModel = viewModel(
             canDelete = viewModel.fromGenerated,
             onChinese = { viewModel.showChinese = true },
             onJapanese = { viewModel.showChinese = false },
-            onTranslate = viewModel::requestTranslation,
+            onTranslate = {
+                localNetwork.run(viewModel.translateNeedsLocalNetwork(), viewModel::requestTranslation)
+            },
             onStop = viewModel::cancelTranslation,
             onDelete = { discardPrompt = true },
             onBack = { showSubtitles = false },
@@ -412,10 +442,18 @@ fun NowPlayingScreen(onBack: () -> Unit, viewModel: PlayerViewModel = viewModel(
                         horizontalArrangement = Arrangement.Center,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        TextButton(onClick = { viewModel.requestGenerate(translate = true) }) {
+                        TextButton(onClick = {
+                            localNetwork.run(viewModel.generateNeedsLocalNetwork(true)) {
+                                viewModel.requestGenerate(translate = true)
+                            }
+                        }) {
                             Text("生成字幕和翻译")
                         }
-                        TextButton(onClick = { viewModel.requestGenerate(translate = false) }) {
+                        TextButton(onClick = {
+                            localNetwork.run(viewModel.generateNeedsLocalNetwork(false)) {
+                                viewModel.requestGenerate(translate = false)
+                            }
+                        }) {
                             Text("生成字幕")
                         }
                     }
@@ -608,6 +646,57 @@ private fun SleepTimerDialog(onDismiss: () -> Unit, onStart: (Long) -> Unit) {
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
+}
+
+private class LocalNetworkAccess(val run: (Boolean, () -> Unit) -> Unit)
+
+@Composable
+private fun rememberLocalNetworkAccess(onDenied: () -> Unit): LocalNetworkAccess {
+    val context = LocalContext.current
+    var pending by remember { mutableStateOf<(() -> Unit)?>(null) }
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        val next = pending
+        pending = null
+        if (granted) {
+            next?.invoke()
+            return@rememberLauncherForActivityResult
+        }
+        onDenied()
+        val activity = context.findActivity()
+        val permanent = activity != null && !ActivityCompat.shouldShowRequestPermissionRationale(
+            activity,
+            Manifest.permission.ACCESS_LOCAL_NETWORK,
+        )
+        if (permanent) {
+            context.startActivity(
+                Intent(
+                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.fromParts("package", context.packageName, null),
+                ),
+            )
+        }
+    }
+    return LocalNetworkAccess { needed, action ->
+        val allowed = Build.VERSION.SDK_INT < 37 || ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_LOCAL_NETWORK,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!needed || allowed) {
+            action()
+        } else {
+            pending = action
+            launcher.launch(Manifest.permission.ACCESS_LOCAL_NETWORK)
+        }
+    }
+}
+
+private fun Context.findActivity(): Activity? {
+    var current = this
+    while (current is ContextWrapper) {
+        if (current is Activity) return current
+        current = current.baseContext
+    }
+    return null
 }
 
 @Composable
