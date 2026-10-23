@@ -69,8 +69,28 @@ class WhisperClient(
         return WhisperCreated(id, json.optString("status"))
     }
 
+    fun transcribeQwen3(file: File, base: String, durationMs: Long, ticket: InflightCalls.Ticket): List<WhisperCue> {
+        val model = qwen3AsrModelId(listedModelIds(base, ticket)) ?: QWEN3_ASR_MODEL
+        val body = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart("file", uploadName(file), file.asRequestBody(AUDIO.toMediaType()))
+            .addFormDataPart("model", model)
+            .addFormDataPart("language", "ja")
+            .addFormDataPart("response_format", "json")
+            .build()
+        val json = execute(
+            onlineHttp,
+            Request.Builder().url(endpoint(base, "audio", "transcriptions")).post(body),
+            ticket,
+        ) { response ->
+            val text = response.body?.string().orEmpty()
+            if (!response.isSuccessful) throw WhisperException(readError(text, "生成失败"))
+            parseObject(text)
+        }
+        return cuesFromQwen3(json, durationMs)
+    }
+
     fun transcribeOnline(file: File, base: String, ticket: InflightCalls.Ticket): List<WhisperCue> {
-        if (file.length() > ONLINE_LIMIT) throw WhisperException("这首太大，线上模型接不了")
         val body = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart("file", uploadName(file), file.asRequestBody(AUDIO.toMediaType()))
@@ -165,6 +185,53 @@ class WhisperClient(
         }.build()
     }
 
+    private fun listedModelIds(base: String, ticket: InflightCalls.Ticket): List<String> = try {
+        execute(onlineHttp, Request.Builder().url(endpoint(base, "models")).get(), ticket) { response ->
+            val text = response.body?.string().orEmpty()
+            if (!response.isSuccessful) return@execute emptyList()
+            val array = try {
+                JSONObject(text).optJSONArray("data")
+            } catch (_: Exception) {
+                null
+            } ?: return@execute emptyList()
+            buildList {
+                for (index in 0 until array.length()) {
+                    val id = array.optJSONObject(index)?.optString("id").orEmpty()
+                    if (id.isNotBlank()) add(id)
+                }
+            }
+        }
+    } catch (error: WhisperException) {
+        when (error.message) {
+            "无法连接听写服务", "没有听写口令", "听写地址不正确", "没有听写地址" -> throw error
+            else -> emptyList()
+        }
+    }
+
+    private fun cuesFromQwen3(json: JSONObject, durationMs: Long): List<WhisperCue> {
+        val segments = parseOnlineSegments(json)
+        if (segments.isNotEmpty()) return segments
+        val words = parseWordPieces(json)
+        if (words.isNotEmpty()) return groupTimedPieces(words)
+        return cueFromWholeTranscript(json.optString("text"), durationMs)
+    }
+
+    private fun parseWordPieces(json: JSONObject): List<WhisperCue> {
+        val array = json.optJSONArray("words") ?: return emptyList()
+        return buildList {
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index) ?: continue
+                val line = item.optString("word").ifBlank { item.optString("text") }
+                if (line.isEmpty()) continue
+                val start = (item.optDouble("start", -1.0) * 1000).toLong()
+                var end = (item.optDouble("end", -1.0) * 1000).toLong()
+                if (start < 0L || end < 0L) continue
+                if (end <= start) end = start + 1
+                add(WhisperCue(start, end, line))
+            }
+        }
+    }
+
     private fun parseOnlineSegments(json: JSONObject): List<WhisperCue> {
         val array = json.optJSONArray("segments") ?: return emptyList()
         return buildList {
@@ -208,8 +275,13 @@ class WhisperClient(
 
     private companion object {
         const val AUDIO = "application/octet-stream"
-        const val ONLINE_LIMIT = 25L * 1024L * 1024L
     }
+}
+
+internal fun audioContainerFormat(fileName: String, header: ByteArray): String {
+    val named = audioUploadName(fileName, header)
+    val ext = named.substringAfterLast('.', "").lowercase()
+    return if (ext in AUDIO_EXTENSIONS) ext else "mp3"
 }
 
 internal fun audioUploadName(fileName: String, header: ByteArray): String {

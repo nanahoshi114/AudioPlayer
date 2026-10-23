@@ -317,7 +317,7 @@ interface WhisperDao {
         """
         UPDATE whisper_jobs
         SET title = :title, fingerprint = :fingerprint, trackId = :trackId, localPath = :path,
-            awaitRemoteUrl = :url, endpoint = :endpoint, skipTranslate = :skipTranslate,
+            awaitRemoteUrl = :url, endpoint = :endpoint, skipTranslate = :skipTranslate, model = :model,
             status = 'QUEUED', remoteJobId = NULL, progress = 0, error = NULL, translateStatus = NULL
         WHERE id = :id
         """,
@@ -331,6 +331,7 @@ interface WhisperDao {
         url: String?,
         endpoint: String?,
         skipTranslate: Boolean?,
+        model: String?,
     )
 
     @Query(

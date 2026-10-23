@@ -279,6 +279,7 @@ data class WhisperJobEntity(
     val translatedAt: Long? = null,
     val translateStatus: String? = null,
     val skipTranslate: Boolean? = null,
+    val model: String? = null,
 )
 
 @Entity(tableName = "translation_jobs")

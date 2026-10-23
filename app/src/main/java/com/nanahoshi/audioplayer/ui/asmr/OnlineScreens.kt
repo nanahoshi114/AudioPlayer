@@ -48,7 +48,10 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.ExposedDropdownMenuAnchorType
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -97,6 +100,13 @@ import com.nanahoshi.audioplayer.asmr.AsmrWork
 import com.nanahoshi.audioplayer.asmr.CatalogLookup
 import com.nanahoshi.audioplayer.asmr.WorkFacts
 import com.nanahoshi.audioplayer.data.LibrarySort
+import com.nanahoshi.audioplayer.data.WHISPER_MODEL_1
+import com.nanahoshi.audioplayer.data.WHISPER_MODEL_JOBS
+import com.nanahoshi.audioplayer.data.WHISPER_MODEL_LOCAL
+import com.nanahoshi.audioplayer.data.WHISPER_MODEL_QWEN
+import com.nanahoshi.audioplayer.data.WHISPER_MODEL_QWEN3
+import com.nanahoshi.audioplayer.data.isCloudWhisperModel
+import com.nanahoshi.audioplayer.data.whisperModelLabel
 import com.nanahoshi.audioplayer.data.TrackSource
 import com.nanahoshi.audioplayer.data.db.FileKind
 import com.nanahoshi.audioplayer.data.db.FolderEntity
@@ -1698,6 +1708,7 @@ class MineViewModel(app: Application) : AndroidViewModel(app) {
     private var qrGeneration = 0
     var whisperBase by mutableStateOf(graph.credentials.whisperBaseUrl().orEmpty())
     var whisperToken by mutableStateOf(graph.credentials.whisperToken().orEmpty())
+    var whisperModel by mutableStateOf(graph.credentials.resolvedWhisperModel())
     var whisperSaved by mutableStateOf(graph.credentials.hasWhisper())
         private set
     var translateBase by mutableStateOf(graph.credentials.translateBaseUrl().orEmpty())
@@ -1707,9 +1718,10 @@ class MineViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     fun saveWhisper() {
-        graph.credentials.saveWhisper(whisperBase, whisperToken)
+        graph.credentials.saveWhisper(whisperBase, whisperToken, whisperModel)
         whisperBase = graph.credentials.whisperBaseUrl().orEmpty()
         whisperToken = graph.credentials.whisperToken().orEmpty()
+        whisperModel = graph.credentials.resolvedWhisperModel()
         whisperSaved = graph.credentials.hasWhisper()
     }
 
@@ -1717,6 +1729,7 @@ class MineViewModel(app: Application) : AndroidViewModel(app) {
         graph.credentials.clearWhisper()
         whisperBase = ""
         whisperToken = ""
+        whisperModel = graph.credentials.resolvedWhisperModel()
         whisperSaved = false
     }
 
@@ -2004,17 +2017,24 @@ fun MineScreen(
                     Icon(Icons.AutoMirrored.Outlined.HelpOutline, contentDescription = "听写说明")
                 }
             }
-            OutlinedTextField(
-                value = viewModel.whisperBase,
-                onValueChange = { viewModel.whisperBase = it },
-                label = { Text("地址") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
+            WhisperModelField(
+                model = viewModel.whisperModel,
+                onModel = { viewModel.whisperModel = it },
             )
+            if (!isCloudWhisperModel(viewModel.whisperModel)) {
+                OutlinedTextField(
+                    value = viewModel.whisperBase,
+                    onValueChange = { viewModel.whisperBase = it },
+                    label = { Text("地址") },
+                    singleLine = true,
+                    supportingText = whisperAddressHint(viewModel.whisperModel),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
             OutlinedTextField(
                 value = viewModel.whisperToken,
                 onValueChange = { viewModel.whisperToken = it },
-                label = { Text("口令") },
+                label = { Text(if (isCloudWhisperModel(viewModel.whisperModel)) "API Key" else "口令") },
                 singleLine = true,
                 visualTransformation = PasswordVisualTransformation(),
                 modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
@@ -2186,6 +2206,54 @@ private fun BiliQrDialog(
     )
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun WhisperModelField(model: String, onModel: (String) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = it },
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+    ) {
+        OutlinedTextField(
+            value = whisperModelLabel(model),
+            onValueChange = {},
+            readOnly = true,
+            label = { Text("模型") },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable).fillMaxWidth(),
+        )
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+        ) {
+            listOf(
+                WHISPER_MODEL_1,
+                WHISPER_MODEL_LOCAL,
+                WHISPER_MODEL_QWEN,
+                WHISPER_MODEL_QWEN3,
+                WHISPER_MODEL_JOBS,
+            ).forEach { id ->
+                DropdownMenuItem(
+                    text = { Text(whisperModelLabel(id)) },
+                    onClick = {
+                        onModel(id)
+                        expanded = false
+                    },
+                    contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding,
+                )
+            }
+        }
+    }
+}
+
+private fun whisperAddressHint(model: String): (@Composable () -> Unit)? = when (model) {
+    WHISPER_MODEL_LOCAL, WHISPER_MODEL_QWEN3 -> {
+        { Text("需要填写服务地址") }
+    }
+    else -> null
+}
+
 @Composable
 private fun WhisperHelpDialog(onDismiss: () -> Unit) {
     AlertDialog(
@@ -2193,30 +2261,25 @@ private fun WhisperHelpDialog(onDismiss: () -> Unit) {
         title = { Text("听写") },
         text = {
             Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
-                Text("本地部署", style = MaterialTheme.typography.titleSmall)
+                Text("whisper-1 和 qwen-audio-3.1-asr 是线上模型，只填写 API Key，不显示地址。whisper-1 使用 https://api.openai.com，qwen-audio-3.1-asr 使用 https://dashscope.aliyuncs.com。whisper（本地部署）、Qwen3-ASR 和本机任务接口要填写地址和口令。连到局域网时，系统会询问是否允许访问本地网络，需要允许。")
                 Text(
-                    "应用不发送模型名。服务加载 faster-whisper，或其他遵循同一接口的 Whisper 模型即可，例如各尺寸的 Whisper 与 Kotoba-Whisper。",
+                    "whisper-1：模型名固定为 whisper-1，语言为日语，并要求返回每个分段的开始时间、结束时间和文本。单次请求最长等待 10 分钟。文件超过 25MB 时，会先询问是否仍要发送；确认后仍会上传。",
                     modifier = Modifier.padding(top = 8.dp),
                 )
                 Text(
-                    "地址填写服务基址，包含协议和端口，不要以 /v1 结尾，末尾也不要加斜杠。例如 http://192.168.1.20:8765。口令填写在下方，请求时通过 Authorization 发送。语言固定为日语。连到局域网时，系统会询问是否允许访问本地网络，需要允许。",
+                    "whisper（本地部署）：地址填写本机服务基址，不能留空。基址若不以 /v1 结尾，请求时会补上。请求内容与 whisper-1 相同，模型名仍发送 whisper-1。文件超过 25MB 时直接发送。服务不检查口令时，填写任意非空内容即可。",
                     modifier = Modifier.padding(top = 8.dp),
                 )
                 Text(
-                    "接口以 docs/whisper-api.md 为准。应用将音频提交到 POST /jobs，用 GET /jobs/{id} 查询进度，用 GET /jobs/{id}/cues 读取字幕。地址若以 /v1 结尾，则不会使用这套接口。",
+                    "qwen-audio-3.1-asr：不超过 5 分钟的音频直接提交。更长的会先上传到临时存储，再转写。语言提示为日语。超过临时上传上限时不会上传。",
                     modifier = Modifier.padding(top = 8.dp),
                 )
                 Text(
-                    "线上模型",
-                    style = MaterialTheme.typography.titleSmall,
-                    modifier = Modifier.padding(top = 16.dp),
-                )
-                Text(
-                    "地址以 /v1 结尾时走线上接口，例如 https://api.openai.com/v1。应用固定使用模型名 whisper-1，语言为日语，并要求返回带分段时间的结果。",
+                    "Qwen3-ASR：本地部署的开源模型，与 qwen-audio-3.1-asr 分开。地址填写本机服务基址，不能留空；基址若不以 /v1 结尾，请求时会补上。应用先读取服务上已加载的模型名，再把音频提交到音频转写接口，语言为日语。服务返回每个分段的开始和结束时间时，按段生成字幕。只返回整段文字时，整段文字作为一条字幕，覆盖整首的时长。没有读出时长、也没有分段时间时，记为「没有分段时间」。口令会放在请求里；服务不检查口令时，填写任意非空内容即可。",
                     modifier = Modifier.padding(top = 8.dp),
                 )
                 Text(
-                    "线上接口不能在应用内更换模型名。服务若不接受 whisper-1，听写会失败。音频超过 25MB 不会上传。单次请求会等待转写结束，最长 10 分钟。返回内容必须包含每个分段的开始时间、结束时间和文本。",
+                    "本机任务接口：按 docs/whisper-api.md。应用将音频提交到 POST /jobs，用 GET /jobs/{id} 查询进度，用 GET /jobs/{id}/cues 读取字幕。",
                     modifier = Modifier.padding(top = 8.dp),
                 )
             }

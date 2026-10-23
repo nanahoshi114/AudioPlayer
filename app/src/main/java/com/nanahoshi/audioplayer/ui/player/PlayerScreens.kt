@@ -72,6 +72,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nanahoshi.audioplayer.data.TrackSource
+import com.nanahoshi.audioplayer.data.effectiveWhisperBase
 import com.nanahoshi.audioplayer.data.isLocalNetworkAddress
 import com.nanahoshi.audioplayer.data.WhisperStart
 import com.nanahoshi.audioplayer.data.db.DownloadStatus
@@ -157,7 +158,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun generateNeedsLocalNetwork(translate: Boolean): Boolean {
-        if (isLocalNetworkAddress(graph.credentials.whisperBaseUrl())) return true
+        val whisperBase = effectiveWhisperBase(
+            graph.credentials.resolvedWhisperModel(),
+            graph.credentials.whisperBaseUrl(),
+        )
+        if (isLocalNetworkAddress(whisperBase)) return true
         return translate && isLocalNetworkAddress(graph.credentials.translateBaseUrl())
     }
 
@@ -704,7 +709,7 @@ private fun WhisperPromptDialog(viewModel: PlayerViewModel) {
     when (viewModel.whisperPrompt) {
         WhisperPrompt.NeedSettings -> AlertDialog(
             onDismissRequest = viewModel::dismissWhisperPrompt,
-            text = { Text("请先在「我的」里填写听写地址和口令") },
+            text = { Text("请先在「我的」里保存听写设置。线上模型只需 API Key；本地部署的模型还要填写地址和口令") },
             confirmButton = {
                 TextButton(onClick = viewModel::dismissWhisperPrompt) { Text("知道了") }
             },

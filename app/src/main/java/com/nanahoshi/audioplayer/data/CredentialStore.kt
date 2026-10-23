@@ -77,15 +77,20 @@ class CredentialStore(context: Context) {
 
     fun whisperToken(): String? = secretPrefs.getString(KEY_WHISPER_TOKEN, null)?.trim()?.takeIf { it.isNotEmpty() }
 
-    fun hasWhisper(): Boolean = whisperBaseUrl() != null && whisperToken() != null
+    fun hasWhisper(): Boolean =
+        whisperToken() != null && effectiveWhisperBase(resolvedWhisperModel(), whisperBaseUrl()) != null
 
-    fun saveWhisper(baseUrl: String, token: String) {
+    fun whisperModel(): String? = knownWhisperModel(plainPrefs.getString(KEY_WHISPER_MODEL, null))
+
+    fun resolvedWhisperModel(): String = whisperModel() ?: inferredWhisperModel(whisperBaseUrl())
+
+    fun saveWhisper(baseUrl: String, token: String, model: String) {
         val base = normalizeWhisperBase(baseUrl)
-        if (base == null) {
-            plainPrefs.edit().remove(KEY_WHISPER_BASE).apply()
-        } else {
-            plainPrefs.edit().putString(KEY_WHISPER_BASE, base).apply()
-        }
+        val edit = plainPrefs.edit()
+        if (base == null) edit.remove(KEY_WHISPER_BASE) else edit.putString(KEY_WHISPER_BASE, base)
+        val known = knownWhisperModel(model)
+        if (known == null) edit.remove(KEY_WHISPER_MODEL) else edit.putString(KEY_WHISPER_MODEL, known)
+        edit.apply()
         val secret = token.trim()
         if (secret.isEmpty()) {
             secretPrefs.edit().remove(KEY_WHISPER_TOKEN).apply()
@@ -95,7 +100,7 @@ class CredentialStore(context: Context) {
     }
 
     fun clearWhisper() {
-        plainPrefs.edit().remove(KEY_WHISPER_BASE).apply()
+        plainPrefs.edit().remove(KEY_WHISPER_BASE).remove(KEY_WHISPER_MODEL).apply()
         secretPrefs.edit().remove(KEY_WHISPER_TOKEN).apply()
     }
 
@@ -219,6 +224,7 @@ class CredentialStore(context: Context) {
         const val KEY_DLSITE_COOKIE = "dlsite_cookie"
         const val KEY_WHISPER_BASE = "whisper_base_url"
         const val KEY_WHISPER_TOKEN = "whisper_token"
+        const val KEY_WHISPER_MODEL = "whisper_model"
         const val KEY_TRANSLATE_BASE = "translate_base_url"
         const val KEY_TRANSLATE_TOKEN = "translate_token"
         const val KEY_TRANSLATE_MODEL = "translate_model"
