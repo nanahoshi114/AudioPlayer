@@ -39,6 +39,18 @@ interface FolderDao {
     @Query("UPDATE folders SET contentSource = :source WHERE id = :id")
     suspend fun setContentSource(id: Long, source: String)
 
+    @Query(
+        """
+        UPDATE folders
+        SET name = :name, asmrWorkId = :workId, asmrSourceId = :sourceId, coverUri = :cover, workMeta = :meta
+        WHERE id = :id
+        """,
+    )
+    suspend fun markAsWork(id: Long, name: String, workId: Long, sourceId: String, cover: String?, meta: String)
+
+    @Query("UPDATE folders SET asmrWorkId = :workId, contentSource = :source WHERE id = :id")
+    suspend fun markWorkChild(id: Long, workId: Long, source: String)
+
     @Insert
     suspend fun insert(folder: FolderEntity): Long
 
@@ -72,6 +84,9 @@ interface TrackDao {
     @Query("SELECT * FROM tracks WHERE localUri = :uri LIMIT 1")
     suspend fun findByLocalUri(uri: String): TrackEntity?
 
+    @Query("SELECT * FROM tracks WHERE source IN ('ASMR', 'DLSITE') AND localUri IS NOT NULL")
+    suspend fun onlineWithLocal(): List<TrackEntity>
+
     @Query("SELECT * FROM tracks WHERE bvid = :bvid AND cid = :cid LIMIT 1")
     suspend fun findByBvid(bvid: String, cid: Long): TrackEntity?
 
@@ -98,6 +113,24 @@ interface TrackDao {
 
     @Query("UPDATE tracks SET localUri = NULL WHERE id = :id")
     suspend fun clearLocalUri(id: Long)
+
+    @Query(
+        """
+        UPDATE tracks
+        SET source = :source, artist = :artist, coverUri = :cover, remoteUrl = :url,
+            asmrWorkId = :workId, fileHash = :hash
+        WHERE id = :id
+        """,
+    )
+    suspend fun attachWork(
+        id: Long,
+        source: TrackSource,
+        artist: String?,
+        cover: String?,
+        url: String?,
+        workId: Long,
+        hash: String,
+    )
 }
 
 @Dao
@@ -125,6 +158,15 @@ interface LibraryFileDao {
 
     @Query("DELETE FROM library_files WHERE id = :id")
     suspend fun delete(id: Long)
+
+    @Query(
+        """
+        UPDATE library_files
+        SET asmrWorkId = :workId, fileHash = :hash, remoteUrl = :url
+        WHERE id = :id
+        """,
+    )
+    suspend fun attachWork(id: Long, workId: Long, hash: String, url: String)
 }
 
 @Dao
@@ -177,6 +219,12 @@ interface DownloadDao {
     @Query("DELETE FROM downloads WHERE trackId = :trackId AND status = 'DONE'")
     suspend fun deleteFinishedForTrack(trackId: Long)
 
+    @Query("SELECT * FROM downloads WHERE status = 'DONE'")
+    suspend fun finished(): List<DownloadEntity>
+
+    @Query("DELETE FROM downloads WHERE status = 'DONE' AND localPath = :path")
+    suspend fun deleteFinishedForPath(path: String)
+
     @Query("SELECT * FROM downloads WHERE trackId = :trackId ORDER BY id DESC LIMIT 1")
     suspend fun latestForTrack(trackId: Long): DownloadEntity?
 
@@ -213,6 +261,9 @@ interface WhisperDao {
         """,
     )
     suspend fun nextUploadable(): WhisperJobEntity?
+
+    @Query("SELECT * FROM whisper_jobs WHERE status = 'DONE'")
+    suspend fun done(): List<WhisperJobEntity>
 
     @Query("SELECT * FROM whisper_jobs WHERE status = 'DONE' AND trackId = :trackId")
     suspend fun doneForTrack(trackId: Long): List<WhisperJobEntity>

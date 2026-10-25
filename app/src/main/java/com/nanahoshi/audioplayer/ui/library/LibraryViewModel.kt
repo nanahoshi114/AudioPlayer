@@ -363,6 +363,11 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         graph.library.createFolder(currentFolderId.value, name)
     }
 
+    fun recognizeFolder(folderId: Long, input: String) = launch {
+        graph.library.recognizeLocalFolder(folderId, input)
+        graph.messages.value = "已识别为作品"
+    }
+
     fun importRj(input: String) = launch {
         graph.library.importAsmr(input, currentFolderId.value)
         graph.messages.value = "已导入作品"

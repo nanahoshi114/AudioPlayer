@@ -387,6 +387,7 @@ fun NowPlayingScreen(onBack: () -> Unit, viewModel: PlayerViewModel = viewModel(
             },
             onStop = viewModel::cancelTranslation,
             onDelete = { discardPrompt = true },
+            onSeek = viewModel.client::seekTo,
             onBack = { showSubtitles = false },
         )
         return
@@ -540,6 +541,7 @@ private fun SubtitleReader(
     onTranslate: () -> Unit,
     onStop: () -> Unit,
     onDelete: () -> Unit,
+    onSeek: (Long) -> Unit,
     onBack: () -> Unit,
 ) {
     BackHandler(onBack = onBack)
@@ -590,7 +592,10 @@ private fun SubtitleReader(
                     color = if (current) blue else MaterialTheme.colorScheme.onSurface,
                     fontWeight = if (current) FontWeight.SemiBold else FontWeight.Normal,
                     textAlign = TextAlign.Center,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSeek(cue.startMs) }
+                        .padding(horizontal = 24.dp, vertical = 12.dp),
                 )
             }
         }

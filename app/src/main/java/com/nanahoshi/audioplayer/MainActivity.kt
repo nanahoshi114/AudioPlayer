@@ -44,6 +44,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.nanahoshi.audioplayer.ui.download.DownloadScreen
+import com.nanahoshi.audioplayer.ui.download.StoredFilesScreen
 import com.nanahoshi.audioplayer.ui.asmr.MineScreen
 import com.nanahoshi.audioplayer.ui.asmr.PurchasesScreen
 import com.nanahoshi.audioplayer.ui.asmr.OnlineSearchScreen
@@ -80,6 +81,7 @@ private object Routes {
     const val Purchases = "purchases"
     const val NowPlaying = "now"
     const val Downloads = "downloads"
+    const val Stored = "stored"
     const val Preview = "preview/{fileId}"
     fun preview(fileId: Long) = "preview/$fileId"
     const val RemotePreview = "preview/remote"
@@ -256,6 +258,7 @@ private fun PlayerApp() {
                 MineScreen(
                     onOpenPurchases = { navController.navigate(Routes.Purchases) },
                     onOpenFavorites = { navController.navigate(Routes.favorites(null)) },
+                    onOpenStored = { navController.navigate(Routes.Stored) },
                 )
             }
             composable(Routes.Playlist) { entry ->
@@ -268,6 +271,12 @@ private fun PlayerApp() {
             }
             composable(Routes.NowPlaying) { NowPlayingScreen(onBack = { navController.popBackStack() }) }
             composable(Routes.Downloads) { DownloadScreen(onBack = { navController.popBackStack() }) }
+            composable(Routes.Stored) {
+                StoredFilesScreen(
+                    onBack = { navController.popBackStack() },
+                    onOpenWork = { sourceId -> navController.navigate(Routes.onlineWork(sourceId)) },
+                )
+            }
             composable(Routes.Purchases) {
                 PurchasesScreen(
                     onBack = { navController.popBackStack() },

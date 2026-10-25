@@ -47,24 +47,12 @@ class SubtitleSource(
     }
 
     suspend fun discard(row: QueuedTrack) = withContext(Dispatchers.IO) {
-        val jobs = relatedDone(row)
-        jobs.map { it.fingerprint }.filter { it.isNotBlank() }.distinct().forEach { fingerprint ->
-            val file = generatedFile(fingerprint)
-            if (file.name != ".json") file.delete()
-            db.whisper().deleteDoneForFingerprint(fingerprint)
-        }
-        overlayFile(row).delete()
-        val trackId = row.trackId?.takeIf { it > 0L }
-        if (trackId != null) {
-            db.whisper().deleteDoneForTrack(trackId)
-            db.translations().deleteForTrack(trackId)
-        }
-        row.remoteUrl?.takeIf { it.isNotBlank() }?.let {
-            db.whisper().deleteDoneForUrl(it)
-            db.translations().deleteForUrl(it)
-        }
-        storedAudioPath(row)?.let { db.whisper().deleteDoneForPath(it) }
+        removeGenerated(row)
         db.translations().deleteForQueue(row.queueItemId)
+    }
+
+    suspend fun discardStored(trackId: Long?, localPath: String?, remoteUrl: String?) = withContext(Dispatchers.IO) {
+        removeGenerated(storedRow(trackId, localPath, remoteUrl))
     }
 
     suspend fun cuesFor(track: TrackEntity): List<SubtitleCue> = withContext(Dispatchers.IO) {
@@ -100,6 +88,46 @@ class SubtitleSource(
     private suspend fun generated(row: QueuedTrack): List<SubtitleCue>? {
         val job = findGeneratedJob(row) ?: return null
         return readGenerated(job)
+    }
+
+    private fun storedRow(trackId: Long?, localPath: String?, remoteUrl: String?) = QueuedTrack(
+        queueItemId = -1,
+        position = 0,
+        trackId = trackId?.takeIf { it > 0L },
+        source = TrackSource.LOCAL,
+        title = "",
+        artist = null,
+        durationMs = 0,
+        coverUri = null,
+        localUri = localPath,
+        bvid = null,
+        cid = null,
+        page = null,
+        remoteUrl = remoteUrl,
+        referer = null,
+        workno = null,
+        fileKey = null,
+    )
+
+    private suspend fun removeGenerated(row: QueuedTrack) {
+        val jobs = relatedDone(row)
+        jobs.map { it.fingerprint }.filter { it.isNotBlank() }.distinct().forEach { fingerprint ->
+            val file = generatedFile(fingerprint)
+            if (file.name != ".json") file.delete()
+            db.whisper().deleteDoneForFingerprint(fingerprint)
+        }
+        overlayFile(row).delete()
+        val trackId = row.trackId?.takeIf { it > 0L }
+        if (trackId != null) {
+            db.whisper().deleteDoneForTrack(trackId)
+            db.translations().deleteForTrack(trackId)
+        }
+        row.remoteUrl?.takeIf { it.isNotBlank() }?.let {
+            db.whisper().deleteDoneForUrl(it)
+            db.translations().deleteForUrl(it)
+        }
+        row.localUri?.takeIf { it.isNotBlank() }?.let { db.whisper().deleteDoneForPath(it) }
+        storedAudioPath(row)?.let { db.whisper().deleteDoneForPath(it) }
     }
 
     private suspend fun relatedDone(row: QueuedTrack): List<WhisperJobEntity> {

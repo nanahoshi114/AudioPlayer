@@ -68,6 +68,12 @@ object LocalAudio {
         return AudioNode(file.name?.ifBlank { null } ?: "文件夹", files, children)
     }
 
+    fun hasStoredCopy(uri: String?): Boolean {
+        if (uri.isNullOrBlank()) return false
+        if (uri.startsWith("content:", ignoreCase = true) || uri.startsWith("file:", ignoreCase = true)) return true
+        return uri.startsWith("/") && File(uri).isFile
+    }
+
     fun isAudio(name: String?): Boolean {
         val lower = name?.lowercase().orEmpty()
         return extensions.any { lower.endsWith(".$it") }

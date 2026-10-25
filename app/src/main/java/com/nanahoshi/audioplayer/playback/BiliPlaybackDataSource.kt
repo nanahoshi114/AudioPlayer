@@ -94,12 +94,7 @@ class BiliPlaybackDataSource(
             ?: throw IOException("无法识别音频")
         val track = runBlocking(Dispatchers.IO) { db.tracks().getById(trackId) }
             ?: throw IOException("找不到音频")
-        val local = track.localUri
-        if (!local.isNullOrBlank() && local.startsWith("/") && File(local).isFile) {
-            val fileSpec = dataSpec.buildUpon().setUri(Uri.fromFile(File(local))).build()
-            current = fallback
-            return fallback.open(fileSpec)
-        }
+        openStored(dataSpec, track.localUri)?.let { return it }
         var url = track.remoteUrl
         if (url.isNullOrBlank()) url = refreshAsmrUrl(track)
         if (url.isNullOrBlank()) throw IOException("没有可播放的地址")
@@ -109,6 +104,23 @@ class BiliPlaybackDataSource(
             if (error.responseCode != 403 && error.responseCode != 404) throw error
             val fresh = refreshAsmrUrl(track) ?: throw IOException("无法刷新音频地址", error)
             openAsmrHttp(dataSpec, fresh)
+        }
+    }
+
+    private fun openStored(dataSpec: DataSpec, local: String?): Long? {
+        if (local.isNullOrBlank()) return null
+        val uri = when {
+            local.startsWith("/") && File(local).isFile -> Uri.fromFile(File(local))
+            local.startsWith("content:") || local.startsWith("file:") -> local.toUri()
+            else -> return null
+        }
+        return try {
+            val opened = fallback.open(dataSpec.buildUpon().setUri(uri).build())
+            current = fallback
+            opened
+        } catch (error: Exception) {
+            if (local.startsWith("/")) throw error
+            null
         }
     }
 

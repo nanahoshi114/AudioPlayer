@@ -20,6 +20,7 @@ import com.nanahoshi.audioplayer.data.db.PlaylistTrack
 import com.nanahoshi.audioplayer.data.db.QueueItemEntity
 import com.nanahoshi.audioplayer.data.db.QueuedTrack
 import com.nanahoshi.audioplayer.data.db.TrackEntity
+import androidx.room.withTransaction
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -288,6 +289,27 @@ class LibraryRepository(
         orderedIds.mapNotNull { byId[it] }
     }
 
+    suspend fun recognizeLocalFolder(folderId: Long, input: String) = withContext(Dispatchers.IO) {
+        val code = input.trim()
+        if (code.isEmpty()) error("请填写 RJ 号")
+        val root = db.folders().get(folderId) ?: error("找不到文件夹")
+        if (root.asmrSourceId != null || root.asmrWorkId != null) error("这个文件夹已经是作品")
+        var parentId = root.parentId
+        while (parentId != null) {
+            val parent = db.folders().get(parentId) ?: break
+            if (parent.asmrSourceId != null || parent.asmrWorkId != null) error("这个文件夹已经在作品里面")
+            parentId = parent.parentId
+        }
+        val work = asmr.loadWork(code)
+        if (folderBySource(work.sourceId) != null) error("这部作品已经在音频库")
+        val local = localLevel(folderId)
+        when (val fit = fitLocalFolder(local, asmrMatchTree(work.nodes))) {
+            FolderFit.Empty -> error("这个文件夹里没有可对照的文件")
+            is FolderFit.Extra -> error("多出来的内容：${fit.path}")
+            is FolderFit.Ready -> adoptLocalWork(root, work, fit.assignment)
+        }
+    }
+
     suspend fun importAsmr(input: String, parentId: Long?) = withContext(Dispatchers.IO) {
         val work = asmr.loadWork(input)
         if (db.folders().findBySourceId(work.sourceId) != null) error("已经在音频库")
@@ -497,6 +519,83 @@ class LibraryRepository(
     suspend fun removeQueueItem(queueItemId: Long) = withContext(Dispatchers.IO) {
         db.queue().delete(queueItemId)
         compactQueue()
+    }
+
+    private suspend fun adoptLocalWork(root: FolderEntity, work: AsmrWork, assignment: FolderFitReady) {
+        val tracks = if (assignment.tracks.isEmpty()) {
+            emptyList()
+        } else {
+            db.tracks().getByIds(assignment.tracks.keys.toList())
+        }
+        val foreign = tracks.firstOrNull { it.source != TrackSource.LOCAL }
+        if (foreign != null) error("「${foreign.title}」不是本地导入的音频")
+        try {
+            db.withTransaction {
+                db.folders().markAsWork(
+                    root.id,
+                    sanitizeEntryName("${work.sourceId} ${work.title}"),
+                    work.id,
+                    work.sourceId,
+                    work.coverUrl,
+                    work.facts().toJson(),
+                )
+                val artist = work.circle.ifBlank { work.sourceId }
+                for (track in tracks) {
+                    val remote = assignment.tracks.getValue(track.id)
+                    db.tracks().attachWork(
+                        track.id,
+                        TrackSource.ASMR,
+                        artist,
+                        track.coverUri ?: work.coverUrl,
+                        remote.streamUrl,
+                        work.id,
+                        scopedFileHash(TrackSource.ASMR, remote.storageKey),
+                    )
+                }
+                for (folderId in assignment.folderIds) {
+                    db.folders().markWorkChild(folderId, work.id, TrackSource.ASMR.name)
+                }
+                for ((fileId, remote) in assignment.libraryFiles) {
+                    val existing = db.files().get(fileId)
+                    db.files().attachWork(
+                        fileId,
+                        work.id,
+                        scopedFileHash(TrackSource.ASMR, remote.storageKey),
+                        remote.streamUrl ?: existing?.remoteUrl.orEmpty(),
+                    )
+                }
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            if (failure.hasConstraint()) error("这部作品已经在音频库")
+            throw failure
+        }
+    }
+
+    private fun Throwable.hasConstraint(): Boolean =
+        this is android.database.sqlite.SQLiteConstraintException || cause?.hasConstraint() == true
+
+    private suspend fun localLevel(folderId: Long): LocalLevel {
+        val folders = db.folders().childrenOf(folderId).map { child ->
+            LocalMatchFolder(child.id, child.name, localLevel(child.id))
+        }
+        val tracks = db.tracks().inFolder(folderId).map { track ->
+            LocalMatchFile(localFileName(track), track.id, null)
+        }
+        val files = db.files().listIn(folderId).map { file ->
+            LocalMatchFile(file.name, null, file.id)
+        }
+        return LocalLevel(tracks + files, folders)
+    }
+
+    private fun localFileName(track: TrackEntity): String {
+        val raw = track.localUri?.trim().orEmpty()
+        if (raw.isNotEmpty()) {
+            val display = LocalAudio.displayName(context, Uri.parse(raw)).trim()
+            if (display.isNotEmpty()) return display
+        }
+        return track.title
     }
 
     private suspend fun importNode(node: AudioNode, parentId: Long?): Int {

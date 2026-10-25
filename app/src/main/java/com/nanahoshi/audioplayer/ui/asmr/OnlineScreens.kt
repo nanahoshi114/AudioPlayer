@@ -1597,7 +1597,7 @@ private fun trackSupporting(track: TrackEntity, hasSubtitle: Boolean): String {
         artist = artist,
         durationMs = track.durationMs,
         downloaded = (track.source == TrackSource.ASMR || track.source == TrackSource.DLSITE) &&
-            track.localUri?.startsWith("/") == true,
+            com.nanahoshi.audioplayer.data.LocalAudio.hasStoredCopy(track.localUri),
         hasSubtitle = hasSubtitle,
         source = source,
     )
@@ -1706,9 +1706,9 @@ class MineViewModel(app: Application) : AndroidViewModel(app) {
         private set
     private var qrJob: Job? = null
     private var qrGeneration = 0
-    var whisperBase by mutableStateOf(graph.credentials.whisperBaseUrl().orEmpty())
-    var whisperToken by mutableStateOf(graph.credentials.whisperToken().orEmpty())
     var whisperModel by mutableStateOf(graph.credentials.resolvedWhisperModel())
+    var whisperBase by mutableStateOf(graph.credentials.whisperBaseUrl(whisperModel).orEmpty())
+    var whisperToken by mutableStateOf(graph.credentials.whisperToken(whisperModel).orEmpty())
     var whisperSaved by mutableStateOf(graph.credentials.hasWhisper())
         private set
     var translateBase by mutableStateOf(graph.credentials.translateBaseUrl().orEmpty())
@@ -1717,19 +1717,25 @@ class MineViewModel(app: Application) : AndroidViewModel(app) {
     var translateSaved by mutableStateOf(graph.credentials.hasTranslate())
         private set
 
+    fun selectWhisperModel(id: String) {
+        whisperModel = id
+        whisperBase = graph.credentials.whisperBaseUrl(id).orEmpty()
+        whisperToken = graph.credentials.whisperToken(id).orEmpty()
+        whisperSaved = graph.credentials.hasWhisper(id)
+    }
+
     fun saveWhisper() {
         graph.credentials.saveWhisper(whisperBase, whisperToken, whisperModel)
-        whisperBase = graph.credentials.whisperBaseUrl().orEmpty()
-        whisperToken = graph.credentials.whisperToken().orEmpty()
+        whisperBase = graph.credentials.whisperBaseUrl(whisperModel).orEmpty()
+        whisperToken = graph.credentials.whisperToken(whisperModel).orEmpty()
         whisperModel = graph.credentials.resolvedWhisperModel()
-        whisperSaved = graph.credentials.hasWhisper()
+        whisperSaved = graph.credentials.hasWhisper(whisperModel)
     }
 
     fun clearWhisper() {
-        graph.credentials.clearWhisper()
+        graph.credentials.clearWhisper(whisperModel)
         whisperBase = ""
         whisperToken = ""
-        whisperModel = graph.credentials.resolvedWhisperModel()
         whisperSaved = false
     }
 
@@ -1891,6 +1897,7 @@ class PurchasesViewModel(app: Application) : AndroidViewModel(app) {
 fun MineScreen(
     onOpenPurchases: () -> Unit,
     onOpenFavorites: () -> Unit,
+    onOpenStored: () -> Unit,
     viewModel: MineViewModel = viewModel(),
 ) {
     var biliHelp by remember { mutableStateOf(false) }
@@ -1927,6 +1934,12 @@ fun MineScreen(
         TranslateHelpDialog(onDismiss = { translateHelp = false })
     }
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+        item(key = "stored") {
+            Button(
+                onClick = onOpenStored,
+                modifier = Modifier.padding(top = 16.dp),
+            ) { Text("下载管理") }
+        }
         item(key = "dlsite") {
             Text("DLsite", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
             if (!viewModel.loggedIn) {
@@ -2019,7 +2032,7 @@ fun MineScreen(
             }
             WhisperModelField(
                 model = viewModel.whisperModel,
-                onModel = { viewModel.whisperModel = it },
+                onModel = viewModel::selectWhisperModel,
             )
             if (!isCloudWhisperModel(viewModel.whisperModel)) {
                 OutlinedTextField(

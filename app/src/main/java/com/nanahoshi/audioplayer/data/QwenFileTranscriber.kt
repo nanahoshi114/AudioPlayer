@@ -18,7 +18,6 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 internal class QwenFileTranscriber(
-    private val credentials: CredentialStore,
     private val calls: InflightCalls,
 ) {
     private val http = OkHttpClient.Builder()
@@ -27,18 +26,18 @@ internal class QwenFileTranscriber(
         .writeTimeout(30, TimeUnit.MINUTES)
         .build()
 
-    suspend fun transcribe(file: File, base: String, ticket: InflightCalls.Ticket): List<WhisperCue> {
+    suspend fun transcribe(file: File, base: String, ticket: InflightCalls.Ticket, token: String): List<WhisperCue> {
         if (file.length() > QWEN_TEMP_BYTES) throw WhisperException("这首超过 1GB，千问接不了")
         val origin = qwenHttpOrigin(base)?.toHttpUrlOrNull() ?: throw WhisperException("听写地址不正确")
-        val policy = policy(origin, ticket)
+        val policy = policy(origin, ticket, token)
         val key = upload(policy, file, ticket)
-        val taskId = submit(origin, "oss://$key", ticket)
-        val resultUrl = poll(origin, taskId, ticket)
+        val taskId = submit(origin, "oss://$key", ticket, token)
+        val resultUrl = poll(origin, taskId, ticket, token)
         val payload = download(resultUrl, ticket)
         return cuesFromQwenPayload(payload)
     }
 
-    private fun policy(origin: HttpUrl, ticket: InflightCalls.Ticket): JSONObject {
+    private fun policy(origin: HttpUrl, ticket: InflightCalls.Ticket, token: String): JSONObject {
         val url = origin.newBuilder()
             .addPathSegment("api")
             .addPathSegment("v1")
@@ -46,7 +45,7 @@ internal class QwenFileTranscriber(
             .addQueryParameter("action", "getPolicy")
             .addQueryParameter("model", QWEN_FILE_MODEL)
             .build()
-        val json = get(url, ticket)
+        val json = get(url, ticket, token)
         return json.optJSONObject("data") ?: throw WhisperException("生成失败")
     }
 
@@ -78,7 +77,7 @@ internal class QwenFileTranscriber(
         return key
     }
 
-    private fun submit(origin: HttpUrl, ossUrl: String, ticket: InflightCalls.Ticket): String {
+    private fun submit(origin: HttpUrl, ossUrl: String, ticket: InflightCalls.Ticket, token: String): String {
         val url = origin.newBuilder()
             .addPathSegment("api")
             .addPathSegment("v1")
@@ -101,6 +100,7 @@ internal class QwenFileTranscriber(
                 .post(payload.toRequestBody(JSON.toMediaType())),
             ticket,
             authorize = true,
+            token = token,
         ) { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) throw WhisperException(qwenErrorMessage(text))
@@ -112,7 +112,7 @@ internal class QwenFileTranscriber(
         return id
     }
 
-    private suspend fun poll(origin: HttpUrl, taskId: String, ticket: InflightCalls.Ticket): String {
+    private suspend fun poll(origin: HttpUrl, taskId: String, ticket: InflightCalls.Ticket, token: String): String {
         val url = origin.newBuilder()
             .addPathSegment("api")
             .addPathSegment("v1")
@@ -120,7 +120,7 @@ internal class QwenFileTranscriber(
             .addPathSegment(taskId)
             .build()
         while (true) {
-            val json = get(url, ticket)
+            val json = get(url, ticket, token)
             val output = json.optJSONObject("output") ?: throw WhisperException(qwenErrorMessage(json.toString()))
             when (output.optString("task_status")) {
                 "PENDING", "RUNNING", "UNKNOWN" -> delay(2_000)
@@ -152,8 +152,8 @@ internal class QwenFileTranscriber(
         }
     }
 
-    private fun get(url: HttpUrl, ticket: InflightCalls.Ticket): JSONObject =
-        execute(Request.Builder().url(url).get(), ticket, authorize = true) { response ->
+    private fun get(url: HttpUrl, ticket: InflightCalls.Ticket, token: String): JSONObject =
+        execute(Request.Builder().url(url).get(), ticket, authorize = true, token = token) { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) throw WhisperException(qwenErrorMessage(text))
             parseObject(text)
@@ -163,10 +163,11 @@ internal class QwenFileTranscriber(
         builder: Request.Builder,
         ticket: InflightCalls.Ticket,
         authorize: Boolean,
+        token: String? = null,
         read: (Response) -> T,
     ): T {
         if (authorize) {
-            val token = credentials.whisperToken() ?: throw WhisperException("没有听写口令")
+            if (token.isNullOrBlank()) throw WhisperException("没有听写口令")
             builder.header("Authorization", "Bearer $token")
         }
         val call = http.newCall(builder.build())

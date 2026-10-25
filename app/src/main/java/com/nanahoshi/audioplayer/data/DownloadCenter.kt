@@ -90,7 +90,7 @@ class DownloadCenter(
         var added = 0
         for (track in tracks) {
             if (track.source != TrackSource.ASMR && track.source != TrackSource.DLSITE) continue
-            if (localFileReady(track.localUri)) continue
+            if (LocalAudio.hasStoredCopy(track.localUri)) continue
             if (db.downloads().activeForTrack(track.id) != null) continue
             db.downloads().insert(
                 DownloadEntity(
@@ -123,8 +123,8 @@ class DownloadCenter(
                 return
             }
             val track = db.tracks().getById(job.trackId) ?: error("音频已经不在库里")
-            if (localFileReady(track.localUri)) {
-                val length = File(track.localUri!!).length()
+            if (LocalAudio.hasStoredCopy(track.localUri)) {
+                val length = if (localFileReady(track.localUri)) File(track.localUri!!).length() else 0L
                 db.downloads().finish(job.id, length, length)
                 return
             }

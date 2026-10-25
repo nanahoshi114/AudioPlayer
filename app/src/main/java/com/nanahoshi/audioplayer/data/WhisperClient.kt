@@ -53,6 +53,7 @@ class WhisperClient(
         trackId: Long?,
         base: String? = null,
         ticket: InflightCalls.Ticket,
+        credentialModel: String? = null,
     ): WhisperCreated {
         val body = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
@@ -63,14 +64,20 @@ class WhisperClient(
                 if (trackId != null && trackId > 0L) addFormDataPart("trackId", trackId.toString())
             }
             .build()
-        val json = post(endpoint(base, "jobs"), body, ticket)
+        val json = post(endpoint(base, credentialModel, "jobs"), body, ticket, credentialModel)
         val id = json.optString("id")
         if (id.isBlank()) throw WhisperException("生成失败")
         return WhisperCreated(id, json.optString("status"))
     }
 
-    fun transcribeQwen3(file: File, base: String, durationMs: Long, ticket: InflightCalls.Ticket): List<WhisperCue> {
-        val model = qwen3AsrModelId(listedModelIds(base, ticket)) ?: QWEN3_ASR_MODEL
+    fun transcribeQwen3(
+        file: File,
+        base: String,
+        durationMs: Long,
+        ticket: InflightCalls.Ticket,
+        credentialModel: String? = null,
+    ): List<WhisperCue> {
+        val model = qwen3AsrModelId(listedModelIds(base, ticket, credentialModel)) ?: QWEN3_ASR_MODEL
         val body = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart("file", uploadName(file), file.asRequestBody(AUDIO.toMediaType()))
@@ -80,8 +87,9 @@ class WhisperClient(
             .build()
         val json = execute(
             onlineHttp,
-            Request.Builder().url(endpoint(base, "audio", "transcriptions")).post(body),
+            Request.Builder().url(endpoint(base, credentialModel, "audio", "transcriptions")).post(body),
             ticket,
+            credentialModel,
         ) { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) throw WhisperException(readError(text, "生成失败"))
@@ -90,7 +98,12 @@ class WhisperClient(
         return cuesFromQwen3(json, durationMs)
     }
 
-    fun transcribeOnline(file: File, base: String, ticket: InflightCalls.Ticket): List<WhisperCue> {
+    fun transcribeOnline(
+        file: File,
+        base: String,
+        ticket: InflightCalls.Ticket,
+        credentialModel: String? = null,
+    ): List<WhisperCue> {
         val body = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart("file", uploadName(file), file.asRequestBody(AUDIO.toMediaType()))
@@ -99,7 +112,12 @@ class WhisperClient(
             .addFormDataPart("response_format", "verbose_json")
             .addFormDataPart("timestamp_granularities[]", "segment")
             .build()
-        val json = execute(onlineHttp, Request.Builder().url(endpoint(base, "audio", "transcriptions")).post(body), ticket) { response ->
+        val json = execute(
+            onlineHttp,
+            Request.Builder().url(endpoint(base, credentialModel, "audio", "transcriptions")).post(body),
+            ticket,
+            credentialModel,
+        ) { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) throw WhisperException(readError(text, "生成失败"))
             parseObject(text)
@@ -107,8 +125,13 @@ class WhisperClient(
         return parseOnlineSegments(json)
     }
 
-    fun job(id: String, base: String? = null, ticket: InflightCalls.Ticket): WhisperProgress {
-        val json = get(endpoint(base, "jobs", id), ticket)
+    fun job(
+        id: String,
+        base: String? = null,
+        ticket: InflightCalls.Ticket,
+        credentialModel: String? = null,
+    ): WhisperProgress {
+        val json = get(endpoint(base, credentialModel, "jobs", id), ticket, credentialModel)
         val error = json.optString("error").takeIf { it.isNotBlank() }
         return WhisperProgress(
             status = json.optString("status"),
@@ -117,8 +140,13 @@ class WhisperClient(
         )
     }
 
-    fun cues(id: String, base: String? = null, ticket: InflightCalls.Ticket): WhisperCues =
-        execute(http, Request.Builder().url(endpoint(base, "jobs", id, "cues")).get(), ticket) { response ->
+    fun cues(
+        id: String,
+        base: String? = null,
+        ticket: InflightCalls.Ticket,
+        credentialModel: String? = null,
+    ): WhisperCues =
+        execute(http, Request.Builder().url(endpoint(base, credentialModel, "jobs", id, "cues")).get(), ticket, credentialModel) { response ->
         val text = response.body?.string().orEmpty()
         if (response.code == 409) return@execute WhisperCues.NotReady
         if (!response.isSuccessful) throw WhisperException(readError(text, "生成失败"))
@@ -141,15 +169,24 @@ class WhisperClient(
         WhisperCues.Ready(cues.sortedBy { it.startMs })
     }
 
-    private fun post(url: HttpUrl, body: RequestBody, ticket: InflightCalls.Ticket): JSONObject =
-        execute(http, Request.Builder().url(url).post(body), ticket) { response ->
+    private fun post(
+        url: HttpUrl,
+        body: RequestBody,
+        ticket: InflightCalls.Ticket,
+        credentialModel: String? = null,
+    ): JSONObject =
+        execute(http, Request.Builder().url(url).post(body), ticket, credentialModel) { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) throw WhisperException(readError(text, "生成失败"))
             parseObject(text)
         }
 
-    private fun get(url: HttpUrl, ticket: InflightCalls.Ticket): JSONObject =
-        execute(http, Request.Builder().url(url).get(), ticket) { response ->
+    private fun get(
+        url: HttpUrl,
+        ticket: InflightCalls.Ticket,
+        credentialModel: String? = null,
+    ): JSONObject =
+        execute(http, Request.Builder().url(url).get(), ticket, credentialModel) { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) throw WhisperException(readError(text, "生成失败"))
             parseObject(text)
@@ -159,9 +196,10 @@ class WhisperClient(
         client: OkHttpClient,
         builder: Request.Builder,
         ticket: InflightCalls.Ticket,
+        credentialModel: String? = null,
         read: (Response) -> T,
     ): T {
-        val token = credentials.whisperToken() ?: throw WhisperException("没有听写口令")
+        val token = credentials.whisperToken(credentialModel) ?: throw WhisperException("没有听写口令")
         val request = builder.header("Authorization", "Bearer $token").build()
         val call = client.newCall(request)
         if (!calls.begin(ticket, call)) throw CancellationException()
@@ -177,16 +215,20 @@ class WhisperClient(
         }
     }
 
-    private fun endpoint(base: String?, vararg parts: String): HttpUrl {
-        val raw = base ?: credentials.whisperBaseUrl() ?: throw WhisperException("没有听写地址")
+    private fun endpoint(base: String?, credentialModel: String?, vararg parts: String): HttpUrl {
+        val raw = base ?: credentials.whisperBaseUrl(credentialModel) ?: throw WhisperException("没有听写地址")
         val root = raw.toHttpUrlOrNull() ?: throw WhisperException("听写地址不正确")
         return root.newBuilder().apply {
             parts.forEach { addPathSegment(it) }
         }.build()
     }
 
-    private fun listedModelIds(base: String, ticket: InflightCalls.Ticket): List<String> = try {
-        execute(onlineHttp, Request.Builder().url(endpoint(base, "models")).get(), ticket) { response ->
+    private fun listedModelIds(
+        base: String,
+        ticket: InflightCalls.Ticket,
+        credentialModel: String?,
+    ): List<String> = try {
+        execute(onlineHttp, Request.Builder().url(endpoint(base, credentialModel, "models")).get(), ticket, credentialModel) { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) return@execute emptyList()
             val array = try {

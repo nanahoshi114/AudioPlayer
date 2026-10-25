@@ -108,6 +108,8 @@ fun LibraryScreen(
     var folderName by remember { mutableStateOf("") }
     var confirmDelete by remember { mutableStateOf(false) }
     var confirmFolderDelete by remember { mutableStateOf<Long?>(null) }
+    var recognizeFolder by remember { mutableStateOf<Long?>(null) }
+    var recognizeCode by remember { mutableStateOf("") }
 
     BackHandler(enabled = folderId != null && !selecting) { viewModel.up() }
     BackHandler(enabled = selecting) { viewModel.clearSelection() }
@@ -325,6 +327,14 @@ fun LibraryScreen(
                         } else {
                             null
                         },
+                        onRecognize = if (folder.asmrSourceId == null && folder.asmrWorkId == null) {
+                            {
+                                recognizeCode = rjHint(folder.name)
+                                recognizeFolder = folder.id
+                            }
+                        } else {
+                            null
+                        },
                         onDelete = { confirmFolderDelete = folder.id },
                     )
                 }
@@ -386,6 +396,35 @@ fun LibraryScreen(
             },
             confirmButton = { TextButton(onClick = viewModel::confirmAsmrPreview) { Text("确认") } },
             dismissButton = { TextButton(onClick = viewModel::dismissAsmrPreview) { Text("取消") } },
+        )
+    }
+
+    recognizeFolder?.let { folderIdToRecognize ->
+        AlertDialog(
+            onDismissRequest = { recognizeFolder = null },
+            title = { Text("识别为作品") },
+            text = {
+                Column {
+                    Text("用 asmr.one 的文件信息对照这个文件夹。可以少一些文件或文件夹，但不能多出作品里没有的内容。")
+                    OutlinedTextField(
+                        value = recognizeCode,
+                        onValueChange = { recognizeCode = it },
+                        label = { Text("RJ 号") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        recognizeFolder = null
+                        viewModel.recognizeFolder(folderIdToRecognize, recognizeCode)
+                    },
+                    enabled = recognizeCode.isNotBlank(),
+                ) { Text("确定") }
+            },
+            dismissButton = { TextButton(onClick = { recognizeFolder = null }) { Text("取消") } },
         )
     }
 
@@ -574,6 +613,7 @@ private fun FolderRow(
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     onCache: (() -> Unit)?,
+    onRecognize: (() -> Unit)?,
     onDelete: () -> Unit,
 ) {
     var menu by remember { mutableStateOf(false) }
@@ -610,6 +650,9 @@ private fun FolderRow(
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     if (onCache != null) {
                         DropdownMenuItem(text = { Text("缓存到本地") }, onClick = { menu = false; onCache() })
+                    }
+                    if (onRecognize != null) {
+                        DropdownMenuItem(text = { Text("识别为作品") }, onClick = { menu = false; onRecognize() })
                     }
                     DropdownMenuItem(text = { Text("从音频库移除") }, onClick = { menu = false; onDelete() })
                 }
@@ -704,7 +747,8 @@ private fun TrackRow(
 ) {
     var menu by remember { mutableStateOf(false) }
     val downloaded = (track.source == TrackSource.ASMR || track.source == TrackSource.DLSITE) &&
-        track.localUri?.startsWith("/") == true
+        com.nanahoshi.audioplayer.data.LocalAudio.hasStoredCopy(track.localUri)
+    val appCopy = track.localUri?.startsWith("/") == true
     ListItem(
         headlineContent = { ItemName(track.title, selected) },
         supportingContent = {
@@ -741,7 +785,7 @@ private fun TrackRow(
                     if (!downloaded && onDownload != null) {
                         DropdownMenuItem(text = { Text("下载") }, onClick = { menu = false; onDownload() })
                     }
-                    if (downloaded && onDeleteDownloaded != null) {
+                    if (downloaded && appCopy && onDeleteDownloaded != null) {
                         DropdownMenuItem(
                             text = { Text("删除已下载的文件") },
                             onClick = { menu = false; onDeleteDownloaded() },
@@ -794,6 +838,9 @@ private fun FileRow(
         modifier = Modifier.clickable(onClick = onClick),
     )
 }
+
+private fun rjHint(name: String): String =
+    Regex("(?i)(?:RJ|VJ|BJ)\\d+").find(name)?.value?.uppercase().orEmpty()
 
 private fun persistRead(context: Context, uri: Uri) {
     try {

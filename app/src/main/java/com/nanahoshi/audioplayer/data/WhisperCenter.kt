@@ -48,7 +48,7 @@ class WhisperCenter(
     private val calls = InflightCalls()
     private val client = WhisperClient(credentials, calls)
     private val qwenFlash = QwenFlashTranscriber(appContext)
-    private val qwenFile = QwenFileTranscriber(credentials, calls)
+    private val qwenFile = QwenFileTranscriber(calls)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val kick = Channel<Unit>(Channel.CONFLATED)
     private val stagedRoot = File(appContext.filesDir, "whisper-src")
@@ -222,7 +222,7 @@ class WhisperCenter(
         }
         val fingerprint = sha256(file)
         val model = credentials.resolvedWhisperModel()
-        val endpoint = effectiveWhisperBase(model, credentials.whisperBaseUrl())
+        val endpoint = effectiveWhisperBase(model, credentials.whisperBaseUrl(model))
         val prior = db.whisper().forFingerprint(fingerprint)
         val latestDone = prior.lastOrNull { it.status == DownloadStatus.DONE }
         if (
@@ -426,7 +426,8 @@ class WhisperCenter(
             db.whisper().fail(job.id, "找不到音频文件")
             return
         }
-        val saved = job.endpoint ?: credentials.whisperBaseUrl()
+        val modelId = jobCredentialModel(job)
+        val saved = job.endpoint ?: credentials.whisperBaseUrl(modelId)
         val route = when (job.model) {
             WHISPER_MODEL_1 -> WHISPER_MODEL_1
             WHISPER_MODEL_LOCAL -> WHISPER_MODEL_LOCAL
@@ -486,7 +487,7 @@ class WhisperCenter(
             if (db.whisper().markRunningIfActive(job.id, job.progress.coerceIn(0f, 1f)) == 0) return
             var remoteId = job.remoteJobId
             if (remoteId.isNullOrBlank()) {
-                val created = client.create(file, job.fingerprint, job.trackId, base, ticket)
+                val created = client.create(file, job.fingerprint, job.trackId, base, ticket, modelId)
                 if (!stillActive(job.id)) return
                 remoteId = created.id
                 db.whisper().setRemoteId(job.id, remoteId)
@@ -516,7 +517,7 @@ class WhisperCenter(
     private suspend fun runOnline(job: WhisperJobEntity, file: File, base: String, ticket: InflightCalls.Ticket) {
         try {
             if (db.whisper().markRunningIfActive(job.id, 0f) == 0) return
-            val cues = client.transcribeOnline(file, base, ticket)
+            val cues = client.transcribeOnline(file, base, ticket, jobCredentialModel(job))
             if (!stillActive(job.id)) return
             writeCues(job.fingerprint, cues)
             finishWritten(job)
@@ -546,7 +547,7 @@ class WhisperCenter(
     private suspend fun runQwen3(job: WhisperJobEntity, file: File, base: String, ticket: InflightCalls.Ticket) {
         try {
             if (db.whisper().markRunningIfActive(job.id, 0f) == 0) return
-            val cues = client.transcribeQwen3(file, base, audioDurationMs(job, file), ticket)
+            val cues = client.transcribeQwen3(file, base, audioDurationMs(job, file), ticket, jobCredentialModel(job))
             if (!stillActive(job.id)) return
             writeCues(job.fingerprint, cues)
             finishWritten(job)
@@ -589,7 +590,7 @@ class WhisperCenter(
                 db.whisper().fail(job.id, "没有听写地址")
                 return
             }
-            val token = credentials.whisperToken()
+            val token = credentials.whisperToken(jobCredentialModel(job))
             if (token.isNullOrBlank()) {
                 db.whisper().fail(job.id, "没有听写口令")
                 return
@@ -599,7 +600,7 @@ class WhisperCenter(
             val cues = if (qwenUsesShortPath(duration, file.length())) {
                 qwenFlash.transcribe(file, base, token)
             } else {
-                qwenFile.transcribe(file, base, ticket)
+                qwenFile.transcribe(file, base, ticket, token)
             }
             if (!stillActive(job.id)) return
             writeCues(job.fingerprint, cues)
@@ -614,6 +615,9 @@ class WhisperCenter(
             db.whisper().fail(job.id, error.message?.take(80)?.ifBlank { null } ?: "生成失败")
         }
     }
+
+    private fun jobCredentialModel(job: WhisperJobEntity): String =
+        knownWhisperModel(job.model) ?: inferredWhisperModel(job.endpoint)
 
     private suspend fun finishFromExisting(job: WhisperJobEntity): Boolean {
         val requested = knownWhisperModel(job.model) ?: inferredWhisperModel(job.endpoint)
@@ -644,7 +648,7 @@ class WhisperCenter(
     private suspend fun poll(job: WhisperJobEntity, remoteId: String, base: String?, ticket: InflightCalls.Ticket) {
         while (true) {
             if (!stillActive(job.id)) return
-            val state = client.job(remoteId, base, ticket)
+            val state = client.job(remoteId, base, ticket, jobCredentialModel(job))
             if (!stillActive(job.id)) return
             when (state.status) {
                 "queued" -> db.whisper().setProgress(job.id, 0f)
@@ -665,7 +669,7 @@ class WhisperCenter(
 
     private suspend fun storeCues(job: WhisperJobEntity, remoteId: String, base: String?, ticket: InflightCalls.Ticket): Boolean {
         if (!stillActive(job.id)) return false
-        val fetched = client.cues(remoteId, base, ticket)
+        val fetched = client.cues(remoteId, base, ticket, jobCredentialModel(job))
         if (!stillActive(job.id)) return false
         if (fetched is WhisperCues.NotReady) return false
         val cues = (fetched as WhisperCues.Ready).cues
@@ -718,7 +722,7 @@ class WhisperCenter(
             progress = 0f,
             error = null,
             awaitRemoteUrl = url,
-            endpoint = effectiveWhisperBase(model, credentials.whisperBaseUrl()),
+            endpoint = effectiveWhisperBase(model, credentials.whisperBaseUrl(model)),
             skipTranslate = skipTranslate,
             model = model,
         )
