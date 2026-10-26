@@ -375,7 +375,13 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     fun downloadTrack(track: TrackEntity) = launch {
         val count = graph.downloads.enqueue(listOf(track))
-        graph.messages.value = if (count == 0) "已经在本地或正在下载" else "已加入下载"
+        val caching = track.source == TrackSource.BILIBILI
+        graph.messages.value = when {
+            count == 0 && caching -> "已经在本地或正在缓存"
+            count == 0 -> "已经在本地或正在下载"
+            caching -> "已加入缓存"
+            else -> "已加入下载"
+        }
     }
 
     fun downloadSelection() = launch {

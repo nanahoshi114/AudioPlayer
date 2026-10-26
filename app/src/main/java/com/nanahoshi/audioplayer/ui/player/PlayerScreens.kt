@@ -111,6 +111,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     var subtitlesReady by mutableStateOf(false)
         private set
     var showChinese by mutableStateOf(true)
+    var offerBiliCache by mutableStateOf(false)
+        private set
     var translating by mutableStateOf(false)
         private set
     internal var whisperPrompt by mutableStateOf<WhisperPrompt?>(null)
@@ -134,6 +136,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 subtitlesReady = false
                 showChinese = true
                 reloadSubtitles(queueItemId)
+                offerBiliCache = biliNeedsCache(queueItemId)
             }
         }
         viewModelScope.launch {
@@ -203,6 +206,46 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             val row = currentRow() ?: return@launch
             graph.translator.cancelRow(row)
         }
+    }
+
+    fun cacheCurrent() {
+        viewModelScope.launch {
+            val row = currentRow() ?: return@launch
+            val bvid = row.bvid ?: return@launch
+            val cid = row.cid ?: return@launch
+            val added = if (row.trackId != null && row.trackId > 0L) {
+                val track = graph.db.tracks().getById(row.trackId)
+                if (track != null) graph.downloads.enqueue(listOf(track)) else 0
+            } else {
+                graph.downloads.enqueueBili(
+                    listOf(
+                        com.nanahoshi.audioplayer.bilibili.BiliPart(
+                            bvid = bvid,
+                            cid = cid,
+                            page = row.page ?: 1,
+                            title = row.title,
+                            artist = row.artist.orEmpty(),
+                            durationMs = row.durationMs,
+                            coverUrl = row.coverUri.orEmpty(),
+                        ),
+                    ),
+                )
+            }
+            offerBiliCache = false
+            graph.messages.value = if (added == 0) "已经在本地或正在缓存" else "已加入缓存"
+        }
+    }
+
+    private suspend fun biliNeedsCache(queueItemId: Long): Boolean {
+        val row = graph.library.queueSnapshot().find { it.queueItemId == queueItemId } ?: return false
+        if (row.source != com.nanahoshi.audioplayer.data.TrackSource.BILIBILI) return false
+        val path = row.localUri
+        if (!path.isNullOrBlank() && path.startsWith("/") && java.io.File(path).isFile) return false
+        return com.nanahoshi.audioplayer.data.readyBiliAudio(
+            getApplication<Application>().filesDir,
+            row.bvid,
+            row.cid,
+        ) == null
     }
 
     fun requestGenerate(translate: Boolean) {
@@ -410,6 +453,12 @@ fun NowPlayingScreen(onBack: () -> Unit, viewModel: PlayerViewModel = viewModel(
             CoverImage(state.coverUri, Modifier.size(160.dp).align(Alignment.CenterHorizontally))
             Text(state.title, style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(top = 16.dp))
             Text(state.artist, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (viewModel.offerBiliCache) {
+                TextButton(
+                    onClick = viewModel::cacheCurrent,
+                    modifier = Modifier.align(Alignment.CenterHorizontally),
+                ) { Text("缓存音轨") }
+            }
             Box(
                 modifier = Modifier
                     .weight(1f)

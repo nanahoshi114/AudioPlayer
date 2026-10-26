@@ -14,9 +14,15 @@ import com.nanahoshi.audioplayer.dlsite.RemotePlayable
 import java.io.File
 
 fun TrackEntity.toPlayableItem(queueItemId: Long): MediaItem {
+    val cached = if (source == TrackSource.BILIBILI) {
+        val local = localUri
+        if (!local.isNullOrBlank() && local.startsWith("/") && File(local).isFile) File(local) else null
+    } else {
+        null
+    }
     val uri = when (source) {
         TrackSource.LOCAL -> localUri?.toUri() ?: Uri.EMPTY
-        TrackSource.BILIBILI -> "bilibili://audio?bvid=$bvid&cid=$cid".toUri()
+        TrackSource.BILIBILI -> cached?.let(Uri::fromFile) ?: "bilibili://audio?bvid=$bvid&cid=$cid".toUri()
         TrackSource.ASMR -> "asmr://audio?trackId=$id".toUri()
         TrackSource.DLSITE -> "dlsite://audio?trackId=$id".toUri()
     }
@@ -30,7 +36,7 @@ fun TrackEntity.toPlayableItem(queueItemId: Long): MediaItem {
         .setMediaId(queueItemId.toString())
         .setUri(uri)
         .apply {
-            if (source == TrackSource.BILIBILI) setMimeType(MimeTypes.APPLICATION_MPD)
+            if (source == TrackSource.BILIBILI && cached == null) setMimeType(MimeTypes.APPLICATION_MPD)
         }
         .setMediaMetadata(metadata)
         .build()

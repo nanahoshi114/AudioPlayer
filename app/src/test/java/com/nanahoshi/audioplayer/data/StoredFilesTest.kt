@@ -63,6 +63,7 @@ class StoredFilesTest {
             assertEquals(StoredKind.GENERATED, items[1].kind)
             assertEquals(cue.absolutePath, items[1].path)
             assertEquals(StoredKind.SUBTITLE, items[2].kind)
+            assertEquals(5L, items[0].bytes)
         } finally {
             root.deleteRecursively()
         }
@@ -112,6 +113,26 @@ class StoredFilesTest {
             asmr.mkdirs()
             audio.writeText("audio")
             assertNull(downloadWorkDirectory(audio, asmr, File(root, "dlsite")))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun byteSizeUsesOneDecimal() {
+        assertEquals("0 B", formatByteSize(0))
+        assertEquals("1.5 KB", formatByteSize(1536))
+        assertEquals("1.0 MB", formatByteSize(1024 * 1024))
+    }
+
+    @Test
+    fun biliCachePathStaysInsideTheBvidFolder() {
+        val root = createTempDirectory(prefix = "bili-cache").toFile()
+        try {
+            val file = biliAudioFile(root, "BV1xx411c7m2", 9)
+            assertEquals(File(root, "bilibili/BV1xx411c7m2/9.m4s").path, file?.path)
+            assertNull(biliAudioFile(root, "../BV1xx411c7m2", 9))
+            assertNull(biliAudioFile(root, "BV1xx411c7m2", 0))
         } finally {
             root.deleteRecursively()
         }

@@ -27,6 +27,7 @@ data class StoredItem(
     val trackId: Long?,
     val remoteUrl: String?,
     val audioPath: String?,
+    val bytes: Long = 0,
 )
 
 class StoredCatalog(
@@ -38,10 +39,12 @@ class StoredCatalog(
     private val filesDir = appContext.filesDir
     private val asmrRoot = File(filesDir, "asmr")
     private val dlsiteRoot = File(filesDir, "dlsite")
+    private val biliRoot = File(filesDir, "bilibili")
 
     suspend fun list(): List<StoredItem> = withContext(Dispatchers.IO) {
         val asmr = asmrRoot.canonicalFile
         val dlsite = dlsiteRoot.canonicalFile
+        val bili = biliRoot.canonicalFile
         val folders = db.folders().all()
         val byId = folders.associateBy { it.id }
         val bySource = HashMap<String, FolderEntity>()
@@ -65,25 +68,67 @@ class StoredCatalog(
         for (track in db.tracks().onlineWithLocal()) {
             val stored = track.localUri ?: continue
             val file = File(stored)
-            if (!file.isFile || !inside(file, asmr, dlsite)) continue
-            rememberFile(file, stored, track.id, track.remoteUrl, null, workFolder(track.folderId, byId), audios, looseSubtitles, asmr, dlsite, bySource, byWorkId)
+            if (!file.isFile || !inside(file, asmr, dlsite, bili)) continue
+            rememberFile(
+                file,
+                stored,
+                track.id,
+                track.remoteUrl,
+                null,
+                workFolder(track.folderId, byId),
+                file.name,
+                null,
+                audios,
+                looseSubtitles,
+                asmr,
+                dlsite,
+                bili,
+                bySource,
+                byWorkId,
+            )
+        }
+        for (track in db.tracks().biliWithLocal()) {
+            val stored = track.localUri ?: continue
+            val file = File(stored)
+            if (!file.isFile || !inside(file, asmr, dlsite, bili)) continue
+            rememberFile(
+                file,
+                stored,
+                track.id,
+                track.remoteUrl,
+                track.bvid,
+                null,
+                track.title.ifBlank { file.name },
+                track.artist,
+                audios,
+                looseSubtitles,
+                asmr,
+                dlsite,
+                bili,
+                bySource,
+                byWorkId,
+            )
         }
         for (row in db.downloads().finished()) {
             val stored = row.localPath ?: continue
             val file = File(stored)
-            if (!file.isFile || !inside(file, asmr, dlsite)) continue
+            if (!file.isFile || !inside(file, asmr, dlsite, bili)) continue
             val code = realCode(row.workKey)
+            val biliFile = under(file, bili)
             rememberFile(
                 file,
                 stored,
                 row.trackId.takeIf { it > 0L },
                 row.remoteUrl,
                 code,
-                code?.let { lookupSource(it, bySource) },
+                if (biliFile) null else code?.let { lookupSource(it, bySource) },
+                if (biliFile) row.title.ifBlank { file.name } else file.name,
+                null,
                 audios,
                 looseSubtitles,
                 asmr,
                 dlsite,
+                bili,
                 bySource,
                 byWorkId,
             )
@@ -93,19 +138,33 @@ class StoredCatalog(
         }
         val scannedWorks = mutableSetOf<String>()
         val listedAudios = audios.values.map { audio ->
-            val work = describe(audio, asmr, dlsite, bySource, byWorkId)
-            ListedAudio(
-                file = audio.file,
-                storedPath = audio.storedPath,
-                trackId = audio.trackId,
-                remoteUrl = audio.remoteUrl,
-                workTitle = work.title,
-                workCode = work.code,
-                sourceId = work.sourceId,
-            )
+            if (under(audio.file, bili)) {
+                ListedAudio(
+                    file = audio.file,
+                    storedPath = audio.storedPath,
+                    trackId = audio.trackId,
+                    remoteUrl = audio.remoteUrl,
+                    workTitle = audio.artist?.takeIf { it.isNotBlank() },
+                    workCode = realCode(audio.workKey) ?: biliFolderKey(audio.file, bili),
+                    sourceId = null,
+                    name = audio.displayName.ifBlank { audio.file.name },
+                )
+            } else {
+                val work = describe(audio, asmr, dlsite, bili, bySource, byWorkId)
+                ListedAudio(
+                    file = audio.file,
+                    storedPath = audio.storedPath,
+                    trackId = audio.trackId,
+                    remoteUrl = audio.remoteUrl,
+                    workTitle = work.title,
+                    workCode = work.code,
+                    sourceId = work.sourceId,
+                    name = audio.file.name,
+                )
+            }
         }
         val built = buildStoredItems(listedAudios, jobs, ::cueFile, looseSubtitles) { audio ->
-            val folder = downloadWorkDirectory(audio.file, asmr, dlsite)
+            val folder = downloadWorkDirectory(audio.file, asmr, dlsite, bili)
             if (folder == null) {
                 audio.file.parentFile?.listFiles().orEmpty().filter { it.isFile && isSubtitleFile(it.name) }
             } else {
@@ -136,6 +195,7 @@ class StoredCatalog(
                 trackId = track?.id ?: job?.trackId,
                 remoteUrl = job?.remoteUrl ?: track?.remoteUrl,
                 audioPath = job?.localPath ?: track?.localUri,
+                bytes = file.length(),
             )
         }
         storedSort(built + extra)
@@ -185,10 +245,11 @@ class StoredCatalog(
         audio: AudioRef,
         asmr: File,
         dlsite: File,
+        bili: File,
         bySource: Map<String, FolderEntity>,
         byWorkId: Map<Long, FolderEntity>,
     ): WorkLabel {
-        val directory = rootKey(audio.file, asmr, dlsite)
+        val directory = rootKey(audio.file, asmr, dlsite, bili)
         val fromDirectory = directory?.toLongOrNull()?.let { byWorkId[it] }
         val fromKey = audio.workKey?.let { lookupSource(it, bySource) }
         val folder = audio.folder ?: fromKey ?: fromDirectory
@@ -204,19 +265,23 @@ class StoredCatalog(
         remoteUrl: String?,
         workKey: String?,
         folder: FolderEntity?,
+        displayName: String,
+        artist: String?,
         audios: LinkedHashMap<String, AudioRef>,
         looseSubtitles: MutableList<ListedSubtitle>,
         asmr: File,
         dlsite: File,
+        bili: File,
         bySource: Map<String, FolderEntity>,
         byWorkId: Map<Long, FolderEntity>,
     ) {
         val key = runCatching { file.canonicalPath }.getOrDefault(file.absolutePath)
         if (isSubtitleFile(file.name)) {
             val work = describe(
-                AudioRef(file, stored, trackId, remoteUrl, workKey, folder),
+                AudioRef(file, stored, trackId, remoteUrl, workKey, folder, displayName, artist),
                 asmr,
                 dlsite,
+                bili,
                 bySource,
                 byWorkId,
             )
@@ -230,10 +295,12 @@ class StoredCatalog(
                 workKey = existing.workKey ?: workKey,
                 trackId = existing.trackId ?: trackId,
                 folder = existing.folder ?: folder,
+                displayName = existing.displayName.ifBlank { displayName },
+                artist = existing.artist ?: artist,
             )
             return
         }
-        audios[key] = AudioRef(file, stored, trackId, remoteUrl, workKey, folder)
+        audios[key] = AudioRef(file, stored, trackId, remoteUrl, workKey, folder, displayName, artist)
     }
 
     private fun cueFile(fingerprint: String): File? {
@@ -284,11 +351,12 @@ class StoredCatalog(
         return fallback
     }
 
-    private fun rootKey(file: File, asmr: File, dlsite: File): String? {
+    private fun rootKey(file: File, asmr: File, dlsite: File, bili: File): String? {
         val path = file.canonicalFile
         val root = when {
             path.startsWith(asmr) -> asmr
             path.startsWith(dlsite) -> dlsite
+            path.startsWith(bili) -> bili
             else -> return null
         }
         val parent = path.parentFile ?: return null
@@ -297,9 +365,22 @@ class StoredCatalog(
         return realCode(relative.substringBefore('/'))
     }
 
-    private fun inside(file: File, asmr: File, dlsite: File): Boolean {
+    private fun inside(file: File, asmr: File, dlsite: File, bili: File): Boolean {
         val path = runCatching { file.canonicalFile }.getOrNull() ?: return false
-        return path.startsWith(asmr) || path.startsWith(dlsite)
+        return path.startsWith(asmr) || path.startsWith(dlsite) || path.startsWith(bili)
+    }
+
+    private fun under(file: File, root: File): Boolean {
+        val path = runCatching { file.canonicalFile }.getOrNull() ?: return false
+        return path.startsWith(root)
+    }
+
+    private fun biliFolderKey(file: File, bili: File): String? {
+        val path = runCatching { file.canonicalFile }.getOrNull() ?: return null
+        if (!path.startsWith(bili)) return null
+        val relative = path.parentFile?.relativeTo(bili)?.path ?: return null
+        if (relative.isBlank() || relative == ".") return null
+        return realCode(relative.substringBefore('/'))
     }
 
     private fun owned(file: File): Boolean {
@@ -315,6 +396,8 @@ class StoredCatalog(
         val remoteUrl: String?,
         val workKey: String?,
         val folder: FolderEntity?,
+        val displayName: String,
+        val artist: String?,
     )
 
     private data class WorkLabel(val title: String?, val code: String?, val sourceId: String?)
@@ -328,6 +411,7 @@ internal data class ListedAudio(
     val workTitle: String?,
     val workCode: String?,
     val sourceId: String?,
+    val name: String = file.name,
 )
 
 internal data class ListedJob(
@@ -345,6 +429,15 @@ internal data class ListedSubtitle(
     val workCode: String?,
     val sourceId: String?,
 )
+
+internal fun formatByteSize(bytes: Long): String {
+    if (bytes < 1024) return "$bytes B"
+    val kb = bytes / 1024.0
+    if (kb < 1024) return String.format(java.util.Locale.US, "%.1f KB", kb)
+    val mb = kb / 1024.0
+    if (mb < 1024) return String.format(java.util.Locale.US, "%.1f MB", mb)
+    return String.format(java.util.Locale.US, "%.1f GB", mb / 1024.0)
+}
 
 internal fun generatedSubtitleName(audioName: String): String {
     val dot = audioName.lastIndexOf('.')
@@ -394,13 +487,15 @@ internal fun subtitleFilesIn(root: File): List<File> {
     return found
 }
 
-internal fun downloadWorkDirectory(file: File, asmrRoot: File, dlsiteRoot: File): File? {
+internal fun downloadWorkDirectory(file: File, asmrRoot: File, dlsiteRoot: File, biliRoot: File? = null): File? {
     val path = runCatching { file.canonicalPath }.getOrNull() ?: return null
     val asmr = asmrRoot.canonicalPath
     val dlsite = dlsiteRoot.canonicalPath
+    val bili = biliRoot?.canonicalPath
     val root = when {
         isInsidePath(path, asmr) -> asmr
         isInsidePath(path, dlsite) -> dlsite
+        bili != null && isInsidePath(path, bili) -> bili
         else -> return null
     }
     val parent = File(path).parent ?: return null
@@ -455,7 +550,7 @@ internal fun buildStoredItems(
     for (audio in audios) {
         items += StoredItem(
             path = audio.storedPath,
-            name = audio.file.name,
+            name = audio.name,
             kind = StoredKind.AUDIO,
             workTitle = audio.workTitle,
             workCode = audio.workCode,
@@ -463,6 +558,7 @@ internal fun buildStoredItems(
             trackId = audio.trackId,
             remoteUrl = audio.remoteUrl,
             audioPath = audio.storedPath,
+            bytes = audio.file.length(),
         )
         for (job in jobs) {
             if (!jobLinksAudio(job, audio)) continue
@@ -470,7 +566,7 @@ internal fun buildStoredItems(
             if (!seen.add(canonicalPath(json.path))) continue
             items += StoredItem(
                 path = json.absolutePath,
-                name = generatedSubtitleName(audio.file.name),
+                name = generatedSubtitleName(audio.name),
                 kind = StoredKind.GENERATED,
                 workTitle = audio.workTitle,
                 workCode = audio.workCode,
@@ -478,6 +574,7 @@ internal fun buildStoredItems(
                 trackId = audio.trackId,
                 remoteUrl = audio.remoteUrl,
                 audioPath = audio.storedPath,
+                bytes = json.length(),
             )
         }
         for (child in subtitlesFor(audio)) {
@@ -493,6 +590,7 @@ internal fun buildStoredItems(
                 trackId = null,
                 remoteUrl = null,
                 audioPath = null,
+                bytes = child.length(),
             )
         }
     }
@@ -509,6 +607,7 @@ internal fun buildStoredItems(
             trackId = null,
             remoteUrl = null,
             audioPath = null,
+            bytes = loose.file.length(),
         )
     }
     return items

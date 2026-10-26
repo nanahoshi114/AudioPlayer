@@ -87,6 +87,9 @@ interface TrackDao {
     @Query("SELECT * FROM tracks WHERE source IN ('ASMR', 'DLSITE') AND localUri IS NOT NULL")
     suspend fun onlineWithLocal(): List<TrackEntity>
 
+    @Query("SELECT * FROM tracks WHERE source = 'BILIBILI' AND localUri IS NOT NULL")
+    suspend fun biliWithLocal(): List<TrackEntity>
+
     @Query("SELECT * FROM tracks WHERE bvid = :bvid AND cid = :cid LIMIT 1")
     suspend fun findByBvid(bvid: String, cid: Long): TrackEntity?
 

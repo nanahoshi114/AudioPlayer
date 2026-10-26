@@ -763,7 +763,15 @@ class LibraryRepository(
     }
 
     private suspend fun upsertBili(part: BiliPart, folderId: Long?): TrackEntity {
-        db.tracks().findByBvid(part.bvid, part.cid)?.let { return it }
+        db.tracks().findByBvid(part.bvid, part.cid)?.let { existing ->
+            val cached = readyBiliAudio(context.filesDir, part.bvid, part.cid)
+            if (cached != null && existing.localUri != cached.absolutePath) {
+                db.tracks().updateLocalUri(existing.id, cached.absolutePath)
+                return existing.copy(localUri = cached.absolutePath)
+            }
+            return existing
+        }
+        val cached = readyBiliAudio(context.filesDir, part.bvid, part.cid)
         val id = db.tracks().insert(
             TrackEntity(
                 source = TrackSource.BILIBILI,
@@ -771,7 +779,7 @@ class LibraryRepository(
                 artist = part.artist,
                 durationMs = part.durationMs,
                 coverUri = part.coverUrl,
-                localUri = null,
+                localUri = cached?.absolutePath,
                 bvid = part.bvid,
                 cid = part.cid,
                 page = part.page,

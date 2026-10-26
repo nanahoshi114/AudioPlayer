@@ -2,6 +2,8 @@ package com.nanahoshi.audioplayer.data
 
 import android.content.Context
 import com.nanahoshi.audioplayer.asmr.AsmrClient
+import com.nanahoshi.audioplayer.bilibili.BiliPart
+import com.nanahoshi.audioplayer.bilibili.BilibiliClient
 import com.nanahoshi.audioplayer.data.db.AppDatabase
 import com.nanahoshi.audioplayer.dlsite.DlsiteClient
 import com.nanahoshi.audioplayer.dlsite.RemotePlayable
@@ -15,17 +17,29 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.Request
 import java.io.File
+import java.util.concurrent.TimeUnit
 
 class DownloadCenter(
     context: Context,
     private val db: AppDatabase,
     private val asmr: AsmrClient,
     private val dlsite: DlsiteClient,
+    private val bilibili: BilibiliClient,
 ) {
-    private val root = File(context.filesDir, "asmr")
-    private val dlsiteRoot = File(context.filesDir, "dlsite")
+    private val filesDir = context.filesDir
+    private val root = File(filesDir, "asmr")
+    private val dlsiteRoot = File(filesDir, "dlsite")
+    private val biliHttp = OkHttpClient.Builder()
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .protocols(listOf(Protocol.HTTP_1_1))
+        .build()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val kick = Channel<Unit>(Channel.CONFLATED)
 
@@ -74,7 +88,9 @@ class DownloadCenter(
     suspend fun deleteDownloaded(tracks: List<TrackEntity>): Int = withContext(Dispatchers.IO) {
         var removed = 0
         for (track in tracks) {
-            if (track.source != TrackSource.ASMR && track.source != TrackSource.DLSITE) continue
+            if (track.source != TrackSource.ASMR && track.source != TrackSource.DLSITE && track.source != TrackSource.BILIBILI) {
+                continue
+            }
             val path = track.localUri
             if (!localFileReady(path)) continue
             val file = File(path!!)
@@ -89,6 +105,10 @@ class DownloadCenter(
     suspend fun enqueue(tracks: List<TrackEntity>): Int = withContext(Dispatchers.IO) {
         var added = 0
         for (track in tracks) {
+            if (track.source == TrackSource.BILIBILI) {
+                if (enqueueBiliTrack(track)) added += 1
+                continue
+            }
             if (track.source != TrackSource.ASMR && track.source != TrackSource.DLSITE) continue
             if (LocalAudio.hasStoredCopy(track.localUri)) continue
             if (db.downloads().activeForTrack(track.id) != null) continue
@@ -108,6 +128,21 @@ class DownloadCenter(
         added
     }
 
+    suspend fun enqueueBili(parts: List<BiliPart>): Int = withContext(Dispatchers.IO) {
+        var added = 0
+        for (part in parts) {
+            val track = db.tracks().findByBvid(part.bvid, part.cid)
+            val queued = if (track != null) {
+                enqueueBiliTrack(track)
+            } else {
+                enqueueBiliPart(part)
+            }
+            if (queued) added += 1
+        }
+        if (added > 0) kick.trySend(Unit)
+        added
+    }
+
     fun retry(id: Long) {
         scope.launch {
             db.downloads().requeue(id)
@@ -118,6 +153,10 @@ class DownloadCenter(
     private suspend fun downloadOne(job: DownloadEntity) {
         db.downloads().markRunning(job.id)
         try {
+            if (job.source == TrackSource.BILIBILI.name) {
+                downloadBili(job)
+                return
+            }
             if (!job.remoteUrl.isNullOrBlank() && job.trackId == 0L) {
                 downloadRemote(job)
                 return
@@ -368,6 +407,114 @@ class DownloadCenter(
         val remoteExt = url?.substringBefore('?')?.substringAfterLast('.', "").orEmpty()
         if (remoteExt.isBlank() || remoteExt.length > 5 || remoteExt.contains('/')) return name
         return "$name.$remoteExt"
+    }
+
+    private suspend fun enqueueBiliTrack(track: TrackEntity): Boolean {
+        val bvid = track.bvid?.trim().orEmpty()
+        val cid = track.cid ?: return false
+        val cached = readyBiliAudio(filesDir, bvid, cid)
+        if (cached != null) {
+            if (track.localUri != cached.absolutePath) db.tracks().updateLocalUri(track.id, cached.absolutePath)
+            return false
+        }
+        if (db.downloads().activeForTrack(track.id) != null) return false
+        if (db.downloads().activeForFile(TrackSource.BILIBILI.name, bvid, cid.toString()) != null) return false
+        db.downloads().insert(
+            DownloadEntity(
+                trackId = track.id,
+                title = track.title.ifBlank { bvid },
+                bytesDone = 0,
+                bytesTotal = 0,
+                status = DownloadStatus.QUEUED,
+                error = null,
+                source = TrackSource.BILIBILI.name,
+                workKey = bvid,
+                fileKey = cid.toString(),
+            ),
+        )
+        return true
+    }
+
+    private suspend fun enqueueBiliPart(part: BiliPart): Boolean {
+        val cached = readyBiliAudio(filesDir, part.bvid, part.cid)
+        if (cached != null) return false
+        if (db.downloads().activeForFile(TrackSource.BILIBILI.name, part.bvid, part.cid.toString()) != null) return false
+        db.downloads().insert(
+            DownloadEntity(
+                trackId = 0,
+                title = part.title.ifBlank { part.bvid },
+                bytesDone = 0,
+                bytesTotal = 0,
+                status = DownloadStatus.QUEUED,
+                error = null,
+                source = TrackSource.BILIBILI.name,
+                workKey = part.bvid,
+                fileKey = part.cid.toString(),
+            ),
+        )
+        return true
+    }
+
+    private suspend fun downloadBili(job: DownloadEntity) {
+        val track = job.trackId.takeIf { it > 0L }?.let { db.tracks().getById(it) }
+        val bvid = job.workKey?.trim().orEmpty().ifBlank { track?.bvid?.trim().orEmpty() }
+        val cid = job.fileKey?.toLongOrNull() ?: track?.cid ?: error("没有可缓存的分集")
+        val dest = biliAudioFile(filesDir, bvid, cid) ?: error("没有可缓存的分集")
+        if (dest.isFile && dest.length() > 0L) {
+            db.downloads().setLocalPath(job.id, dest.absolutePath)
+            attachBili(bvid, cid, dest.absolutePath)
+            db.downloads().finish(job.id, dest.length(), dest.length())
+            return
+        }
+        dest.parentFile?.mkdirs()
+        val partial = File(dest.absolutePath + ".part")
+        var refreshed = false
+        while (true) {
+            if (partial.exists()) partial.delete()
+            val audio = bilibili.resolveAudio(bvid, cid)
+            val request = Request.Builder()
+                .url(audio.url.replace("%2C", ",").replace("%2c", ","))
+                .header("Referer", "https://www.bilibili.com/video/$bvid")
+                .header("User-Agent", BilibiliClient.USER_AGENT)
+                .build()
+            val expired = biliHttp.newCall(request).execute().use { response ->
+                if ((response.code == 403 || response.code == 401) && !refreshed) return@use true
+                if (!response.isSuccessful) error("缓存失败")
+                val body = response.body ?: error("缓存失败")
+                val total = body.contentLength().coerceAtLeast(0)
+                body.byteStream().use { input ->
+                    partial.outputStream().use { output ->
+                        val buffer = ByteArray(64 * 1024)
+                        var done = 0L
+                        var reported = 0L
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read < 0) break
+                            output.write(buffer, 0, read)
+                            done += read
+                            if (done - reported >= 256 * 1024) {
+                                db.downloads().progress(job.id, done, total)
+                                reported = done
+                            }
+                        }
+                    }
+                }
+                false
+            }
+            if (!expired) break
+            refreshed = true
+        }
+        if (dest.exists()) dest.delete()
+        if (!partial.renameTo(dest) || dest.length() <= 0L) error("无法保存音轨")
+        db.downloads().setLocalPath(job.id, dest.absolutePath)
+        attachBili(bvid, cid, dest.absolutePath)
+        val size = dest.length()
+        db.downloads().finish(job.id, size, size)
+    }
+
+    private suspend fun attachBili(bvid: String, cid: Long, path: String) {
+        val track = db.tracks().findByBvid(bvid, cid) ?: return
+        db.tracks().updateLocalUri(track.id, path)
     }
 
     private fun localFileReady(path: String?): Boolean =

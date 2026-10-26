@@ -29,7 +29,7 @@ class AppGraph(app: Application) {
     val dlsite = DlsiteClient(credentials)
     val librarySort = LibraryPreferences(app)
     val library = LibraryRepository(app, db, bilibili, asmr, dlsite)
-    val downloads = DownloadCenter(app, db, asmr, dlsite)
+    val downloads = DownloadCenter(app, db, asmr, dlsite, bilibili)
     val subtitles = SubtitleSource(app, db, bilibili, asmr)
     val translator = TranslateCenter(app, db, credentials, subtitles)
     val whisper = WhisperCenter(app, db, credentials, downloads, translator)

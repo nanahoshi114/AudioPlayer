@@ -358,12 +358,20 @@ fun LibraryScreen(
                                 onLongClick = { viewModel.beginSelection(trackId = track.id) },
                                 onAppend = { viewModel.append(track) },
                                 onPlayNext = { viewModel.playNext(track) },
-                                onDownload = if (track.source == TrackSource.ASMR || track.source == TrackSource.DLSITE) {
+                                onDownload = if (
+                                    track.source == TrackSource.ASMR ||
+                                    track.source == TrackSource.DLSITE ||
+                                    track.source == TrackSource.BILIBILI
+                                ) {
                                     { viewModel.downloadTrack(track) }
                                 } else {
                                     null
                                 },
-                                onDeleteDownloaded = if (track.source == TrackSource.ASMR || track.source == TrackSource.DLSITE) {
+                                onDeleteDownloaded = if (
+                                    track.source == TrackSource.ASMR ||
+                                    track.source == TrackSource.DLSITE ||
+                                    track.source == TrackSource.BILIBILI
+                                ) {
                                     { viewModel.deleteDownloadedTrack(track) }
                                 } else {
                                     null
@@ -746,8 +754,13 @@ private fun TrackRow(
     onDelete: () -> Unit,
 ) {
     var menu by remember { mutableStateOf(false) }
-    val downloaded = (track.source == TrackSource.ASMR || track.source == TrackSource.DLSITE) &&
-        com.nanahoshi.audioplayer.data.LocalAudio.hasStoredCopy(track.localUri)
+    val downloaded = when (track.source) {
+        TrackSource.BILIBILI -> track.localUri?.startsWith("/") == true &&
+            java.io.File(track.localUri).isFile
+        TrackSource.ASMR, TrackSource.DLSITE ->
+            com.nanahoshi.audioplayer.data.LocalAudio.hasStoredCopy(track.localUri)
+        else -> false
+    }
     val appCopy = track.localUri?.startsWith("/") == true
     ListItem(
         headlineContent = { ItemName(track.title, selected) },
@@ -759,7 +772,11 @@ private fun TrackRow(
                 TrackSource.LOCAL -> "本地"
             }
             val artist = track.artist?.takeIf { it.isNotBlank() } ?: source
-            val mark = if (downloaded) " · 已下载" else ""
+            val mark = when {
+                downloaded && track.source == TrackSource.BILIBILI -> " · 已缓存"
+                downloaded -> " · 已下载"
+                else -> ""
+            }
             val subtitle = if (hasSubtitle) " · 有字幕" else ""
             Text(
                 "$artist · $source · ${formatDuration(track.durationMs)}$mark$subtitle",
@@ -783,11 +800,13 @@ private fun TrackRow(
                     DropdownMenuItem(text = { Text("下一个播放") }, onClick = { menu = false; onPlayNext() })
                     DropdownMenuItem(text = { Text("加入当前列表末尾") }, onClick = { menu = false; onAppend() })
                     if (!downloaded && onDownload != null) {
-                        DropdownMenuItem(text = { Text("下载") }, onClick = { menu = false; onDownload() })
+                        val label = if (track.source == TrackSource.BILIBILI) "缓存音轨" else "下载"
+                        DropdownMenuItem(text = { Text(label) }, onClick = { menu = false; onDownload() })
                     }
                     if (downloaded && appCopy && onDeleteDownloaded != null) {
+                        val label = if (track.source == TrackSource.BILIBILI) "删除已缓存的音轨" else "删除已下载的文件"
                         DropdownMenuItem(
-                            text = { Text("删除已下载的文件") },
+                            text = { Text(label) },
                             onClick = { menu = false; onDeleteDownloaded() },
                         )
                     }

@@ -44,6 +44,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nanahoshi.audioplayer.data.StoredCatalog
 import com.nanahoshi.audioplayer.data.StoredItem
 import com.nanahoshi.audioplayer.data.StoredKind
+import com.nanahoshi.audioplayer.data.formatByteSize
 import com.nanahoshi.audioplayer.data.storedItemMatches
 import com.nanahoshi.audioplayer.graph
 import com.nanahoshi.audioplayer.ui.EmptyHint
@@ -186,8 +187,9 @@ fun StoredFilesScreen(
                                 },
                                 item.workTitle?.takeIf { it.isNotBlank() },
                                 item.workCode?.takeIf { it.isNotBlank() },
+                                formatByteSize(item.bytes),
                             )
-                            if (bits.isNotEmpty()) Text(bits.joinToString(" · "))
+                            Text(bits.joinToString(" · "))
                         },
                         colors = if (on) {
                             ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.secondaryContainer)

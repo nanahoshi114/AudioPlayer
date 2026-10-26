@@ -49,6 +49,7 @@ class FavoriteViewModel(app: Application) : AndroidViewModel(app) {
     val selected = MutableStateFlow<Set<String>>(emptySet())
     val loading = MutableStateFlow(false)
     val importing = MutableStateFlow(false)
+    val caching = MutableStateFlow(false)
     val hasMore = MutableStateFlow(false)
     private var nextPage = 1
     private var paging = false
@@ -139,6 +140,33 @@ class FavoriteViewModel(app: Application) : AndroidViewModel(app) {
             onDone()
         }
     }
+
+    fun cacheSelected() {
+        val bvids = selected.value.toList()
+        if (bvids.isEmpty()) {
+            graph.messages.value = "请至少选择一个视频"
+            return
+        }
+        viewModelScope.launch {
+            caching.value = true
+            var cached = 0
+            var failed = 0
+            for (bvid in bvids) {
+                try {
+                    val parts = graph.library.lookupBvid(bvid)
+                    cached += graph.downloads.enqueueBili(parts)
+                } catch (_: Exception) {
+                    failed += 1
+                }
+            }
+            caching.value = false
+            graph.messages.value = when {
+                failed == 0 && cached == 0 -> "已经在本地或正在缓存"
+                failed == 0 -> "已加入 $cached 个缓存"
+                else -> "已加入 $cached 个缓存，失败 $failed 个"
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -150,6 +178,7 @@ fun FavoriteScreen(onBack: () -> Unit, folderId: Long? = null, viewModel: Favori
     val selected by viewModel.selected.collectAsStateWithLifecycle()
     val loading by viewModel.loading.collectAsStateWithLifecycle()
     val importing by viewModel.importing.collectAsStateWithLifecycle()
+    val caching by viewModel.caching.collectAsStateWithLifecycle()
     val hasMore by viewModel.hasMore.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
     val folder = opened
@@ -201,14 +230,19 @@ fun FavoriteScreen(onBack: () -> Unit, folderId: Long? = null, viewModel: Favori
                 }
             }
         }
-        if (loading || importing) {
+        if (loading || importing || caching) {
             CircularProgressIndicator(Modifier.padding(16.dp).align(Alignment.CenterHorizontally))
         }
         if (folder != null) {
             Button(
+                onClick = { viewModel.cacheSelected() },
+                enabled = !importing && !caching && selected.isNotEmpty(),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+            ) { Text("缓存音轨") }
+            Button(
                 onClick = { viewModel.importSelected(folderId, onBack) },
-                enabled = !importing && selected.isNotEmpty(),
-                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                enabled = !importing && !caching && selected.isNotEmpty(),
+                modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
             ) { Text("导入到音频库") }
         }
     }
