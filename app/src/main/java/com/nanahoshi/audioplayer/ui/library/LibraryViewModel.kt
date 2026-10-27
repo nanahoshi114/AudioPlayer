@@ -364,8 +364,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun recognizeFolder(folderId: Long, input: String) = launch {
-        graph.library.recognizeLocalFolder(folderId, input)
-        graph.messages.value = "已识别为作品"
+        graph.messages.value = graph.library.recognizeLocalFolder(folderId, input)
     }
 
     fun importRj(input: String) = launch {

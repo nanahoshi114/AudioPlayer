@@ -413,7 +413,7 @@ fun LibraryScreen(
             title = { Text("识别为作品") },
             text = {
                 Column {
-                    Text("用 asmr.one 的文件信息对照这个文件夹。可以少一些文件或文件夹，但不能多出作品里没有的内容。")
+                    Text("已购买的作品先对照 DLsite 的文件。对不上、没买过，或 DLsite 连不上，再对照 asmr.one。可以少一些文件或文件夹，但不能多出作品里没有的内容。")
                     OutlinedTextField(
                         value = recognizeCode,
                         onValueChange = { recognizeCode = it },

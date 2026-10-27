@@ -289,7 +289,7 @@ class LibraryRepository(
         orderedIds.mapNotNull { byId[it] }
     }
 
-    suspend fun recognizeLocalFolder(folderId: Long, input: String) = withContext(Dispatchers.IO) {
+    suspend fun recognizeLocalFolder(folderId: Long, input: String): String = withContext(Dispatchers.IO) {
         val code = input.trim()
         if (code.isEmpty()) error("请填写 RJ 号")
         val root = db.folders().get(folderId) ?: error("找不到文件夹")
@@ -300,14 +300,45 @@ class LibraryRepository(
             if (parent.asmrSourceId != null || parent.asmrWorkId != null) error("这个文件夹已经在作品里面")
             parentId = parent.parentId
         }
-        val work = asmr.loadWork(code)
-        if (folderBySource(work.sourceId) != null) error("这部作品已经在音频库")
         val local = localLevel(folderId)
-        when (val fit = fitLocalFolder(local, asmrMatchTree(work.nodes))) {
-            FolderFit.Empty -> error("这个文件夹里没有可对照的文件")
-            is FolderFit.Extra -> error("多出来的内容：${fit.path}")
-            is FolderFit.Ready -> adoptLocalWork(root, work, fit.assignment)
+        if (!local.hasMatchableFile()) error("这个文件夹里没有可对照的文件")
+        if (folderBySource(code) != null) error("这部作品已经在音频库")
+        val dlsiteCatalog = dlsiteCatalog(code)
+        var extraPath: String? = null
+        if (dlsiteCatalog is DlsiteCatalog.Ready) {
+            when (val fit = fitLocalFolder(local, dlsiteMatchTree(dlsiteCatalog.nodes))) {
+                is FolderFit.Ready -> {
+                    adoptDlsite(root, dlsiteCatalog.workno, fit.assignment)
+                    return@withContext recognizeNotice(CatalogSide.Matched, asmrMatched = false)
+                }
+                is FolderFit.Extra -> extraPath = fit.path
+                FolderFit.Empty -> error("这个文件夹里没有可对照的文件")
+            }
         }
+        val asmrWork = try {
+            asmr.loadWork(code)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        }
+        if (asmrWork != null) {
+            if (folderBySource(asmrWork.sourceId) != null) error("这部作品已经在音频库")
+            when (val fit = fitLocalFolder(local, asmrMatchTree(asmrWork.nodes))) {
+                is FolderFit.Ready -> {
+                    adoptAsmr(root, asmrWork, fit.assignment)
+                    return@withContext recognizeNotice(CatalogSide.Missed, asmrMatched = true)
+                }
+                is FolderFit.Extra -> extraPath = fit.path
+                FolderFit.Empty -> error("这个文件夹里没有可对照的文件")
+            }
+        }
+        val side = when (dlsiteCatalog) {
+            is DlsiteCatalog.Ready -> CatalogSide.Missed
+            DlsiteCatalog.Unreachable -> CatalogSide.Unreachable
+            DlsiteCatalog.NotPurchased -> CatalogSide.NotPurchased
+        }
+        error(recognizeNotice(side, asmrMatched = false, extraPath = extraPath))
     }
 
     suspend fun importAsmr(input: String, parentId: Long?) = withContext(Dispatchers.IO) {
@@ -521,7 +552,109 @@ class LibraryRepository(
         compactQueue()
     }
 
-    private suspend fun adoptLocalWork(root: FolderEntity, work: AsmrWork, assignment: FolderFitReady) {
+    private sealed class DlsiteCatalog {
+        data class Ready(val workno: String, val nodes: List<PlayEntry>) : DlsiteCatalog()
+        data object NotPurchased : DlsiteCatalog()
+        data object Unreachable : DlsiteCatalog()
+    }
+
+    private suspend fun dlsiteCatalog(code: String): DlsiteCatalog {
+        val purchased = try {
+            dlsite.isPurchased(code)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            if (error.message?.contains("登录") == true) throw error
+            return if (cannotReachDlsite(error)) DlsiteCatalog.Unreachable else DlsiteCatalog.NotPurchased
+        }
+        if (!purchased) return DlsiteCatalog.NotPurchased
+        val workno = try {
+            DlsiteClient.worknoOf(code)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            return DlsiteCatalog.NotPurchased
+        }
+        val nodes = try {
+            dlsite.playTree(workno, artist = null, coverUrl = null)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            if (error.message?.contains("登录") == true) throw error
+            return if (cannotReachDlsite(error)) DlsiteCatalog.Unreachable else DlsiteCatalog.NotPurchased
+        }
+        return DlsiteCatalog.Ready(workno, nodes)
+    }
+
+    private fun cannotReachDlsite(error: Throwable): Boolean {
+        var current: Throwable? = error
+        while (current != null) {
+            if (current is java.io.IOException) return true
+            if (current.message?.contains("无法连接") == true) return true
+            current = current.cause
+        }
+        return false
+    }
+
+    private suspend fun adoptDlsite(root: FolderEntity, workno: String, assignment: FolderFitReady) {
+        val shown = try {
+            dlsite.showcase(workno)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        }
+        val facts = shown?.facts() ?: WorkFacts(
+            title = workno,
+            circle = "",
+            vas = emptyList(),
+            tags = emptyList(),
+            release = "",
+            sourceId = workno,
+        )
+        val sourceId = facts.sourceId.ifBlank { workno }
+        adoptLocalWork(
+            root,
+            AdoptedWork(
+                source = TrackSource.DLSITE,
+                sourceId = sourceId,
+                title = facts.title.ifBlank { sourceId },
+                artist = facts.circle.ifBlank { sourceId },
+                coverUrl = shown?.coverUrl,
+                workId = sourceId.filter { it.isDigit() }.toLongOrNull() ?: 0L,
+                meta = facts.copy(sourceId = sourceId).toJson(),
+            ),
+            assignment,
+        )
+    }
+
+    private suspend fun adoptAsmr(root: FolderEntity, work: AsmrWork, assignment: FolderFitReady) {
+        adoptLocalWork(
+            root,
+            AdoptedWork(
+                source = TrackSource.ASMR,
+                sourceId = work.sourceId,
+                title = work.title,
+                artist = work.circle.ifBlank { work.sourceId },
+                coverUrl = work.coverUrl,
+                workId = work.id,
+                meta = work.facts().toJson(),
+            ),
+            assignment,
+        )
+    }
+
+    private data class AdoptedWork(
+        val source: TrackSource,
+        val sourceId: String,
+        val title: String,
+        val artist: String,
+        val coverUrl: String?,
+        val workId: Long,
+        val meta: String,
+    )
+
+    private suspend fun adoptLocalWork(root: FolderEntity, work: AdoptedWork, assignment: FolderFitReady) {
         val tracks = if (assignment.tracks.isEmpty()) {
             emptyList()
         } else {
@@ -534,33 +667,32 @@ class LibraryRepository(
                 db.folders().markAsWork(
                     root.id,
                     sanitizeEntryName("${work.sourceId} ${work.title}"),
-                    work.id,
+                    work.workId,
                     work.sourceId,
                     work.coverUrl,
-                    work.facts().toJson(),
+                    work.meta,
                 )
-                val artist = work.circle.ifBlank { work.sourceId }
                 for (track in tracks) {
                     val remote = assignment.tracks.getValue(track.id)
                     db.tracks().attachWork(
                         track.id,
-                        TrackSource.ASMR,
-                        artist,
+                        work.source,
+                        work.artist,
                         track.coverUri ?: work.coverUrl,
                         remote.streamUrl,
-                        work.id,
-                        scopedFileHash(TrackSource.ASMR, remote.storageKey),
+                        work.workId,
+                        scopedFileHash(work.source, remote.storageKey),
                     )
                 }
                 for (folderId in assignment.folderIds) {
-                    db.folders().markWorkChild(folderId, work.id, TrackSource.ASMR.name)
+                    db.folders().markWorkChild(folderId, work.workId, work.source.name)
                 }
                 for ((fileId, remote) in assignment.libraryFiles) {
                     val existing = db.files().get(fileId)
                     db.files().attachWork(
                         fileId,
-                        work.id,
-                        scopedFileHash(TrackSource.ASMR, remote.storageKey),
+                        work.workId,
+                        scopedFileHash(work.source, remote.storageKey),
                         remote.streamUrl ?: existing?.remoteUrl.orEmpty(),
                     )
                 }

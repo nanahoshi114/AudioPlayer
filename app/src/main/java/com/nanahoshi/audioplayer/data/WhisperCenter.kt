@@ -52,6 +52,7 @@ class WhisperCenter(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val kick = Channel<Unit>(Channel.CONFLATED)
     private val stagedRoot = File(appContext.filesDir, "whisper-src")
+    private val staging = ConcurrentHashMap<String, Int>()
     private val runners = ConcurrentHashMap<Long, Job>()
     private val sizeAnswers = ConcurrentHashMap<Long, CompletableDeferred<Boolean>>()
     private val sizeConfirm = MutableStateFlow<Long?>(null)
@@ -81,6 +82,7 @@ class WhisperCenter(
                 drain()
             }
         }
+        scope.launch { sweepStaged() }
         kick.trySend(Unit)
     }
 
@@ -104,13 +106,18 @@ class WhisperCenter(
     }
 
     suspend fun start(row: QueuedTrack, file: File, translate: Boolean): WhisperStart = withContext(Dispatchers.IO) {
-        startLocked(
-            title = row.title.ifBlank { "音频" },
-            file = file,
-            trackId = row.trackId?.takeIf { it > 0L },
-            remoteUrl = row.remoteUrl?.takeIf { it.isNotBlank() },
-            skipTranslate = !translate,
-        )
+        try {
+            startLocked(
+                title = row.title.ifBlank { "音频" },
+                file = file,
+                trackId = row.trackId?.takeIf { it > 0L },
+                remoteUrl = row.remoteUrl?.takeIf { it.isNotBlank() },
+                skipTranslate = !translate,
+            )
+        } finally {
+            releaseStaged(file.absolutePath)
+            sweepStaged()
+        }
     }
 
     suspend fun startAfterDownload(row: QueuedTrack, translate: Boolean): WhisperStart = withContext(Dispatchers.IO) {
@@ -157,17 +164,44 @@ class WhisperCenter(
             if (job.status != DownloadStatus.FAILED) return@launch
             val path = job.localPath
             if (!path.isNullOrBlank() && File(path).isFile && job.fingerprint.isNotBlank()) {
-                db.whisper().requeueWithFile(
-                    job.id,
-                    job.title,
-                    job.fingerprint,
-                    job.trackId,
-                    path,
-                    job.awaitRemoteUrl,
-                    job.endpoint,
-                    job.skipTranslate,
-                    job.model,
-                )
+                val staged = isStagedPath(path)
+                if (staged) holdStaged(path)
+                try {
+                    db.whisper().requeueWithFile(
+                        job.id,
+                        job.title,
+                        job.fingerprint,
+                        job.trackId,
+                        path,
+                        job.awaitRemoteUrl,
+                        job.endpoint,
+                        job.skipTranslate,
+                        job.model,
+                    )
+                } finally {
+                    if (staged) releaseStaged(path)
+                }
+                kick.trySend(Unit)
+                return@launch
+            }
+            val restored = restoreLocalCopy(job)
+            if (restored != null) {
+                try {
+                    db.whisper().requeueWithFile(
+                        job.id,
+                        job.title,
+                        sha256(restored),
+                        job.trackId,
+                        restored.absolutePath,
+                        job.awaitRemoteUrl,
+                        job.endpoint,
+                        job.skipTranslate,
+                        job.model,
+                    )
+                } finally {
+                    releaseStaged(restored.absolutePath)
+                    sweepStaged()
+                }
                 kick.trySend(Unit)
                 return@launch
             }
@@ -205,6 +239,7 @@ class WhisperCenter(
             sizeAnswers[id]?.cancel()
             translator.stopForWhisper(id)
             runners[id]?.cancel()
+            sweepStaged()
         }
     }
 
@@ -388,11 +423,12 @@ class WhisperCenter(
                     runners[job.id] = self
                     try {
                         runJob(job)
-                    } catch (_: CancellationException) {
-                        abandonIfNeeded(job.id)
-                    } finally {
-                        runners.remove(job.id, self)
-                    }
+                } catch (_: CancellationException) {
+                    abandonIfNeeded(job.id)
+                } finally {
+                    runners.remove(job.id, self)
+                    sweepStaged()
+                }
                 }
             }
         }
@@ -689,22 +725,97 @@ class WhisperCenter(
         return File(File(appContext.filesDir, "subtitles"), "$safe.json")
     }
 
-    private fun materialize(path: String?): File? {
+    private suspend fun materialize(path: String?): File? {
         if (path.isNullOrBlank()) return null
-        if (path.startsWith("content:")) {
-            val dest = File(stagedRoot, path.hashCode().toUInt().toString(16))
-            if (dest.isFile && dest.length() > 0L) return dest
-            val input = appContext.contentResolver.openInputStream(Uri.parse(path)) ?: return null
-            dest.parentFile?.mkdirs()
-            input.use { source -> dest.outputStream().use { source.copyTo(it) } }
-            return dest.takeIf { it.isFile && it.length() > 0L }
-        }
+        if (path.startsWith("content:")) return stageContent(path)
         val file = when {
             path.startsWith("/") -> File(path)
             path.startsWith("file:") -> Uri.parse(path).path?.let(::File)
             else -> null
         }
         return file?.takeIf { it.isFile }
+    }
+
+    private suspend fun stageContent(path: String): File? {
+        val dest = File(stagedRoot, path.hashCode().toUInt().toString(16))
+        val key = dest.absolutePath
+        holdStaged(key)
+        var rewriting = false
+        try {
+            val ready = dest.isFile && dest.length() > 0L
+            val shared = (staging[key] ?: 0) > 1
+            if (shared) {
+                if (ready) return dest
+                releaseStaged(key)
+                return null
+            }
+            if (ready && stagedInUse(dest)) return dest
+            val input = appContext.contentResolver.openInputStream(Uri.parse(path))
+            if (input == null) {
+                releaseStaged(key)
+                return null
+            }
+            rewriting = true
+            dest.parentFile?.mkdirs()
+            input.use { source -> dest.outputStream().use { source.copyTo(it) } }
+            if (!dest.isFile || dest.length() <= 0L) {
+                dest.delete()
+                releaseStaged(key)
+                return null
+            }
+            return dest
+        } catch (cancelled: CancellationException) {
+            if (rewriting) dest.delete()
+            releaseStaged(key)
+            throw cancelled
+        } catch (error: Exception) {
+            if (rewriting) dest.delete()
+            releaseStaged(key)
+            throw error
+        }
+    }
+
+    private suspend fun restoreLocalCopy(job: WhisperJobEntity): File? {
+        val trackId = job.trackId ?: return null
+        if (trackId <= 0L) return null
+        val track = db.tracks().getById(trackId) ?: return null
+        return materialize(track.localUri)
+    }
+
+    private suspend fun sweepStaged() {
+        val kept = buildSet {
+            addAll(db.whisper().activeLocalPaths())
+            addAll(staging.keys)
+        }
+        val files = stagedRoot.listFiles() ?: return
+        for (file in files) {
+            if (shouldDeleteStagedCopy(file, stagedRoot, kept)) file.delete()
+        }
+    }
+
+    private suspend fun stagedInUse(dest: File): Boolean {
+        val canonical = runCatching { dest.canonicalPath }.getOrDefault(dest.absolutePath)
+        return db.whisper().activeLocalPaths().any { raw ->
+            raw == dest.absolutePath || raw == canonical ||
+                runCatching { File(raw).canonicalPath }.getOrNull() == canonical
+        }
+    }
+
+    private fun isStagedPath(path: String): Boolean {
+        val file = runCatching { File(path).canonicalFile }.getOrNull() ?: return false
+        val root = runCatching { stagedRoot.canonicalFile }.getOrNull() ?: return false
+        return file.parentFile == root
+    }
+
+    private fun holdStaged(path: String) {
+        staging.compute(path) { _, count -> (count ?: 0) + 1 }
+    }
+
+    private fun releaseStaged(path: String) {
+        staging.compute(path) { _, count ->
+            val next = (count ?: 0) - 1
+            if (next <= 0) null else next
+        }
     }
 
     private fun isFile(path: String?): Boolean =
@@ -763,5 +874,16 @@ class WhisperCenter(
             }
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+}
+
+internal fun shouldDeleteStagedCopy(file: File, root: File, kept: Set<String>): Boolean {
+    val path = runCatching { file.canonicalFile }.getOrNull() ?: return false
+    val base = runCatching { root.canonicalFile }.getOrNull() ?: return false
+    if (!path.isFile) return false
+    if (path.parentFile != base) return false
+    return kept.none { raw ->
+        val other = runCatching { File(raw).canonicalFile }.getOrNull() ?: return@none false
+        other == path
     }
 }

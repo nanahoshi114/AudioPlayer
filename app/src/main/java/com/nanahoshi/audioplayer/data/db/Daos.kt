@@ -252,6 +252,9 @@ interface WhisperDao {
     @Query("SELECT * FROM whisper_jobs WHERE awaitRemoteUrl = :url AND status IN ('QUEUED', 'RUNNING') LIMIT 1")
     suspend fun activeForUrl(url: String): WhisperJobEntity?
 
+    @Query("SELECT localPath FROM whisper_jobs WHERE status IN ('QUEUED', 'RUNNING') AND localPath IS NOT NULL")
+    suspend fun activeLocalPaths(): List<String>
+
     @Query("SELECT * FROM whisper_jobs WHERE status = 'QUEUED' AND fingerprint = '' ORDER BY id ASC")
     suspend fun waitingForFile(): List<WhisperJobEntity>
 
