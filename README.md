@@ -20,7 +20,7 @@
 
 ### 1. 装到手机
 
-Android 7.0（API 24）及以上。用 Android Studio 打开工程，连上手机直接运行；需要安装包时，在 Android Studio 里生成签名 APK。命令行编译见文末[编译](#编译)。
+Android 7.0（API 24）及以上。到 [Releases](https://github.com/nanahoshi114/AudioPlayer/releases/latest) 下载最新的 APK 文件，在手机上安装即可。想自己编译，见文末[编译](#编译)。
 
 ### 2. 把想听的内容放进来
 
