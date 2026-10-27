@@ -49,6 +49,82 @@ Referer: https://www.dlsite.com/{站点}/
 
 去 Play（网页里直接听、直接看已购作品的那套接口）时，`Referer` 改成 `https://play.dlsite.com/`。
 
+## 播放器的调用方式
+
+这一段记 App 当前怎么用上面的接口，不重复下面的字段表。
+
+### 作品编号
+
+输入可以是 `RJ`、`VJ`、`BJ` 加数字，也可以只有数字；只有数字时补成 `RJ` 开头，统一转大写。
+
+- `worknoOf`：得到请求用的编号。
+- `worknoCandidates`：再用原样、补到 8 位、补到 6 位、去掉前导 0 这几种写法去试 `product.json`、作品页和 chobit。商品号短于标准长度时，这几种写法可能指向同一条作品。
+- `canonicalWorkno`：前缀加去掉前导 0 的数字。判断是否已购买、搜索结果合并、库里是否已有同一部作品时用它，所以 `RJ0243448` 和 `RJ243448` 算同一部。
+
+### 商店搜索
+
+自己搜索时 App 只查 `maniax`，固定 `language=jp`、`work_type=SOU`，每页 20 条。文字放进 `keyword`，声优或社团文字放进 `keyword_creator`；「全年龄」加 `age_category[0]=general`；标签用固定列表里的数字编号。排序对应关系：
+
+| App 里的排序 | `order` |
+| --- | --- |
+| 销量 | `dl_d` |
+| 发售日 | `release_d` |
+| 发售日-正序 | `release` |
+| 价格-正序 | `price` |
+| 价格 | `price_d` |
+| 评分 | `rate_d` |
+| 评价数 | `review_d` |
+| 其它 | `trend` |
+
+搜索只在不是热门模式时发；没填搜索词，也没有标签、声优、社团、全年龄或排序时，热门列表只来自 asmr.one。其余情况 App 会同时查 asmr.one，再按 `canonicalWorkno` 合并，两边都有的用 asmr.one 的资料，并标「DLsite 也有」。
+
+商店返回的 `search_result` 是一段 HTML，App 先从卡片里取 RJ 号、标题、社团和封面，再用 `product.json` 补齐声优、标签、发售日和类型。补到的类型不是 `SOU` 的会丢掉。`product.json` 也拿不到时，退回作品网页读标题、社团和封面。
+
+### 商品页和试听
+
+`showcase` 先请求 `product.json`，站点用返回的 `site_id`；然后打开作品网页取图库，图库为空时用 `product.json` 里的 `image_samples`。`product.json` 本身为空时，只从作品页读标题、社团、封面和试听。
+
+试听来自 chobit：
+
+1. 用 `https://chobit.cc/api/v1/dlsite/embed?workno={编号}` 取嵌入页，编号会把 `worknoCandidates` 试一遍。
+2. 作品网页里如果也写了 `chobit.cc/embed/...`，一起收进来。
+3. 最多打开 4 个嵌入页，从 `<li>` 的 `data-src` 取音频地址，从 `data-playtime` 取时长。
+
+试听请求带 chobit 的 `Referer`，不带 DLsite 登录凭证。压缩包形式的试听不能播；没有试听时显示「没有试听」。手机开着流量时图库先不加载，点「预览」再取；连着 Wi-Fi 时直接显示。
+
+### 登录和已购
+
+可以用账号密码登录，也可以粘贴整段 Cookie。两种方式成功后会再打开 Play 的登录页和 `api/authorize`，让 Play 也认这次登录。Cookie 存在加密偏好里，App 不保存密码，也不把 Cookie 写进日志。
+
+登录后不会自动列已购作品。打开「查看已购买作品」时：
+
+1. `GET /api/v3/content/count?last=0`，`user` 小于 1 就结束。
+2. `GET /api/v3/content/sales?last=0` 取编号和购买时间。
+3. 每 100 个编号一次 `POST /api/v3/content/works` 取标题、社团、封面和标签。
+
+判断某部作品是否已购买时，用 `canonicalWorkno` 对照这张表。作品详情里的「已购买内容」和「DLSite Play」文件区都靠它。
+
+### Play 文件
+
+打开已购作品的文件树：
+
+1. `GET https://play.dl.dlsite.com/api/v3/download/sign/cookie?workno={编号}` 换带时效的目录地址和凭证。
+2. `GET {url}ziptree.json`。
+3. 播放或下载单个文件用 `{url}optimized/{optimized.name}`，带 Play 的 `Referer` 和登录 Cookie。
+
+文件树的过滤：
+
+- `hidden` 节点整枝丢掉；过滤后没有文件的文件夹不显示。
+- 没有 `optimized` 的文件、`crypt` 为真的文件、文件名以 `.m3u8` 结尾的文件都跳过。
+- 音频按 `type` 或扩展名判断，扩展名认 `mp3`、`m4a`、`aac`、`wav`、`ogg`。
+- 非音频保留 `image`、`text` 类型；其它类型只留 jpg、jpeg、png、webp、gif、txt。
+
+播放和下载前都会重新签一次目录地址。遇到 `403` 或 `404` 会再签一次并重试；`401` 提示「登录已失效，请重新登录」。下完的文件放在 `filesDir/dlsite/{作品编号}/`，之后播放读本地文件。
+
+试听行虽然来源也记成 DLsite，但 `fileKey` 为空。空 `fileKey` 的请求不带 DLsite 登录，避免把已购凭证发给试听地址。
+
+文本文件同样最多读 512KB，超过时在末尾加「…（只显示前面一段）」；`401` 表示登录失效。
+
 ## 1. 商店搜索
 
 实测，2026-10-08。关键词 `ASMR`、类型收成音声，HTTP 200，正文是 JSON。

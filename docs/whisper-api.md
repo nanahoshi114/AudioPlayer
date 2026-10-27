@@ -1,12 +1,32 @@
-# 本机听写服务接口
+# 听写接口说明
 
-App 已按本文调用本机听写服务。地址的路径不以 `/v1` 结尾时走本文：`POST /jobs`、`GET /jobs/{id}`、`GET /jobs/{id}/cues`。上传后大约每 2 秒查询一次进度。`GET /health` 仍是服务约定，App 当前不请求它。
+播放器可以按五种接口做听写。本文主要写「本机任务接口」：`POST /jobs`、`GET /jobs/{id}`、`GET /jobs/{id}/cues`。上传后大约每 2 秒查询一次进度。`GET /health` 仍是服务约定，App 当前不请求它。
 
-地址的路径以 `/v1` 结尾时，App 不使用本文，改为一次上传到 `{基址}/audio/transcriptions`。模型名固定 `whisper-1`，`language` 为 `ja`，`response_format` 为 `verbose_json`，并带 `timestamp_granularities[]=segment`。返回里用 `segments` 的 `start`、`end`、`text`，单位是秒。文件大于 25MB 时 App 直接拒绝，不发起请求。单次读取最长等待 10 分钟。
+其余四种是线上模型或兼容 OpenAI 音频转写接口的本机服务，只在下面列流程；字段以各自服务为准。
+
+## 五种接口
+
+在「我的」的听写设置里选择。每个模型分别保存地址和口令，切换下拉只显示该模型已保存的内容；保存和清除也只作用于当前模型。进行中的任务继续用它自己的模型和口令。
+
+| 界面上的名字 | 地址 | 请求 | 说明 |
+| --- | --- | --- | --- |
+| `whisper-1` | 固定 `https://api.openai.com`，界面不显示 | `POST /v1/audio/transcriptions` | 只填 API Key。模型名 `whisper-1`，日语，`verbose_json`，分段时间。读超时 10 分钟。超过 25MB 先询问，确认后仍上传，取消记为「已中止」 |
+| `whisper（本地部署）` | 用户填写，不能为空 | `POST {地址}/v1/audio/transcriptions` | 请求与 `whisper-1` 相同，模型名仍发送 `whisper-1`。地址没有 `/v1` 时请求前补上。超过 25MB 不询问 |
+| `qwen-audio-3.1-asr` | 固定 `https://dashscope.aliyuncs.com`，界面不显示 | 阿里云官方接口 | 只填 API Key。5 分钟以内直接提交；不知道时长时，2MB 以内按短音频处理。更长的先上传到临时存储再轮询，走这条路时超过 1GB 不上传。语言提示为日语 |
+| `Qwen3-ASR` | 用户填写，不能为空 | `GET {地址}/v1/models`，再 `POST {地址}/v1/audio/transcriptions` | 先读取服务上的模型名，取名字里带 `qwen3-asr` 的第一项；没有就取列表第一项；服务没有列出模型时用 `Qwen/Qwen3-ASR-1.7B`。语言日语，`response_format` 为 `json`。返回分段时间就按段写字幕；只有整段文字时写成覆盖整首时长的一条；没有时长也没有分段时间时记为「没有分段时间」 |
+| `本机任务接口` | 用户填写，不能为空 | 本文下面的 `/jobs` 接口 | 应用不发送模型名，用服务自己加载的模型 |
+
+`whisper-1` 和 `qwen-audio-3.1-asr` 是线上模型：界面不显示地址，只保存 API Key，不使用地址栏里留下的内容。`whisper（本地部署）`、`Qwen3-ASR` 和 `本机任务接口` 要填地址和口令；服务不检查口令时，填任意非空内容即可。
+
+没保存过模型时，地址路径去掉末尾斜杠后以 `/v1` 结尾且域名是 `api.openai.com` 的视为 `whisper-1`，其他以 `/v1` 结尾的地址视为 `whisper（本地部署）`，其余视为本机任务接口。保存听写地址时不会自动补 `/v1`；`whisper（本地部署）` 和 `Qwen3-ASR` 只在请求时补。
+
+地址是局域网、本机或 `.local` 时，Android 17 要在请求前申请 `ACCESS_LOCAL_NETWORK`。公网地址不申请。
+
+## 本机任务接口
 
 服务跑在用户自己的电脑上，只听局域网。模型用 faster-whisper 或同级的 Whisper，例如各尺寸的 Whisper 与 Kotoba-Whisper。App 不发送模型名。一次只转写一首，其余排队。解码、切片、把每段时间加回整首，都由服务完成。App 只上传原始音频文件。本文没有取消任务的接口；App 里的「中止」只停止手机上的等待。
 
-## 约定
+### 约定
 
 - 基址由用户填写，例如 `http://192.168.1.20:8765`。不要末尾斜杠。
 - 除特别写出的上传外，请求和响应都是 JSON，头为 `Content-Type: application/json`。
@@ -15,7 +35,9 @@ App 已按本文调用本机听写服务。地址的路径不以 `/v1` 结尾时
 - 时间单位是毫秒，整数。
 - `language` 使用 BCP 47 或 ISO 639-1 短码。日语为 `ja`。缺省 `ja`。
 
-## GET /health
+App 会把 `content:` URI 的本地音频先复制进 `filesDir/whisper-src/` 再上传。磁盘上的暂存文件名没有后缀；上传时按文件头补 `mp3`、`flac`、`m4a`、`aac`、`wav` 或 `ogg`。
+
+### GET /health
 
 用来检查服务和模型是否可用。App 当前不请求这一路。
 
@@ -27,7 +49,7 @@ App 已按本文调用本机听写服务。地址的路径不以 `/v1` 结尾时
 
 `model` 是当前加载的模型名，只用于显示。模型未就绪时返回 `503`，`error` 说明原因。
 
-## POST /jobs
+### POST /jobs
 
 上传一首音频并建立任务。不要在这次响应里等待转写结束。
 
@@ -50,7 +72,7 @@ App 已按本文调用本机听写服务。地址的路径不以 `/v1` 结尾时
 
 已完成时同样 `202`，`status` 为 `done`。文件缺失或格式不能解码时返回 `400`。
 
-## GET /jobs/{id}
+### GET /jobs/{id}
 
 查询进度。未知 `id` 返回 `404`。
 
@@ -62,7 +84,7 @@ App 已按本文调用本机听写服务。地址的路径不以 `/v1` 结尾时
 
 `status` 只允许 `queued`、`running`、`done`、`failed`。`progress` 是 0 到 1 的小数；排队中为 `0`，完成时为 `1`。失败时 `error` 为一句说明，其余状态为 `null`。
 
-## GET /jobs/{id}/cues
+### GET /jobs/{id}/cues
 
 取字幕。仅 `done` 返回 `200`。仍在排队或转写返回 `409`。失败返回 `422`，正文沿用该任务的 `error`。未知 `id` 返回 `404`。
 
@@ -81,7 +103,7 @@ App 已按本文调用本机听写服务。地址的路径不以 `/v1` 结尾时
 
 这三项对应播放器里的 `SubtitleCue`：`startMs`、`endMs`、`text`。
 
-## 服务必须做到
+### 服务必须做到
 
 - 同一进程内同时只跑一首。新任务状态为 `queued`。
 - 长音频自行切开再拼接时间，调用方看不到切片。
