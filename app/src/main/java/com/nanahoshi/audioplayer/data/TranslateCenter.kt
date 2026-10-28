@@ -39,6 +39,7 @@ class TranslateCenter(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val runners = ConcurrentHashMap<Long, Job>()
     private val inflight = ConcurrentHashMap<String, Deferred<Boolean>>()
+    private val polishInflight = ConcurrentHashMap<String, Deferred<Boolean>>()
     private val updatesFlow = MutableSharedFlow<Unit>(extraBufferCapacity = 8)
     val updates: SharedFlow<Unit> = updatesFlow.asSharedFlow()
 
@@ -66,6 +67,31 @@ class TranslateCenter(
         }
     }
 
+    fun cancelPolish(row: QueuedTrack) {
+        calls.cancel("polish-${rowKey(row)}")
+    }
+
+    suspend fun polishRow(row: QueuedTrack): Boolean {
+        val key = rowKey(row)
+        while (true) {
+            val current = polishInflight[key]
+            if (current != null && current.isActive) return current.await()
+            lateinit var created: Deferred<Boolean>
+            created = scope.async(start = CoroutineStart.LAZY) {
+                try {
+                    runPolish(row)
+                } finally {
+                    polishInflight.remove(key, created)
+                }
+            }
+            if (polishInflight.putIfAbsent(key, created) == null) {
+                created.start()
+                return created.await()
+            }
+            created.cancel()
+        }
+    }
+
     suspend fun applyGenerated(jobId: Long, fingerprint: String): String? {
         val ticket = calls.prepare("whisper-$jobId")
         return try {
@@ -76,6 +102,13 @@ class TranslateCenter(
             val lines = translated.cues ?: return translated.detail
             if (db.whisper().get(jobId)?.translateStatus != TranslateMark.RUNNING) throw CancellationException()
             generatedFile(fingerprint).writeText(encodeGeneratedCues(lines))
+            val finished = finishWithPolish(lines, ticket) {
+                db.whisper().get(jobId)?.translateStatus == TranslateMark.RUNNING
+            }
+            if (finished !== lines) {
+                if (db.whisper().get(jobId)?.translateStatus != TranslateMark.RUNNING) throw CancellationException()
+                generatedFile(fingerprint).writeText(encodeGeneratedCues(finished))
+            }
             if (db.whisper().markTranslatedIfRunning(jobId, System.currentTimeMillis()) == 0) {
                 throw CancellationException()
             }
@@ -128,6 +161,11 @@ class TranslateCenter(
             }
             if (!translationActive(jobId)) throw CancellationException()
             subtitles.saveTranslations(row, lines)
+            val finished = finishWithPolish(lines, ticket) { translationActive(jobId) }
+            if (finished !== lines) {
+                if (!translationActive(jobId)) throw CancellationException()
+                subtitles.saveTranslations(row, finished)
+            }
             if (db.translations().finishIfActive(jobId) == 0) throw CancellationException()
             updatesFlow.tryEmit(Unit)
             return true
@@ -201,6 +239,47 @@ class TranslateCenter(
     private fun generatedFile(fingerprint: String): File {
         val safe = fingerprint.lowercase().filter { it in '0'..'9' || it in 'a'..'f' }
         return File(File(appContext.filesDir, "subtitles"), "$safe.json")
+    }
+
+    private suspend fun runPolish(row: QueuedTrack): Boolean {
+        if (!credentials.hasTranslate()) return false
+        val cues = subtitles.load(row).cues
+        if (!cues.hasTranslation()) return false
+        val ticket = calls.prepare("polish-${rowKey(row)}")
+        val polished = polishAll(cues, ticket) ?: return false
+        subtitles.saveTranslations(row, polished)
+        updatesFlow.tryEmit(Unit)
+        return true
+    }
+
+    private suspend fun finishWithPolish(
+        cues: List<SubtitleCue>,
+        ticket: InflightCalls.Ticket,
+        stillActive: suspend () -> Boolean,
+    ): List<SubtitleCue> {
+        if (!credentials.translateAutoPolish()) return cues
+        if (!stillActive()) throw CancellationException()
+        val polished = polishAll(cues, ticket) ?: return cues
+        if (!stillActive()) throw CancellationException()
+        return polished
+    }
+
+    private fun polishAll(cues: List<SubtitleCue>, ticket: InflightCalls.Ticket): List<SubtitleCue>? {
+        val updated = cues.toMutableList()
+        val indexed = cues.mapIndexedNotNull { index, cue ->
+            val translation = cue.translation?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapIndexedNotNull null
+            index to (cue.text to translation)
+        }
+        if (indexed.isEmpty()) return cues
+        indexed.chunked(BATCH).forEach { batch ->
+            val reply = client.polish(batch.map { it.second }, ticket)
+            val lines = reply.lines
+            if (lines == null || lines.size != batch.size) return null
+            batch.forEachIndexed { offset, (index, _) ->
+                updated[index] = cues[index].copy(translation = lines[offset])
+            }
+        }
+        return updated
     }
 
     private fun translateAll(cues: List<SubtitleCue>, ticket: InflightCalls.Ticket): TranslatedCues {

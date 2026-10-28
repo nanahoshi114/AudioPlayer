@@ -1,13 +1,20 @@
 package com.nanahoshi.audioplayer
 
 import android.app.Application
+import coil.EventListener
 import coil.ImageLoader
 import coil.ImageLoaderFactory
+import coil.disk.DiskCache
+import coil.imageLoader
+import coil.request.ImageRequest
+import coil.request.SuccessResult
 import com.nanahoshi.audioplayer.asmr.AsmrClient
 import com.nanahoshi.audioplayer.bilibili.BilibiliClient
 import com.nanahoshi.audioplayer.dlsite.DlsiteClient
 import com.nanahoshi.audioplayer.dlsite.RemotePreview
+import com.nanahoshi.audioplayer.data.CacheStore
 import com.nanahoshi.audioplayer.data.CredentialStore
+import com.nanahoshi.audioplayer.data.DEFAULT_CACHE_LIMIT_BYTES
 import com.nanahoshi.audioplayer.data.DownloadCenter
 import com.nanahoshi.audioplayer.data.LibraryPreferences
 import com.nanahoshi.audioplayer.data.TranslateCenter
@@ -28,6 +35,7 @@ class AppGraph(app: Application) {
     val asmr = AsmrClient()
     val dlsite = DlsiteClient(credentials)
     val librarySort = LibraryPreferences(app)
+    val cache = CacheStore(app) { app.imageLoader }
     val library = LibraryRepository(app, db, bilibili, asmr, dlsite)
     val downloads = DownloadCenter(app, db, asmr, dlsite, bilibili)
     val subtitles = SubtitleSource(app, db, bilibili, asmr)
@@ -43,9 +51,11 @@ class AudioPlayerApplication : Application(), ImageLoaderFactory {
     override fun onCreate() {
         super.onCreate()
         graph = AppGraph(this)
+        graph.cache.trimOnStart()
     }
 
     override fun newImageLoader(): ImageLoader {
+        val limit = if (::graph.isInitialized) graph.cache.limitBytes.value else DEFAULT_CACHE_LIMIT_BYTES
         val client = OkHttpClient.Builder().addInterceptor { chain ->
             val request = chain.request()
             val host = request.url.host
@@ -69,7 +79,20 @@ class AudioPlayerApplication : Application(), ImageLoaderFactory {
             }
             chain.proceed(updated)
         }.build()
-        return ImageLoader.Builder(this).okHttpClient(client).build()
+        return ImageLoader.Builder(this)
+            .okHttpClient(client)
+            .diskCache(
+                DiskCache.Builder()
+                    .directory(cacheDir.resolve("image_cache"))
+                    .maxSizeBytes(limit.coerceAtLeast(1L))
+                    .build(),
+            )
+            .eventListener(object : EventListener {
+                override fun onSuccess(request: ImageRequest, result: SuccessResult) {
+                    if (::graph.isInitialized) graph.cache.onImageLoaded()
+                }
+            })
+            .build()
     }
 }
 

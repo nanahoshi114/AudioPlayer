@@ -47,7 +47,6 @@ class WhisperCenter(
     private val appContext = context.applicationContext
     private val calls = InflightCalls()
     private val client = WhisperClient(credentials, calls)
-    private val qwenFlash = QwenFlashTranscriber(appContext)
     private val qwenFile = QwenFileTranscriber(calls)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val kick = Channel<Unit>(Channel.CONFLATED)
@@ -632,12 +631,7 @@ class WhisperCenter(
                 return
             }
             if (db.whisper().markRunningIfActive(job.id, 0f) == 0) return
-            val duration = job.trackId?.let { db.tracks().getById(it)?.durationMs }?.takeIf { it > 0L }
-            val cues = if (qwenUsesShortPath(duration, file.length())) {
-                qwenFlash.transcribe(file, base, token)
-            } else {
-                qwenFile.transcribe(file, base, ticket, token)
-            }
+            val cues = qwenFile.transcribe(file, base, ticket, token)
             if (!stillActive(job.id)) return
             writeCues(job.fingerprint, cues)
             finishWritten(job)

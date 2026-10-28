@@ -115,6 +115,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var translating by mutableStateOf(false)
         private set
+    var polishing by mutableStateOf(false)
+        private set
     internal var whisperPrompt by mutableStateOf<WhisperPrompt?>(null)
         private set
     internal var translatePrompt by mutableStateOf(false)
@@ -160,17 +162,13 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         translatePrompt = false
     }
 
-    fun generateNeedsLocalNetwork(translate: Boolean): Boolean {
+    fun generateNeedsLocalNetwork(): Boolean {
         val whisperBase = effectiveWhisperBase(
             graph.credentials.resolvedWhisperModel(),
             graph.credentials.whisperBaseUrl(),
         )
-        if (isLocalNetworkAddress(whisperBase)) return true
-        return translate && isLocalNetworkAddress(graph.credentials.translateBaseUrl())
+        return isLocalNetworkAddress(whisperBase)
     }
-
-    fun translateNeedsLocalNetwork(): Boolean =
-        isLocalNetworkAddress(graph.credentials.translateBaseUrl())
 
     fun reportLocalNetworkDenied() {
         graph.messages.value = "需要允许访问本地网络，才能连接这台设备"
@@ -205,6 +203,38 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val row = currentRow() ?: return@launch
             graph.translator.cancelRow(row)
+        }
+    }
+
+    fun requestPolish() {
+        viewModelScope.launch {
+            if (!graph.credentials.hasTranslate()) {
+                translatePrompt = true
+                return@launch
+            }
+            if (polishing) return@launch
+            val row = currentRow() ?: return@launch
+            polishing = true
+            try {
+                val polished = graph.translator.polishRow(row)
+                if (polished) {
+                    showChinese = true
+                    reloadSubtitles(client.state.value.queueItemId)
+                } else {
+                    graph.messages.value = "润色失败，已保留原译文"
+                }
+            } catch (cancelled: CancellationException) {
+                if (!isActive) throw cancelled
+            } finally {
+                polishing = false
+            }
+        }
+    }
+
+    fun cancelPolish() {
+        viewModelScope.launch {
+            val row = currentRow() ?: return@launch
+            graph.translator.cancelPolish(row)
         }
     }
 
@@ -425,10 +455,11 @@ fun NowPlayingScreen(onBack: () -> Unit, viewModel: PlayerViewModel = viewModel(
             canDelete = viewModel.fromGenerated,
             onChinese = { viewModel.showChinese = true },
             onJapanese = { viewModel.showChinese = false },
-            onTranslate = {
-                localNetwork.run(viewModel.translateNeedsLocalNetwork(), viewModel::requestTranslation)
-            },
+            onTranslate = viewModel::requestTranslation,
             onStop = viewModel::cancelTranslation,
+            polishing = viewModel.polishing,
+            onPolish = viewModel::requestPolish,
+            onStopPolish = viewModel::cancelPolish,
             onDelete = { discardPrompt = true },
             onSeek = viewModel.client::seekTo,
             onBack = { showSubtitles = false },
@@ -498,14 +529,14 @@ fun NowPlayingScreen(onBack: () -> Unit, viewModel: PlayerViewModel = viewModel(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         TextButton(onClick = {
-                            localNetwork.run(viewModel.generateNeedsLocalNetwork(true)) {
+                            localNetwork.run(viewModel.generateNeedsLocalNetwork()) {
                                 viewModel.requestGenerate(translate = true)
                             }
                         }) {
                             Text("生成字幕和翻译")
                         }
                         TextButton(onClick = {
-                            localNetwork.run(viewModel.generateNeedsLocalNetwork(false)) {
+                            localNetwork.run(viewModel.generateNeedsLocalNetwork()) {
                                 viewModel.requestGenerate(translate = false)
                             }
                         }) {
@@ -589,6 +620,9 @@ private fun SubtitleReader(
     onJapanese: () -> Unit,
     onTranslate: () -> Unit,
     onStop: () -> Unit,
+    polishing: Boolean,
+    onPolish: () -> Unit,
+    onStopPolish: () -> Unit,
     onDelete: () -> Unit,
     onSeek: (Long) -> Unit,
     onBack: () -> Unit,
@@ -618,6 +652,11 @@ private fun SubtitleReader(
                 }
                 TextButton(onClick = onJapanese) {
                     Text("日文", color = if (!chinese) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                if (polishing) {
+                    TextButton(onClick = onStopPolish) { Text("中止") }
+                } else {
+                    TextButton(onClick = onPolish) { Text("润色") }
                 }
             } else if (cues.isNotEmpty()) {
                 if (translating) {
@@ -763,7 +802,7 @@ private fun WhisperPromptDialog(viewModel: PlayerViewModel) {
     when (viewModel.whisperPrompt) {
         WhisperPrompt.NeedSettings -> AlertDialog(
             onDismissRequest = viewModel::dismissWhisperPrompt,
-            text = { Text("请先在「我的」里保存听写设置。线上模型只需 API Key；本地部署的模型还要填写地址和口令") },
+            text = { Text("请先在「设置 → 听写和翻译」里保存听写设置。线上模型只需 API Key；本地部署的模型还要填写地址和口令") },
             confirmButton = {
                 TextButton(onClick = viewModel::dismissWhisperPrompt) { Text("知道了") }
             },
@@ -783,7 +822,7 @@ private fun WhisperPromptDialog(viewModel: PlayerViewModel) {
     if (viewModel.translatePrompt) {
         AlertDialog(
             onDismissRequest = viewModel::dismissTranslatePrompt,
-            text = { Text("请先在「我的」里填写翻译地址、口令和模型名") },
+            text = { Text("请先在「设置 → 听写和翻译」里选择翻译平台并填写口令") },
             confirmButton = {
                 TextButton(onClick = viewModel::dismissTranslatePrompt) { Text("知道了") }
             },

@@ -8,15 +8,11 @@ internal const val WHISPER_MODEL_QWEN = "qwen-audio-3.1-asr"
 internal const val WHISPER_MODEL_QWEN3 = "qwen3-asr"
 internal const val WHISPER_MODEL_JOBS = "jobs"
 internal const val QWEN3_ASR_MODEL = "Qwen/Qwen3-ASR-1.7B"
-internal const val QWEN_FLASH_MODEL = "qwen-audio-3.1-asr-flash"
 internal const val QWEN_FILE_MODEL = "qwen-audio-3.1-asr-flash-filetrans"
 
 internal const val ONLINE_WHISPER_BYTES = 25L * 1024L * 1024L
-internal const val QWEN_SHORT_MS = 5L * 60L * 1000L
-internal const val QWEN_SHORT_UNKNOWN_BYTES = 2L * 1024L * 1024L
 internal const val QWEN_TEMP_BYTES = 1024L * 1024L * 1024L
 
-private const val QWEN_FLASH_PATH = "/api/v1/services/aigc/multimodal-generation/generation"
 private const val OPENAI_HOST = "api.openai.com"
 
 internal const val OPENAI_WHISPER_BASE = "https://api.openai.com"
@@ -128,36 +124,6 @@ internal fun groupTimedPieces(pieces: List<WhisperCue>): List<WhisperCue> {
 }
 
 private val QWEN3_SENTENCE_END = charArrayOf('。', '！', '？', '!', '?').toSet()
-
-internal fun qwenUsesShortPath(durationMs: Long?, bytes: Long): Boolean {
-    if (durationMs != null && durationMs > 0L) return durationMs <= QWEN_SHORT_MS
-    return bytes <= QWEN_SHORT_UNKNOWN_BYTES
-}
-
-internal fun qwenFlashSocketUrl(base: String): String? {
-    val trimmed = base.trim().trimEnd('/')
-    if (trimmed.isEmpty()) return null
-    val lower = trimmed.lowercase()
-    if (lower.startsWith("wss://") || lower.startsWith("ws://")) return trimmed
-    val withScheme = when {
-        lower.startsWith("https://") || lower.startsWith("http://") -> trimmed
-        else -> "https://$trimmed"
-    }
-    val uri = try {
-        URI(withScheme)
-    } catch (_: Exception) {
-        return null
-    }
-    val host = uri.host ?: return null
-    val scheme = if (uri.scheme.equals("http", ignoreCase = true)) "ws" else "wss"
-    val port = if (uri.port != -1) ":${uri.port}" else ""
-    var path = uri.rawPath.orEmpty().trimEnd('/')
-    if (!path.endsWith(QWEN_FLASH_PATH)) {
-        path = path.removeSuffix("/compatible-mode/v1").removeSuffix("/v1").trimEnd('/')
-        path += QWEN_FLASH_PATH
-    }
-    return "$scheme://$host$port$path"
-}
 
 internal fun qwenHttpOrigin(base: String): String? {
     val trimmed = base.trim()

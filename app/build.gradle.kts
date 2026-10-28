@@ -63,7 +63,6 @@ dependencies {
     implementation(libs.coil.compose)
     implementation(libs.reorderable)
     implementation(libs.zxing.core)
-    implementation(files("libs/nuisdk-release.aar"))
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)

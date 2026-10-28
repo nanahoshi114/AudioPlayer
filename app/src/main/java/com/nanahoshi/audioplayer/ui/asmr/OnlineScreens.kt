@@ -48,10 +48,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExposedDropdownMenuBox
-import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.ExposedDropdownMenuAnchorType
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -100,13 +97,6 @@ import com.nanahoshi.audioplayer.asmr.AsmrWork
 import com.nanahoshi.audioplayer.asmr.CatalogLookup
 import com.nanahoshi.audioplayer.asmr.WorkFacts
 import com.nanahoshi.audioplayer.data.LibrarySort
-import com.nanahoshi.audioplayer.data.WHISPER_MODEL_1
-import com.nanahoshi.audioplayer.data.WHISPER_MODEL_JOBS
-import com.nanahoshi.audioplayer.data.WHISPER_MODEL_LOCAL
-import com.nanahoshi.audioplayer.data.WHISPER_MODEL_QWEN
-import com.nanahoshi.audioplayer.data.WHISPER_MODEL_QWEN3
-import com.nanahoshi.audioplayer.data.isCloudWhisperModel
-import com.nanahoshi.audioplayer.data.whisperModelLabel
 import com.nanahoshi.audioplayer.data.TrackSource
 import com.nanahoshi.audioplayer.data.db.FileKind
 import com.nanahoshi.audioplayer.data.db.FolderEntity
@@ -1706,54 +1696,6 @@ class MineViewModel(app: Application) : AndroidViewModel(app) {
         private set
     private var qrJob: Job? = null
     private var qrGeneration = 0
-    var whisperModel by mutableStateOf(graph.credentials.resolvedWhisperModel())
-    var whisperBase by mutableStateOf(graph.credentials.whisperBaseUrl(whisperModel).orEmpty())
-    var whisperToken by mutableStateOf(graph.credentials.whisperToken(whisperModel).orEmpty())
-    var whisperSaved by mutableStateOf(graph.credentials.hasWhisper())
-        private set
-    var translateBase by mutableStateOf(graph.credentials.translateBaseUrl().orEmpty())
-    var translateToken by mutableStateOf(graph.credentials.translateToken().orEmpty())
-    var translateModel by mutableStateOf(graph.credentials.translateModel().orEmpty())
-    var translateSaved by mutableStateOf(graph.credentials.hasTranslate())
-        private set
-
-    fun selectWhisperModel(id: String) {
-        whisperModel = id
-        whisperBase = graph.credentials.whisperBaseUrl(id).orEmpty()
-        whisperToken = graph.credentials.whisperToken(id).orEmpty()
-        whisperSaved = graph.credentials.hasWhisper(id)
-    }
-
-    fun saveWhisper() {
-        graph.credentials.saveWhisper(whisperBase, whisperToken, whisperModel)
-        whisperBase = graph.credentials.whisperBaseUrl(whisperModel).orEmpty()
-        whisperToken = graph.credentials.whisperToken(whisperModel).orEmpty()
-        whisperModel = graph.credentials.resolvedWhisperModel()
-        whisperSaved = graph.credentials.hasWhisper(whisperModel)
-    }
-
-    fun clearWhisper() {
-        graph.credentials.clearWhisper(whisperModel)
-        whisperBase = ""
-        whisperToken = ""
-        whisperSaved = false
-    }
-
-    fun saveTranslate() {
-        graph.credentials.saveTranslate(translateBase, translateToken, translateModel)
-        translateBase = graph.credentials.translateBaseUrl().orEmpty()
-        translateToken = graph.credentials.translateToken().orEmpty()
-        translateModel = graph.credentials.translateModel().orEmpty()
-        translateSaved = graph.credentials.hasTranslate()
-    }
-
-    fun clearTranslate() {
-        graph.credentials.clearTranslate()
-        translateBase = ""
-        translateToken = ""
-        translateModel = ""
-        translateSaved = false
-    }
 
     fun login() {
         viewModelScope.launch {
@@ -1897,13 +1839,10 @@ class PurchasesViewModel(app: Application) : AndroidViewModel(app) {
 fun MineScreen(
     onOpenPurchases: () -> Unit,
     onOpenFavorites: () -> Unit,
-    onOpenStored: () -> Unit,
     viewModel: MineViewModel = viewModel(),
 ) {
     var biliHelp by remember { mutableStateOf(false) }
     var sessdataLogin by remember { mutableStateOf(false) }
-    var whisperHelp by remember { mutableStateOf(false) }
-    var translateHelp by remember { mutableStateOf(false) }
     if (viewModel.qrVisible) {
         BiliQrDialog(
             image = viewModel.qrImage,
@@ -1927,19 +1866,7 @@ fun MineScreen(
             onDismiss = { sessdataLogin = false },
         )
     }
-    if (whisperHelp) {
-        WhisperHelpDialog(onDismiss = { whisperHelp = false })
-    }
-    if (translateHelp) {
-        TranslateHelpDialog(onDismiss = { translateHelp = false })
-    }
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-        item(key = "stored") {
-            Button(
-                onClick = onOpenStored,
-                modifier = Modifier.padding(top = 16.dp),
-            ) { Text("下载管理") }
-        }
         item(key = "dlsite") {
             Text("DLsite", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
             if (!viewModel.loggedIn) {
@@ -2017,91 +1944,8 @@ fun MineScreen(
             TextButton(onClick = viewModel::clearBili) { Text("清除") }
             Button(
                 onClick = onOpenFavorites,
-                modifier = Modifier.padding(top = 16.dp),
+                modifier = Modifier.padding(top = 16.dp, bottom = 24.dp),
             ) { Text("查看收藏夹") }
-        }
-        item(key = "whisper") {
-            Row(
-                Modifier.padding(top = 20.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("听写", style = MaterialTheme.typography.titleMedium)
-                IconButton(onClick = { whisperHelp = true }) {
-                    Icon(Icons.AutoMirrored.Outlined.HelpOutline, contentDescription = "听写说明")
-                }
-            }
-            WhisperModelField(
-                model = viewModel.whisperModel,
-                onModel = viewModel::selectWhisperModel,
-            )
-            if (!isCloudWhisperModel(viewModel.whisperModel)) {
-                OutlinedTextField(
-                    value = viewModel.whisperBase,
-                    onValueChange = { viewModel.whisperBase = it },
-                    label = { Text("地址") },
-                    singleLine = true,
-                    supportingText = whisperAddressHint(viewModel.whisperModel),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-            OutlinedTextField(
-                value = viewModel.whisperToken,
-                onValueChange = { viewModel.whisperToken = it },
-                label = { Text(if (isCloudWhisperModel(viewModel.whisperModel)) "API Key" else "口令") },
-                singleLine = true,
-                visualTransformation = PasswordVisualTransformation(),
-                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-            )
-            Button(
-                onClick = viewModel::saveWhisper,
-                modifier = Modifier.padding(top = 8.dp),
-            ) { Text("保存") }
-            TextButton(onClick = viewModel::clearWhisper) { Text("清除") }
-            if (viewModel.whisperSaved) {
-                Text("已保存", modifier = Modifier.padding(top = 8.dp))
-            }
-        }
-        item(key = "translate") {
-            Row(
-                Modifier.padding(top = 20.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("翻译", style = MaterialTheme.typography.titleMedium)
-                IconButton(onClick = { translateHelp = true }) {
-                    Icon(Icons.AutoMirrored.Outlined.HelpOutline, contentDescription = "翻译说明")
-                }
-            }
-            OutlinedTextField(
-                value = viewModel.translateBase,
-                onValueChange = { viewModel.translateBase = it },
-                label = { Text("地址") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            OutlinedTextField(
-                value = viewModel.translateToken,
-                onValueChange = { viewModel.translateToken = it },
-                label = { Text("口令") },
-                singleLine = true,
-                visualTransformation = PasswordVisualTransformation(),
-                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-            )
-            OutlinedTextField(
-                value = viewModel.translateModel,
-                onValueChange = { viewModel.translateModel = it },
-                label = { Text("模型名") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-            )
-            Button(
-                onClick = viewModel::saveTranslate,
-                modifier = Modifier.padding(top = 8.dp),
-            ) { Text("保存") }
-            TextButton(onClick = viewModel::clearTranslate) { Text("清除") }
-            if (viewModel.translateSaved) {
-                Text("已保存", modifier = Modifier.padding(top = 8.dp))
-            }
-            Box(Modifier.padding(bottom = 24.dp))
         }
     }
 }
@@ -2215,135 +2059,6 @@ private fun BiliQrDialog(
                 TextButton(onClick = onRefresh) { Text("刷新二维码") }
             }
             TextButton(onClick = onDismiss) { Text("取消") }
-        },
-    )
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun WhisperModelField(model: String, onModel: (String) -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    ExposedDropdownMenuBox(
-        expanded = expanded,
-        onExpandedChange = { expanded = it },
-        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-    ) {
-        OutlinedTextField(
-            value = whisperModelLabel(model),
-            onValueChange = {},
-            readOnly = true,
-            label = { Text("模型") },
-            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-            modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable).fillMaxWidth(),
-        )
-        ExposedDropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { expanded = false },
-        ) {
-            listOf(
-                WHISPER_MODEL_1,
-                WHISPER_MODEL_LOCAL,
-                WHISPER_MODEL_QWEN,
-                WHISPER_MODEL_QWEN3,
-                WHISPER_MODEL_JOBS,
-            ).forEach { id ->
-                DropdownMenuItem(
-                    text = { Text(whisperModelLabel(id)) },
-                    onClick = {
-                        onModel(id)
-                        expanded = false
-                    },
-                    contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding,
-                )
-            }
-        }
-    }
-}
-
-private fun whisperAddressHint(model: String): (@Composable () -> Unit)? = when (model) {
-    WHISPER_MODEL_LOCAL, WHISPER_MODEL_QWEN3 -> {
-        { Text("需要填写服务地址") }
-    }
-    else -> null
-}
-
-@Composable
-private fun WhisperHelpDialog(onDismiss: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("听写") },
-        text = {
-            Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
-                Text("whisper-1 和 qwen-audio-3.1-asr 是线上模型，只填写 API Key，不显示地址。whisper-1 使用 https://api.openai.com，qwen-audio-3.1-asr 使用 https://dashscope.aliyuncs.com。whisper（本地部署）、Qwen3-ASR 和本机任务接口要填写地址和口令。连到局域网时，系统会询问是否允许访问本地网络，需要允许。")
-                Text(
-                    "whisper-1：模型名固定为 whisper-1，语言为日语，并要求返回每个分段的开始时间、结束时间和文本。单次请求最长等待 10 分钟。文件超过 25MB 时，会先询问是否仍要发送；确认后仍会上传。",
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-                Text(
-                    "whisper（本地部署）：地址填写本机服务基址，不能留空。基址若不以 /v1 结尾，请求时会补上。请求内容与 whisper-1 相同，模型名仍发送 whisper-1。文件超过 25MB 时直接发送。服务不检查口令时，填写任意非空内容即可。",
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-                Text(
-                    "qwen-audio-3.1-asr：不超过 5 分钟的音频直接提交。更长的会先上传到临时存储，再转写。语言提示为日语。超过临时上传上限时不会上传。",
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-                Text(
-                    "Qwen3-ASR：本地部署的开源模型，与 qwen-audio-3.1-asr 分开。地址填写本机服务基址，不能留空；基址若不以 /v1 结尾，请求时会补上。应用先读取服务上已加载的模型名，再把音频提交到音频转写接口，语言为日语。服务返回每个分段的开始和结束时间时，按段生成字幕。只返回整段文字时，整段文字作为一条字幕，覆盖整首的时长。没有读出时长、也没有分段时间时，记为「没有分段时间」。口令会放在请求里；服务不检查口令时，填写任意非空内容即可。",
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-                Text(
-                    "本机任务接口：按 docs/whisper-api.md。应用将音频提交到 POST /jobs，用 GET /jobs/{id} 查询进度，用 GET /jobs/{id}/cues 读取字幕。",
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("关闭") }
-        },
-    )
-}
-
-@Composable
-private fun TranslateHelpDialog(onDismiss: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("翻译") },
-        text = {
-            Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
-                Text("本地部署", style = MaterialTheme.typography.titleSmall)
-                Text(
-                    "本地与线上使用同一套接口，只支持通用大模型。服务需提供 OpenAI 兼容的对话接口。Ollama 默认提供该接口。",
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-                Text(
-                    "模型名必须与服务中已加载的名称一致，应用会原样发送。",
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-                Text(
-                    "地址填写服务基址。未以 /v1 结尾时，保存后会自动补上，末尾斜杠会被去掉。不要写到 /chat/completions。例如 http://192.168.1.20:11434。口令不能为空，请求时通过 Authorization 发送；服务不校验口令时，填写任意非空内容即可。",
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-                Text(
-                    "应用请求 POST {基址}/chat/completions。选择「生成字幕和翻译」时，听写完成后会自动把日文译成简体中文。只选择「生成字幕」时不会请求翻译。",
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-                Text(
-                    "线上模型",
-                    style = MaterialTheme.typography.titleSmall,
-                    modifier = Modifier.padding(top = 16.dp),
-                )
-                Text(
-                    "地址同样填写到 /v1，例如 https://api.openai.com/v1，或服务商提供的兼容地址。模型名填写该服务商的对话模型名称。",
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-                Text(
-                    "只把日语字幕译成简体中文。每批最多 40 句，超出部分会分成多次请求并按顺序发送。每一行必须是「编号|译文」，编号从 1 连续排到本批句数，不能缺行、空行或附加说明。任一批格式不符，整次翻译失败，已完成的批次不会保存。单次请求最长等待 3 分钟。模型若仍进行思考，可能超过该时限而失败。",
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("关闭") }
         },
     )
 }

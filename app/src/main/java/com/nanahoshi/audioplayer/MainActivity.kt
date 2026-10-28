@@ -17,6 +17,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
@@ -57,6 +58,9 @@ import com.nanahoshi.audioplayer.ui.player.MiniPlayer
 import com.nanahoshi.audioplayer.ui.player.NowPlayingScreen
 import com.nanahoshi.audioplayer.ui.playlist.PlaylistDetailScreen
 import com.nanahoshi.audioplayer.ui.playlist.PlaylistListScreen
+import com.nanahoshi.audioplayer.ui.settings.CacheScreen
+import com.nanahoshi.audioplayer.ui.settings.ModelSettingsScreen
+import com.nanahoshi.audioplayer.ui.settings.SettingsScreen
 import com.nanahoshi.audioplayer.ui.theme.AudioPlayerTheme
 
 class MainActivity : ComponentActivity() {
@@ -78,6 +82,9 @@ private object Routes {
     const val OnlineWork = "online/work/{sourceId}"
     fun onlineWork(sourceId: String) = "online/work/$sourceId"
     const val Mine = "mine"
+    const val Settings = "settings"
+    const val ModelSettings = "settings/models"
+    const val CacheSettings = "settings/cache"
     const val Purchases = "purchases"
     const val NowPlaying = "now"
     const val Downloads = "downloads"
@@ -98,7 +105,7 @@ private fun PlayerApp() {
     val backStack by navController.currentBackStackEntryAsState()
     val route = backStack?.destination?.route
     val showBars = route == Routes.Library || route == Routes.Playlists ||
-        route == Routes.Online || route == Routes.Mine
+        route == Routes.Online || route == Routes.Mine || route == Routes.Settings
     val context = LocalContext.current
     val graph = (context.applicationContext as AudioPlayerApplication).graph
     val messages = graph.messages
@@ -155,6 +162,7 @@ private fun PlayerApp() {
                                 Routes.Playlists -> "播放列表"
                                 Routes.Online -> "在线搜索"
                                 Routes.Mine -> "我的"
+                                Routes.Settings -> "设置"
                                 else -> "音频库"
                             },
                         )
@@ -220,6 +228,18 @@ private fun PlayerApp() {
                             icon = { Icon(Icons.Default.Person, contentDescription = null) },
                             label = { Text("我的") },
                         )
+                        NavigationBarItem(
+                            selected = route == Routes.Settings,
+                            onClick = {
+                                navController.navigate(Routes.Settings) {
+                                    popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                                    launchSingleTop = true
+                                    restoreState = true
+                                }
+                            },
+                            icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                            label = { Text("设置") },
+                        )
                     }
                 }
             }
@@ -258,7 +278,13 @@ private fun PlayerApp() {
                 MineScreen(
                     onOpenPurchases = { navController.navigate(Routes.Purchases) },
                     onOpenFavorites = { navController.navigate(Routes.favorites(null)) },
+                )
+            }
+            composable(Routes.Settings) {
+                SettingsScreen(
                     onOpenStored = { navController.navigate(Routes.Stored) },
+                    onOpenModels = { navController.navigate(Routes.ModelSettings) },
+                    onOpenCache = { navController.navigate(Routes.CacheSettings) },
                 )
             }
             composable(Routes.Playlist) { entry ->
@@ -276,6 +302,12 @@ private fun PlayerApp() {
                     onBack = { navController.popBackStack() },
                     onOpenWork = { sourceId -> navController.navigate(Routes.onlineWork(sourceId)) },
                 )
+            }
+            composable(Routes.ModelSettings) {
+                ModelSettingsScreen(onBack = { navController.popBackStack() })
+            }
+            composable(Routes.CacheSettings) {
+                CacheScreen(onBack = { navController.popBackStack() })
             }
             composable(Routes.Purchases) {
                 PurchasesScreen(

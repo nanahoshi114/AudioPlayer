@@ -142,38 +142,103 @@ class CredentialStore(context: Context) {
         secretPrefs.edit().remove(KEY_WHISPER_TOKEN).apply()
     }
 
-    fun translateBaseUrl(): String? = normalizeTranslateBase(plainPrefs.getString(KEY_TRANSLATE_BASE, null))
+    fun translatePlatform(): TranslatePlatform {
+        migrateTranslate()
+        return translatePlatformOf(plainPrefs.getString(KEY_TRANSLATE_PLATFORM, null))
+    }
 
-    fun translateToken(): String? = secretPrefs.getString(KEY_TRANSLATE_TOKEN, null)?.trim()?.takeIf { it.isNotEmpty() }
+    fun translateBaseUrl(): String = translatePlatform().baseUrl
 
-    fun translateModel(): String? = plainPrefs.getString(KEY_TRANSLATE_MODEL, null)?.trim()?.takeIf { it.isNotEmpty() }
+    fun translateToken(platform: TranslatePlatform = translatePlatform()): String? {
+        migrateTranslate()
+        return secretPrefs.getString(translateTokenKey(platform), null)?.trim()?.takeIf { it.isNotEmpty() }
+    }
 
-    fun hasTranslate(): Boolean =
-        translateBaseUrl() != null && translateToken() != null && translateModel() != null
+    fun translateModelInput(platform: TranslatePlatform = translatePlatform()): String {
+        migrateTranslate()
+        return plainPrefs.getString(translateModelKey(platform), null)?.trim().orEmpty()
+    }
 
-    fun saveTranslate(baseUrl: String, token: String, model: String) {
-        val base = normalizeTranslateBase(baseUrl)
-        if (base == null) {
-            plainPrefs.edit().remove(KEY_TRANSLATE_BASE).apply()
-        } else {
-            plainPrefs.edit().putString(KEY_TRANSLATE_BASE, base).apply()
-        }
+    fun translateModel(platform: TranslatePlatform = translatePlatform()): String {
+        val saved = translateModelInput(platform)
+        return saved.ifEmpty { platform.defaultModel }
+    }
+
+    fun hasTranslate(): Boolean = translateToken() != null
+
+    fun translateThinking(): Boolean {
+        migrateTranslate()
+        return plainPrefs.getBoolean(KEY_TRANSLATE_THINKING, false)
+    }
+
+    fun translateEffort(platform: TranslatePlatform = translatePlatform()): String {
+        migrateTranslate()
+        return platform.effortOrDefault(plainPrefs.getString(translateEffortKey(platform), null))
+    }
+
+    fun translateAutoPolish(): Boolean {
+        migrateTranslate()
+        return plainPrefs.getBoolean(KEY_TRANSLATE_AUTO_POLISH, false)
+    }
+
+    fun saveTranslate(platform: TranslatePlatform, token: String, model: String) {
+        migrateTranslate()
+        plainPrefs.edit().putString(KEY_TRANSLATE_PLATFORM, platform.name).apply()
         val secret = token.trim()
         if (secret.isEmpty()) {
-            secretPrefs.edit().remove(KEY_TRANSLATE_TOKEN).apply()
+            secretPrefs.edit().remove(translateTokenKey(platform)).apply()
         } else {
-            secretPrefs.edit().putString(KEY_TRANSLATE_TOKEN, secret).apply()
+            secretPrefs.edit().putString(translateTokenKey(platform), secret).apply()
         }
         val name = model.trim()
         if (name.isEmpty()) {
-            plainPrefs.edit().remove(KEY_TRANSLATE_MODEL).apply()
+            plainPrefs.edit().remove(translateModelKey(platform)).apply()
         } else {
-            plainPrefs.edit().putString(KEY_TRANSLATE_MODEL, name).apply()
+            plainPrefs.edit().putString(translateModelKey(platform), name).apply()
         }
     }
 
-    fun clearTranslate() {
-        plainPrefs.edit().remove(KEY_TRANSLATE_BASE).remove(KEY_TRANSLATE_MODEL).apply()
+    fun clearTranslate(platform: TranslatePlatform = translatePlatform()) {
+        migrateTranslate()
+        plainPrefs.edit().remove(translateModelKey(platform)).apply()
+        secretPrefs.edit().remove(translateTokenKey(platform)).apply()
+    }
+
+    fun saveTranslateThinking(enabled: Boolean) {
+        migrateTranslate()
+        plainPrefs.edit().putBoolean(KEY_TRANSLATE_THINKING, enabled).apply()
+    }
+
+    fun saveTranslateEffort(platform: TranslatePlatform, effort: String) {
+        migrateTranslate()
+        plainPrefs.edit().putString(translateEffortKey(platform), platform.effortOrDefault(effort)).apply()
+    }
+
+    fun saveTranslateAutoPolish(enabled: Boolean) {
+        migrateTranslate()
+        plainPrefs.edit().putBoolean(KEY_TRANSLATE_AUTO_POLISH, enabled).apply()
+    }
+
+    private fun migrateTranslate() {
+        if (plainPrefs.getBoolean(KEY_TRANSLATE_MIGRATED, false)) return
+        val legacyBase = plainPrefs.getString(KEY_TRANSLATE_BASE, null)
+        val platform = platformForLegacyBase(legacyBase)
+        if (platform != null) {
+            plainPrefs.edit().putString(KEY_TRANSLATE_PLATFORM, platform.name).apply()
+            val legacyModel = plainPrefs.getString(KEY_TRANSLATE_MODEL, null)?.trim()?.takeIf { it.isNotEmpty() }
+            val legacyToken = secretPrefs.getString(KEY_TRANSLATE_TOKEN, null)?.trim()?.takeIf { it.isNotEmpty() }
+            if (legacyModel != null && plainPrefs.getString(translateModelKey(platform), null).isNullOrBlank()) {
+                plainPrefs.edit().putString(translateModelKey(platform), legacyModel).apply()
+            }
+            if (legacyToken != null && secretPrefs.getString(translateTokenKey(platform), null).isNullOrBlank()) {
+                secretPrefs.edit().putString(translateTokenKey(platform), legacyToken).apply()
+            }
+        }
+        plainPrefs.edit()
+            .remove(KEY_TRANSLATE_BASE)
+            .remove(KEY_TRANSLATE_MODEL)
+            .putBoolean(KEY_TRANSLATE_MIGRATED, true)
+            .apply()
         secretPrefs.edit().remove(KEY_TRANSLATE_TOKEN).apply()
     }
 
@@ -271,16 +336,21 @@ class CredentialStore(context: Context) {
         const val KEY_TRANSLATE_BASE = "translate_base_url"
         const val KEY_TRANSLATE_TOKEN = "translate_token"
         const val KEY_TRANSLATE_MODEL = "translate_model"
+        const val KEY_TRANSLATE_PLATFORM = "translate_platform"
+        const val KEY_TRANSLATE_THINKING = "translate_thinking"
+        const val KEY_TRANSLATE_AUTO_POLISH = "translate_auto_polish"
+        const val KEY_TRANSLATE_MIGRATED = "translate_credentials_migrated"
+
+        fun translateTokenKey(platform: TranslatePlatform) = "translate_token_${platform.name}"
+
+        fun translateModelKey(platform: TranslatePlatform) = "translate_model_${platform.name}"
+
+        fun translateEffortKey(platform: TranslatePlatform) = "translate_effort_${platform.name}"
         const val KEY_BUVID = "buvid3"
 
         fun normalizeWhisperBase(raw: String?): String? {
             val value = raw?.trim()?.trimEnd('/')?.takeIf { it.isNotEmpty() } ?: return null
             return value
-        }
-
-        fun normalizeTranslateBase(raw: String?): String? {
-            val value = raw?.trim()?.trimEnd('/')?.takeIf { it.isNotEmpty() } ?: return null
-            return if (value.endsWith("/v1")) value else "$value/v1"
         }
         const val KEY_BUVID4 = "buvid4"
         const val KEY_TICKET = "bili_ticket"

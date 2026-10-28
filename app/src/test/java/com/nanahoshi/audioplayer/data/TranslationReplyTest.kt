@@ -19,6 +19,11 @@ class TranslationReplyTest {
     }
 
     @Test
+    fun rejectsThreeColumns() {
+        assertNull(parseTranslationReply("1|こんにちは|你好", 1))
+    }
+
+    @Test
     fun rejectsAMissingNumber() {
         assertNull(
             parseTranslationReply(

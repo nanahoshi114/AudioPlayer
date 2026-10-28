@@ -33,6 +33,7 @@ Kotlin 2.2.10，AGP 9.4.1，compileSdk / targetSdk 37，minSdk 24，Java 11。�
 | `ui/playlist` | 播放列表 |
 | `ui/player` | 正在播放、底部小条、字幕按钮 |
 | `ui/asmr` | 在线搜索、作品详情、我的、已购买列表 |
+| `ui/settings` | 设置、听写和翻译、清理缓存 |
 | `ui/download` | 进行中的下载、听写、翻译；已落盘文件的下载管理 |
 | `playback` | 播放服务、在线音频、字幕读取 |
 | `bilibili` | 播放地址、收藏夹、字幕、扫码登录 |
@@ -40,9 +41,9 @@ Kotlin 2.2.10，AGP 9.4.1，compileSdk / targetSdk 37，minSdk 24，Java 11。�
 | `dlsite` | 商店、商品页、登录、已购 Play、试听 |
 | `data` | 库、下载、已落盘文件、凭证、听写、翻译 |
 | `data/db` | Room，当前第 12 版 |
-| `AppGraph.kt` | 在 `Application.onCreate` 里组装。顺序是 db、credentials、bilibili、asmr、dlsite、librarySort、library、downloads、subtitles、translator、whisper、player |
+| `AppGraph.kt` | 在 `Application.onCreate` 里组装。顺序是 db、credentials、bilibili、asmr、dlsite、librarySort、cache、library、downloads、subtitles、translator、whisper、player |
 
-底栏四页：音频库、播放列表、在线搜索、我的。作品详情、已购买、收藏夹、正在播放、下载、下载管理、文件预览是单独一页。
+底栏五页：音频库、播放列表、在线搜索、我的、设置。作品详情、已购买、收藏夹、正在播放、下载、下载管理、听写和翻译、清理缓存、文件预览是单独一页。
 
 ## 不要改坏
 
@@ -54,12 +55,15 @@ Kotlin 2.2.10，AGP 9.4.1，compileSdk / targetSdk 37，minSdk 24，Java 11。�
 - 「生成字幕」设 `skipTranslate = true`，不请求翻译。「生成字幕和翻译」才在听写完成后翻译。重试沿用原来的 `skipTranslate`。
 - 手动「生成翻译」跑在 `TranslateCenter` 自己的协程里。离开正在播放页只取消等待，不取消这次翻译。
 - 删除生成字幕时，删生成文件、已完成的听写记录和翻译记录。不要删进行中的听写，不要删同目录里原有的 lrc/srt，也不要删远端字幕。
-- 「我的」里的下载管理列出已经在手机上的 asmr.one / DLsite 音频、缓存的 B 站音轨、这些音频的生成字幕，以及该作品下载目录里的 lrc/srt/vtt。每一行带上文件大小。`filesDir/subtitles` 里其余生成字幕也会列出来。生成字幕的列表名是音频名加上 `.json`。顶栏下载图标仍是进行中的任务。删音频时清掉本地文件和完成的下载记录，作品留在库里；同时删这首的生成字幕。不删进行中的听写，也不删下载目录里原有的 lrc/srt。只删字幕行时不删音频。缓存 B 站只保存音轨，播已经缓存的曲目时读本地文件。
+- 「设置」里的下载管理列出已经在手机上的 asmr.one / DLsite 音频、缓存的 B 站音轨、这些音频的生成字幕，以及该作品下载目录里的 lrc/srt/vtt。每一行带上文件大小。`filesDir/subtitles` 里其余生成字幕也会列出来。生成字幕的列表名是音频名加上 `.json`。顶栏下载图标仍是进行中的任务。删音频时清掉本地文件和完成的下载记录，作品留在库里；同时删这首的生成字幕。不删进行中的听写，也不删下载目录里原有的 lrc/srt。只删字幕行时不删音频。缓存 B 站只保存音轨，播已经缓存的曲目时读本地文件。
+- 清理缓存只统计并删除 `cacheDir`（封面图片等临时缓存）。不删除 `filesDir` 里的下载音频、B 站缓存音轨、字幕和听写暂存。默认上限 200MB。超过上限后按文件修改时间从早到晚删，直到回到上限以内；Coil 的 `journal*` 不删。手动「清理缓存」会清空这份临时缓存。
 - 音频库里还不是作品的本地文件夹，可以用「识别为作品」对照文件树。已在 DLsite 购买且能连上时，先对照 DLsite 的文件，对上提示「DLsite匹配成功」，曲目标成 DLsite。没买过、DLsite 对不上，或 DLsite 连不上，再对照 asmr.one，对上提示「asmr.one匹配成功」。DLsite 连不上且 asmr.one 也对不上，提示「DLsite未连接且asmr.one匹配失败」。两边都对不上，提示「DLsite/asmr.one均匹配失败」。本地可以少文件或文件夹，不能多出作品里没有的。对上以后曲目 id 和本地路径保持不变，已经生成的字幕还在。
 - 中止只停手机上的这次 HTTP。本机听写服务没有取消接口。听写还在等下载时，不要把音频下载一起取消。错误文案恰好是「已中止」时，下载列表不要显示「查看返回」。
-- 听写按保存的模型选接口。每个模型各自保存地址和密钥；切换下拉只显示该模型已保存的内容，保存和清除也只作用于当前模型。进行中的任务继续用它自己的模型密钥。`whisper-1` 和 `qwen-audio-3.1-asr` 是线上模型：界面不显示地址，只保存 API Key；请求分别固定走 `https://api.openai.com` 和 `https://dashscope.aliyuncs.com`，不使用地址栏里留下的内容。`whisper（本地部署）` 是另一项，必须填写地址和口令，请求与 `whisper-1` 相同（没有 `/v1` 时补上，模型名仍发送 `whisper-1`，日语，`verbose_json`，分段时间），超过 25MB 不询问。没保存过模型时，地址路径去掉末尾斜杠后以 `/v1` 结尾且域名是 `api.openai.com` 视为 `whisper-1`，其他以 `/v1` 结尾的地址视为 `whisper（本地部署）`，否则视为本机任务接口。`Qwen3-ASR` 地址不能空：先读取服务上的模型名，再请求 `/v1/audio/transcriptions`，日语。返回分段时间则按段写字幕；只有整段文字时写成覆盖整首时长的一条。本机任务接口地址也不能空。保存时地址为空仍保存所选模型。`whisper-1` 读超时 10 分钟，文件超过 25MB 时先询问，确认后仍上传，取消则记为「已中止」。`qwen-audio-3.1-asr` 在 5 分钟内走官方 SDK，更长的先临时上传再轮询。本机任务接口仍是 `POST /jobs`。保存听写地址时不要自动补 `/v1`。翻译地址缺少 `/v1` 时保存后补上。
+- 听写按保存的模型选接口。每个模型各自保存地址和密钥；切换下拉只显示该模型已保存的内容，保存和清除也只作用于当前模型。进行中的任务继续用它自己的模型密钥。`whisper-1` 和 `qwen-audio-3.1-asr` 是线上模型：界面不显示地址，只保存 API Key；请求分别固定走 `https://api.openai.com` 和 `https://dashscope.aliyuncs.com`，不使用地址栏里留下的内容。`whisper（本地部署）` 是另一项，必须填写地址和口令，请求与 `whisper-1` 相同（没有 `/v1` 时补上，模型名仍发送 `whisper-1`，日语，`verbose_json`，分段时间），超过 25MB 不询问。没保存过模型时，地址路径去掉末尾斜杠后以 `/v1` 结尾且域名是 `api.openai.com` 视为 `whisper-1`，其他以 `/v1` 结尾的地址视为 `whisper（本地部署）`，否则视为本机任务接口。`Qwen3-ASR` 地址不能空：先读取服务上的模型名，再请求 `/v1/audio/transcriptions`，日语。返回分段时间则按段写字幕；只有整段文字时写成覆盖整首时长的一条。本机任务接口地址也不能空。保存时地址为空仍保存所选模型。`whisper-1` 读超时 10 分钟，文件超过 25MB 时先询问，确认后仍上传，取消则记为「已中止」。`qwen-audio-3.1-asr` 不论时长都先临时上传再轮询，模型名 `qwen-audio-3.1-asr-flash-filetrans`，超过 1GB 不上传。本机任务接口仍是 `POST /jobs`。保存听写地址时不要自动补 `/v1`。
+- 翻译只用千问AI平台和 DeepSeek 两个预设平台，地址固定，不再让用户填写，也不再补 `/v1`。口令和模型名按平台分开保存。模型名没填时，千问用 `qwen3.8-flash`，DeepSeek 用 `deepseek-flash`。深度思考关闭时千问发 `enable_thinking: false`，DeepSeek 发 `thinking.type: disabled`。打开后千问只发 `enable_thinking` 和 `reasoning_effort`（低 `low`、中 `medium`、高 `xhigh`），不要同时发 `thinking_budget`。DeepSeek 的 `reasoning_effort` 放在请求顶层（高 `high`、最高 `max`），不要放进 `thinking`。思考过程在 `reasoning_content`，不要写进字幕。
+- 润色失败保留原译文，不把任务记成翻译失败。自动润色发生在译文已经写入之后。手动「润色」不进下载列表，跑在 `TranslateCenter` 自己的协程里；离开正在播放页只取消等待，不取消这次润色。
 - 本地复制进 `filesDir/whisper-src/` 的文件名没有后缀。上传时按文件头补 `mp3` / `flac` / `m4a` / `aac` / `wav` / `ogg`，不要改磁盘上的暂存文件名。只有 `content:` URI 和重试时缺文件才复制；任务进行中不要清掉这份暂存，任务结束、取消或重试后清掉没有被任务引用的暂存文件。重试优先用任务原来的文件，其次从曲目本地文件再复制。
-- targetSdk 37。听写或翻译地址是局域网、本机或 `.local` 时，Android 17 要在请求前申请 `ACCESS_LOCAL_NETWORK`。公网地址不申请。判断用 `isLocalNetworkAddress`，字面 IP 才解析，不要为了判断去做 DNS。
+- targetSdk 37。听写地址是局域网、本机或 `.local` 时，Android 17 要在请求前申请 `ACCESS_LOCAL_NETWORK`。公网地址不申请。判断用 `isLocalNetworkAddress`，字面 IP 才解析，不要为了判断去做 DNS。翻译走两个公网平台，不申请本地网络。
 - 文案不要用「家里电脑」。翻译说明只写通用大模型，不要点名某个专用翻译模型。
 - 不要把口令、Cookie、SESSDATA、refresh token 写进日志、提交说明或文档。
 

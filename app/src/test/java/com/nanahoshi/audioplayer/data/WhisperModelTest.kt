@@ -90,28 +90,8 @@ class WhisperModelTest {
     }
 
     @Test
-    fun qwenShortPathFollowsDurationThenSize() {
-        assertTrue(qwenUsesShortPath(QWEN_SHORT_MS, QWEN_TEMP_BYTES))
-        assertFalse(qwenUsesShortPath(QWEN_SHORT_MS + 1, 1))
-        assertTrue(qwenUsesShortPath(null, QWEN_SHORT_UNKNOWN_BYTES))
-        assertFalse(qwenUsesShortPath(0L, QWEN_SHORT_UNKNOWN_BYTES + 1))
-    }
-
-    @Test
-    fun qwenUrlsComeFromTheSavedBase() {
-        assertEquals(
-            "wss://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
-            qwenFlashSocketUrl("https://dashscope.aliyuncs.com/v1"),
-        )
-        assertEquals(
-            "wss://example.com/custom",
-            qwenFlashSocketUrl("wss://example.com/custom"),
-        )
-        assertEquals(
-            "ws://192.168.1.20:9000/api/v1/services/aigc/multimodal-generation/generation",
-            qwenFlashSocketUrl("http://192.168.1.20:9000"),
-        )
+    fun qwenHttpOriginDropsTheSocketPath() {
         assertEquals("https://dashscope.aliyuncs.com", qwenHttpOrigin("wss://dashscope.aliyuncs.com/api/v1"))
-        assertNull(qwenFlashSocketUrl("   "))
+        assertNull(qwenHttpOrigin("   "))
     }
 }
