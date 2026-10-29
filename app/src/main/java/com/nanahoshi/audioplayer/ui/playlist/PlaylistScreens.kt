@@ -1,15 +1,16 @@
 package com.nanahoshi.audioplayer.ui.playlist
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -25,14 +26,19 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import com.nanahoshi.audioplayer.ui.components.AppTopBar
+import com.nanahoshi.audioplayer.ui.components.EmptyState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -43,9 +49,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.nanahoshi.audioplayer.data.db.PlaylistEntity
 import com.nanahoshi.audioplayer.data.db.PlaylistTrack
 import com.nanahoshi.audioplayer.ui.CoverImage
-import com.nanahoshi.audioplayer.ui.EmptyHint
 import com.nanahoshi.audioplayer.ui.formatDuration
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
@@ -60,25 +66,24 @@ fun PlaylistListScreen(
     var name by remember { mutableStateOf("") }
     Box(Modifier.fillMaxSize()) {
         if (playlists.isEmpty()) {
-            Column(Modifier.padding(16.dp)) {
-                EmptyHint("还没有播放列表。点右下角新建，再从音频库加入曲目。")
-            }
+            EmptyState(
+                title = "还没有播放列表",
+                message = "点右下角新建，再从音频库加入曲目。",
+                modifier = Modifier.fillMaxSize(),
+            )
         } else {
             LazyColumn(Modifier.fillMaxSize()) {
                 items(playlists, key = { it.id }) { playlist ->
-                    ListItem(
-                        headlineContent = { Text(playlist.name) },
-                        modifier = Modifier.clickable { onOpen(playlist.id) },
-                    )
+                    PlaylistSummaryRow(playlist, viewModel, onClick = { onOpen(playlist.id) })
                 }
             }
         }
-        FloatingActionButton(
+        ExtendedFloatingActionButton(
+            text = { Text("新建") },
+            icon = { Icon(Icons.Default.Add, contentDescription = "新建播放列表") },
             onClick = { name = ""; creating = true },
             modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
-        ) {
-            Icon(Icons.Default.Add, contentDescription = "新建播放列表")
-        }
+        )
     }
     if (creating) {
         NameDialog(
@@ -93,7 +98,7 @@ fun PlaylistListScreen(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PlaylistDetailScreen(
     playlistId: Long,
@@ -115,15 +120,15 @@ fun PlaylistDetailScreen(
         viewModel.move(playlistId, from.index, to.index)
     }
 
+    Box(Modifier.fillMaxSize()) {
     Column(Modifier.fillMaxSize()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-            }
-            Text(playlist?.name ?: "播放列表", modifier = Modifier.weight(1f))
-            IconButton(onClick = { menu = true }) {
-                Icon(Icons.Default.MoreVert, contentDescription = "更多")
-            }
+        AppTopBar(
+            title = "",
+            onBack = onBack,
+            actions = {
+                IconButton(onClick = { menu = true }) {
+                    Icon(Icons.Default.MoreVert, contentDescription = "更多")
+                }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                 DropdownMenuItem(text = { Text("改名") }, onClick = { menu = false; renaming = true })
                 DropdownMenuItem(
@@ -135,18 +140,19 @@ fun PlaylistDetailScreen(
                     },
                 )
             }
-        }
-        FlowRow(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
-            TextButton(onClick = { viewModel.playReplacing(playlistId) }) { Text("播放") }
-            TextButton(onClick = { viewModel.appendToQueue(playlistId) }) { Text("加到当前列表末尾") }
-            TextButton(onClick = {
-                selected = emptyList()
-                viewModel.resetPicker()
-                adding = true
-            }) { Text("加入音频") }
+            },
+        )
+        Text(
+            playlist?.name ?: "播放列表",
+            style = MaterialTheme.typography.headlineMedium,
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+        )
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { viewModel.playReplacing(playlistId) }, modifier = Modifier.weight(1f)) { Text("播放") }
+            OutlinedButton(onClick = { viewModel.appendToQueue(playlistId) }, modifier = Modifier.weight(1f)) { Text("加到末尾") }
         }
         if (rows.isEmpty()) {
-            EmptyHint("这个列表还是空的。")
+            EmptyState(title = "这个列表还是空的", modifier = Modifier.fillMaxSize())
         } else {
             LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                 itemsIndexed(rows, key = { _, row -> row.itemId }) { index, row ->
@@ -161,6 +167,17 @@ fun PlaylistDetailScreen(
                 }
             }
         }
+    }
+    ExtendedFloatingActionButton(
+        onClick = {
+            selected = emptyList()
+            viewModel.resetPicker()
+            adding = true
+        },
+        icon = { Icon(Icons.Default.Add, contentDescription = null) },
+        text = { Text("加入音频") },
+        modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+    )
     }
 
     if (renaming) {
@@ -230,6 +247,31 @@ fun PlaylistDetailScreen(
             dismissButton = { TextButton(onClick = { adding = false }) { Text("取消") } },
         )
     }
+}
+
+@Composable
+private fun PlaylistSummaryRow(
+    playlist: PlaylistEntity,
+    viewModel: PlaylistViewModel,
+    onClick: () -> Unit,
+) {
+    val rows by viewModel.playlistTracks(playlist.id).collectAsStateWithLifecycle(emptyList())
+    ListItem(
+        headlineContent = { Text(playlist.name) },
+        supportingContent = { Text("${rows.size} 首") },
+        leadingContent = {
+            Box(Modifier.size(48.dp)) {
+                rows.take(3).forEachIndexed { index, row ->
+                    CoverImage(
+                        row.coverUri,
+                        modifier = Modifier.offset(x = (index * 10).dp),
+                        size = 32.dp,
+                    )
+                }
+            }
+        },
+        modifier = Modifier.clickable(onClick = onClick),
+    )
 }
 
 @Composable

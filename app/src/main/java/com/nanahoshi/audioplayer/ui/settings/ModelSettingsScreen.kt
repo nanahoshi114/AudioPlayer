@@ -12,8 +12,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.HelpOutline
+import com.nanahoshi.audioplayer.ui.components.AppTopBar
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenuItem
@@ -65,12 +65,7 @@ fun ModelSettingsScreen(
         TranslateHelpDialog(onDismiss = { translateHelp = false })
     }
     Column(Modifier.fillMaxSize()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-            }
-            Text("听写和翻译", style = MaterialTheme.typography.titleLarge)
-        }
+        AppTopBar(title = "听写和翻译", onBack = onBack)
         LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
             item(key = "whisper") {
                 Row(

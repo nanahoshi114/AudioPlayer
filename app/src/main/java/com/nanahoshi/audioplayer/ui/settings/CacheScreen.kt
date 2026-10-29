@@ -8,17 +8,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.selection.selectable
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import com.nanahoshi.audioplayer.ui.components.AppTopBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -50,12 +47,7 @@ fun CacheScreen(
     var picking by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { viewModel.refresh() }
     Column(Modifier.fillMaxSize()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-            }
-            Text("清理缓存", style = MaterialTheme.typography.titleLarge)
-        }
+        AppTopBar(title = "清理缓存", onBack = onBack)
         Text(
             "当前占用 ${formatCacheBytes(viewModel.usedBytes)}",
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),

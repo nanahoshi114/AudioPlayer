@@ -333,6 +333,18 @@ class DlsiteClient(private val credentials: CredentialStore) {
         key in salesIds()
     }
 
+    /** 已购列表还没读过时返回 null，不发起请求。 */
+    fun cachedPurchased(input: String): Boolean? {
+        if (!hasSession()) return false
+        val known = owned ?: return null
+        val key = try {
+            canonicalWorkno(worknoOf(input))
+        } catch (_: DlsiteException) {
+            return false
+        }
+        return key in known
+    }
+
     suspend fun playTree(input: String, artist: String?, coverUrl: String?): List<PlayEntry> =
         withContext(Dispatchers.IO) {
             val workno = worknoOf(input)

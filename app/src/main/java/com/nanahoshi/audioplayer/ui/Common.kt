@@ -1,17 +1,13 @@
 package com.nanahoshi.audioplayer.ui
 
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import coil.compose.AsyncImage
-import com.nanahoshi.audioplayer.data.toHttps
-import java.io.File
+import com.nanahoshi.audioplayer.ui.components.CoverImage as CoverArtwork
+import com.nanahoshi.audioplayer.ui.components.EmptyState
 
 fun formatDuration(ms: Long): String {
     val totalSeconds = (ms / 1000).coerceAtLeast(0)
@@ -26,23 +22,16 @@ fun formatDuration(ms: Long): String {
 }
 
 @Composable
-fun CoverImage(uri: String?, modifier: Modifier = Modifier) {
-    val model = when {
-        uri.isNullOrBlank() -> null
-        uri.startsWith("/") -> File(uri)
-        else -> uri.toHttps()
-    }
-    AsyncImage(
-        model = model,
-        contentDescription = null,
-        modifier = modifier
-            .size(48.dp)
-            .clip(RoundedCornerShape(8.dp)),
-        contentScale = ContentScale.Crop,
-    )
+fun CoverImage(
+    uri: String?,
+    modifier: Modifier = Modifier,
+    size: Dp? = 48.dp,
+    shape: Shape = RoundedCornerShape(12.dp),
+) {
+    CoverArtwork(uri = uri, modifier = modifier, size = size, shape = shape)
 }
 
 @Composable
 fun EmptyHint(text: String) {
-    Text(text = text, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    EmptyState(title = text)
 }

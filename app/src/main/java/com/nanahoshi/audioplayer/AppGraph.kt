@@ -12,6 +12,7 @@ import com.nanahoshi.audioplayer.asmr.AsmrClient
 import com.nanahoshi.audioplayer.bilibili.BilibiliClient
 import com.nanahoshi.audioplayer.dlsite.DlsiteClient
 import com.nanahoshi.audioplayer.dlsite.RemotePreview
+import com.nanahoshi.audioplayer.data.AppearancePreferences
 import com.nanahoshi.audioplayer.data.CacheStore
 import com.nanahoshi.audioplayer.data.CredentialStore
 import com.nanahoshi.audioplayer.data.DEFAULT_CACHE_LIMIT_BYTES
@@ -35,6 +36,7 @@ class AppGraph(app: Application) {
     val asmr = AsmrClient()
     val dlsite = DlsiteClient(credentials)
     val librarySort = LibraryPreferences(app)
+    val appearance = AppearancePreferences(app)
     val cache = CacheStore(app) { app.imageLoader }
     val library = LibraryRepository(app, db, bilibili, asmr, dlsite)
     val downloads = DownloadCenter(app, db, asmr, dlsite, bilibili)

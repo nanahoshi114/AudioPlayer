@@ -32,8 +32,9 @@ enum class WorkFill {
     EMPTY,
 }
 
+/** [purchased] 为 null 表示还没拿到 DLsite 已购列表。 */
 data class WorkSources(
-    val purchased: Boolean,
+    val purchased: Boolean?,
     val hasPlay: Boolean,
     val hasAsmr: Boolean,
 )
@@ -115,18 +116,24 @@ class LibraryRepository(
         val sourceId = folder.asmrSourceId ?: return@withContext null
         val workId = workIdOf(folder)
         backfillContentSources(folderId)
-        val purchased = try {
+        val hasPlay = workHasSource(workId, TrackSource.DLSITE)
+        WorkSources(
+            // 有 Play 文件就不必再问 DLsite；离线时那一步会一直等到超时。
+            purchased = if (hasPlay) null else dlsite.cachedPurchased(sourceId),
+            hasPlay = hasPlay,
+            hasAsmr = workHasSource(workId, TrackSource.ASMR),
+        )
+    }
+
+    suspend fun checkPurchased(folderId: Long): Boolean = withContext(Dispatchers.IO) {
+        val sourceId = db.folders().get(folderId)?.asmrSourceId ?: return@withContext false
+        try {
             dlsite.isPurchased(sourceId)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
             false
         }
-        WorkSources(
-            purchased = purchased,
-            hasPlay = workHasSource(workId, TrackSource.DLSITE),
-            hasAsmr = workHasSource(workId, TrackSource.ASMR),
-        )
     }
 
     suspend fun ensureWorkSource(folderId: Long, source: TrackSource): WorkFill = withContext(Dispatchers.IO) {

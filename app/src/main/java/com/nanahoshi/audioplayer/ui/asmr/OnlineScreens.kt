@@ -9,7 +9,19 @@ import android.net.NetworkCapabilities
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import android.graphics.Bitmap
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -19,6 +31,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -38,10 +51,18 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.automirrored.outlined.HelpOutline
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.OpenInBrowser
+import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -67,6 +88,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -113,7 +136,17 @@ import com.nanahoshi.audioplayer.playback.pickSubtitleName
 import com.nanahoshi.audioplayer.ui.CollapsingTop
 import com.nanahoshi.audioplayer.ui.CoverImage
 import com.nanahoshi.audioplayer.ui.EmptyHint
+import com.nanahoshi.audioplayer.ui.components.AppTopBar
+import com.nanahoshi.audioplayer.ui.components.EmptyState
+import com.nanahoshi.audioplayer.ui.components.LabelBadge
+import com.nanahoshi.audioplayer.ui.components.LoadingState
+import com.nanahoshi.audioplayer.ui.components.SectionHeader
+import com.nanahoshi.audioplayer.ui.components.WorkHeader
+import com.nanahoshi.audioplayer.ui.components.SkeletonWorkList
 import com.nanahoshi.audioplayer.ui.formatDuration
+import com.nanahoshi.audioplayer.ui.theme.LocalReduceMotion
+import com.nanahoshi.audioplayer.ui.theme.LocalSourceColors
+import com.nanahoshi.audioplayer.ui.theme.Motion
 import com.nanahoshi.audioplayer.ui.library.LibraryEntry
 import com.nanahoshi.audioplayer.ui.library.mixedEntries
 import kotlinx.coroutines.CancellationException
@@ -932,7 +965,23 @@ fun OnlineSearchScreen(
     viewModel: OnlineSearchViewModel = viewModel(),
 ) {
     var composing by remember { mutableStateOf(false) }
-    if (composing) {
+    val reduceMotion = LocalReduceMotion.current
+    AnimatedContent(
+        targetState = composing,
+        transitionSpec = {
+            if (reduceMotion) {
+                EnterTransition.None togetherWith ExitTransition.None
+            } else if (targetState) {
+                (expandVertically(expandFrom = Alignment.Top, animationSpec = tween(Motion.medium, easing = Motion.enter)) + fadeIn(tween(Motion.medium))) togetherWith
+                    fadeOut(tween(Motion.short))
+            } else {
+                fadeIn(tween(Motion.medium)) togetherWith
+                    (shrinkVertically(shrinkTowards = Alignment.Top, animationSpec = tween(Motion.medium, easing = Motion.exit)) + fadeOut(tween(Motion.short)))
+            }
+        },
+        label = "searchComposer",
+    ) { open ->
+    if (open) {
         SearchComposer(
             initialText = viewModel.text,
             initialPieces = viewModel.pieces,
@@ -942,8 +991,7 @@ fun OnlineSearchScreen(
                 composing = false
             },
         )
-        return
-    }
+    } else {
     val works = viewModel.works
     val listState = rememberLazyListState()
     LaunchedEffect(listState, works.size, viewModel.loading) {
@@ -998,30 +1046,66 @@ fun OnlineSearchScreen(
         },
     ) { topInset ->
         when {
-            works.isEmpty() && viewModel.loading -> Box(topInset.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator()
-            }
-            works.isEmpty() -> Box(topInset.fillMaxSize().padding(24.dp)) {
-                EmptyHint(viewModel.error ?: "没有作品。")
+            works.isEmpty() && viewModel.loading -> SkeletonWorkList(modifier = topInset)
+            works.isEmpty() -> Box(topInset.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+                EmptyState(title = viewModel.error ?: "没有作品")
             }
             else -> LazyColumn(state = listState, modifier = topInset.fillMaxSize()) {
                 items(works, key = { it.sourceId }) { item ->
-                    WorkFactsBlock(
-                        facts = item.facts(),
-                        coverUrl = item.coverUrl,
-                        singleLine = true,
-                        footnote = if (item.asmrMissing) "asmr.one未收录" else null,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { if (item.sourceId.isNotBlank()) onOpenWork(item.sourceId) }
-                            .padding(vertical = 4.dp),
-                    )
+                    OnlineResultCard(item) {
+                        if (item.sourceId.isNotBlank()) onOpenWork(item.sourceId)
+                    }
                 }
                 if (viewModel.loading) {
                     item(key = "loading") {
                         Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
                             CircularProgressIndicator()
                         }
+                    }
+                }
+            }
+        }
+    }
+    }
+    }
+}
+
+@Composable
+private fun OnlineResultCard(item: OnlineHit, onClick: () -> Unit) {
+    val facts = item.facts()
+    val sources = LocalSourceColors.current
+    Surface(
+        onClick = onClick,
+        enabled = item.sourceId.isNotBlank(),
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+    ) {
+        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.Top) {
+            CoverImage(item.coverUrl, size = 84.dp, shape = MaterialTheme.shapes.medium)
+            Column(Modifier.padding(start = 12.dp).weight(1f)) {
+                Text(
+                    facts.title.ifBlank { facts.sourceId },
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    listOf(facts.circle, facts.vas.joinToString("、")).filter { it.isNotBlank() }.joinToString(" · ").ifBlank { facts.sourceId },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+                Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (item.fromAsmr) {
+                        LabelBadge("asmr.one", sources.asmr)
+                    } else {
+                        LabelBadge("DLsite", sources.dlsite)
+                    }
+                    if (item.asmrMissing) {
+                        LabelBadge("asmr.one未收录", MaterialTheme.colorScheme.error)
                     }
                 }
             }
@@ -1240,6 +1324,7 @@ fun OnlineWorkScreen(
 ) {
     val context = LocalContext.current
     var browserChoice by remember { mutableStateOf(false) }
+    var browserMenu by remember { mutableStateOf(false) }
     LaunchedEffect(sourceId) { viewModel.load(sourceId, context.onMeteredNetwork()) }
     BackHandler(enabled = viewModel.canGoUp()) { viewModel.up() }
     val facts = viewModel.facts
@@ -1271,33 +1356,31 @@ fun OnlineWorkScreen(
             },
         )
     }
+    Box(Modifier.fillMaxSize()) {
     Column(Modifier.fillMaxSize()) {
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(8.dp)) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-            }
-            Text("作品", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-            if (viewModel.working || viewModel.busy) {
-                CircularProgressIndicator(Modifier.padding(end = 12.dp).size(20.dp))
-            }
-            if (facts != null && canSave) {
-                if (viewModel.saved) {
-                    Text("已在音频库", modifier = Modifier.padding(end = 12.dp))
-                } else {
-                    Button(
-                        onClick = { viewModel.save() },
-                        enabled = !viewModel.working,
-                        modifier = Modifier.padding(end = 8.dp),
-                    ) { Text("保存") }
+        AppTopBar(
+            title = "作品",
+            onBack = onBack,
+            actions = {
+                if (viewModel.working || viewModel.busy) {
+                    CircularProgressIndicator(Modifier.padding(end = 8.dp).size(20.dp))
                 }
-            }
-        }
-        if (facts != null) {
-            TextButton(
-                onClick = { browserChoice = true },
-                modifier = Modifier.padding(start = 8.dp),
-            ) { Text("打开外部浏览器") }
-        }
+                if (facts != null) {
+                    IconButton(onClick = { browserMenu = true }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "更多")
+                    }
+                    DropdownMenu(expanded = browserMenu, onDismissRequest = { browserMenu = false }) {
+                        DropdownMenuItem(
+                            text = { Text("打开外部浏览器") },
+                            onClick = {
+                                browserMenu = false
+                                browserChoice = true
+                            },
+                        )
+                    }
+                }
+            },
+        )
         when {
             facts == null && viewModel.busy -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator()
@@ -1318,18 +1401,12 @@ fun OnlineWorkScreen(
                     viewModel.work != null -> viewModel.nodeFiles.isEmpty()
                     else -> true
                 }
-                LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
+                LazyColumn(
+                    Modifier.weight(1f).fillMaxWidth(),
+                    contentPadding = PaddingValues(bottom = if (canSave) 96.dp else 16.dp),
+                ) {
                 item(key = "facts") {
-                    WorkFactsBlock(facts, viewModel.coverUrl, singleLine = false)
-                }
-                if (viewModel.purchased) {
-                    item(key = "purchased") {
-                        Text(
-                            "已购买内容",
-                            style = MaterialTheme.typography.titleSmall,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                        )
-                    }
+                    WorkHeader(facts, viewModel.coverUrl, purchased = viewModel.purchased)
                 }
                 if (viewModel.gallery.isNotEmpty()) {
                     item(key = "gallery") {
@@ -1344,7 +1421,7 @@ fun OnlineWorkScreen(
                     TrialBlock(viewModel.trials, onPlay = viewModel::playTrial)
                 }
                 item(key = "files-title") {
-                    SectionTitle(
+                    SectionHeader(
                         if (viewModel.purchased) {
                             if (viewModel.fileSource == WorkFileSource.PLAY) {
                                 "文件（来自DLSite Play）"
@@ -1360,20 +1437,19 @@ fun OnlineWorkScreen(
                 }
                 if (viewModel.purchased) {
                     item(key = "file-source") {
-                        Row(
+                        SingleChoiceSegmentedButtonRow(
                             Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            FilterChip(
+                            SegmentedButton(
                                 selected = viewModel.fileSource == WorkFileSource.PLAY,
                                 onClick = { viewModel.useFileSource(WorkFileSource.PLAY) },
-                                label = { Text("DLSite Play") },
-                            )
-                            FilterChip(
+                                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                            ) { Text("DLSite Play") }
+                            SegmentedButton(
                                 selected = viewModel.fileSource == WorkFileSource.ASMR,
                                 onClick = { viewModel.useFileSource(WorkFileSource.ASMR) },
-                                label = { Text("asmr.one") },
-                            )
+                                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                            ) { Text("asmr.one") }
                         }
                     }
                 }
@@ -1415,10 +1491,15 @@ fun OnlineWorkScreen(
                                     onClick = { viewModel.playPlay(entry) },
                                     trailing = {
                                         val savedFile = viewModel.playDownloaded(audio.fileKey)
-                                        TextButton(
+                                        IconButton(
                                             onClick = { viewModel.downloadPlay(entry) },
                                             enabled = !savedFile,
-                                        ) { Text(if (savedFile) "已下载" else "下载") }
+                                        ) {
+                                            Icon(
+                                                if (savedFile) Icons.Default.Check else Icons.Default.Download,
+                                                contentDescription = if (savedFile) "已下载" else "下载",
+                                            )
+                                        }
                                     },
                                 )
                             } else {
@@ -1470,10 +1551,15 @@ fun OnlineWorkScreen(
                                     onClick = { viewModel.playNode(node) },
                                     trailing = if (viewModel.purchased) {
                                         {
-                                            TextButton(
+                                            IconButton(
                                                 onClick = { viewModel.downloadNode(node) },
                                                 enabled = !savedFile,
-                                            ) { Text(if (savedFile) "已下载" else "下载") }
+                                            ) {
+                                                Icon(
+                                                    if (savedFile) Icons.Default.Check else Icons.Default.Download,
+                                                    contentDescription = if (savedFile) "已下载" else "下载",
+                                                )
+                                            }
                                         }
                                     } else {
                                         null
@@ -1497,6 +1583,32 @@ fun OnlineWorkScreen(
                 }
             }
         }
+    }
+    if (facts != null && canSave) {
+        if (viewModel.saved) {
+            Surface(
+                shape = MaterialTheme.shapes.large,
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+            ) {
+                Row(
+                    Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Default.Check, contentDescription = null)
+                    Text("已在音频库", modifier = Modifier.padding(start = 12.dp))
+                }
+            }
+        } else {
+            ExtendedFloatingActionButton(
+                onClick = { if (!viewModel.working) viewModel.save() },
+                expanded = true,
+                icon = { Icon(Icons.Default.Download, contentDescription = null) },
+                text = { Text("保存") },
+                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+            )
+        }
+    }
     }
 }
 
@@ -1606,21 +1718,10 @@ private fun trackSupporting(
 }
 
 @Composable
-private fun SectionTitle(title: String) {
-    Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 28.dp, bottom = 8.dp)) {
-        Text(title, style = MaterialTheme.typography.titleLarge)
-        HorizontalDivider(
-            Modifier.padding(top = 8.dp),
-            color = MaterialTheme.colorScheme.outline,
-        )
-    }
-}
-
-@Composable
 private fun GalleryBlock(urls: List<String>, revealed: Boolean, onReveal: () -> Unit) {
     if (urls.isEmpty()) return
     Column(Modifier.fillMaxWidth()) {
-        SectionTitle("图库")
+        SectionHeader("图库")
         if (!revealed) {
             TextButton(onClick = onReveal, modifier = Modifier.padding(horizontal = 8.dp)) { Text("预览") }
         } else {
@@ -1637,7 +1738,7 @@ private fun GalleryBlock(urls: List<String>, revealed: Boolean, onReveal: () -> 
                             .addHeader("User-Agent", DlsiteClient.USER_AGENT)
                             .build(),
                         contentDescription = "样图",
-                        modifier = Modifier.height(140.dp).width(186.dp),
+                        modifier = Modifier.height(140.dp).width(186.dp).clip(RoundedCornerShape(12.dp)),
                         contentScale = ContentScale.Fit,
                     )
                 }
@@ -1652,7 +1753,7 @@ private fun TrialBlock(
     onPlay: (com.nanahoshi.audioplayer.dlsite.RemotePlayable) -> Unit,
 ) {
     Column(Modifier.fillMaxWidth()) {
-        SectionTitle("内容试听")
+        SectionHeader("内容试听")
         if (trials.isEmpty()) {
             Text(
                 "没有试听",
@@ -1866,51 +1967,56 @@ fun MineScreen(
             onDismiss = { sessdataLogin = false },
         )
     }
+    var cookieOpen by remember { mutableStateOf(false) }
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         item(key = "dlsite") {
-            Text("DLsite", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
-            if (!viewModel.loggedIn) {
-                OutlinedTextField(
-                    value = viewModel.loginId,
-                    onValueChange = { viewModel.loginId = it },
-                    label = { Text("账号") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
-                )
-                OutlinedTextField(
-                    value = viewModel.password,
-                    onValueChange = { viewModel.password = it },
-                    label = { Text("密码") },
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                )
-                Button(
-                    onClick = viewModel::login,
-                    enabled = !viewModel.loading,
-                    modifier = Modifier.padding(top = 8.dp),
-                ) { Text("登录") }
-                OutlinedTextField(
-                    value = viewModel.cookie,
-                    onValueChange = { viewModel.cookie = it },
-                    label = { Text("Cookie") },
-                    modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
-                )
-                Button(
-                    onClick = viewModel::loginCookie,
-                    enabled = !viewModel.loading,
-                    modifier = Modifier.padding(top = 8.dp),
-                ) { Text("使用 Cookie") }
-            } else {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("已登录", modifier = Modifier.weight(1f))
+            AccountCard(title = "DLsite", loggedIn = viewModel.loggedIn) {
+                if (!viewModel.loggedIn) {
+                    OutlinedTextField(
+                        value = viewModel.loginId,
+                        onValueChange = { viewModel.loginId = it },
+                        label = { Text("账号") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                    )
+                    OutlinedTextField(
+                        value = viewModel.password,
+                        onValueChange = { viewModel.password = it },
+                        label = { Text("密码") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    )
+                    Button(
+                        onClick = viewModel::login,
+                        enabled = !viewModel.loading,
+                        modifier = Modifier.padding(top = 12.dp),
+                    ) { Text("登录") }
+                    TextButton(onClick = { cookieOpen = !cookieOpen }) {
+                        Text(if (cookieOpen) "收起 Cookie" else "使用 Cookie")
+                    }
+                    AnimatedVisibility(visible = cookieOpen) {
+                        Column {
+                            OutlinedTextField(
+                                value = viewModel.cookie,
+                                onValueChange = { viewModel.cookie = it },
+                                label = { Text("Cookie") },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                            TextButton(
+                                onClick = viewModel::loginCookie,
+                                enabled = !viewModel.loading,
+                            ) { Text("使用 Cookie 登录") }
+                        }
+                    }
+                } else {
+                    Button(
+                        onClick = onOpenPurchases,
+                        enabled = !viewModel.loading,
+                        modifier = Modifier.padding(top = 12.dp),
+                    ) { Text("查看已购买作品") }
                     TextButton(onClick = viewModel::logout) { Text("退出") }
                 }
-                Button(
-                    onClick = onOpenPurchases,
-                    enabled = !viewModel.loading,
-                    modifier = Modifier.padding(top = 8.dp),
-                ) { Text("查看已购买作品") }
             }
         }
         viewModel.error?.let { message ->
@@ -1919,33 +2025,55 @@ fun MineScreen(
             }
         }
         item(key = "bilibili") {
-            Row(
-                Modifier.padding(top = 20.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("B站登录", style = MaterialTheme.typography.titleMedium)
-                IconButton(onClick = { biliHelp = true }) {
-                    Icon(Icons.AutoMirrored.Outlined.HelpOutline, contentDescription = "B站登录说明")
+            AccountCard(title = "B站", loggedIn = viewModel.biliReady) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        when {
+                            !viewModel.biliReady -> "还没有登录"
+                            viewModel.biliCanRefresh -> "已扫码登录，会在需要时自动更新"
+                            else -> "已保存登录信息"
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f),
+                    )
+                    IconButton(onClick = { biliHelp = true }) {
+                        Icon(Icons.AutoMirrored.Outlined.HelpOutline, contentDescription = "B站登录说明")
+                    }
                 }
+                if (viewModel.biliReady) {
+                    Button(onClick = onOpenFavorites, modifier = Modifier.padding(top = 8.dp)) { Text("查看收藏夹") }
+                    TextButton(onClick = viewModel::startBiliQr) { Text("扫码登录") }
+                } else {
+                    Button(onClick = viewModel::startBiliQr, modifier = Modifier.padding(top = 8.dp)) { Text("扫码登录") }
+                    TextButton(onClick = onOpenFavorites) { Text("查看收藏夹") }
+                }
+                TextButton(onClick = { sessdataLogin = true }) { Text("SESSDATA登录") }
+                TextButton(onClick = viewModel::clearBili) { Text("清除") }
             }
-            Row(
-                Modifier.padding(top = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Button(onClick = viewModel::startBiliQr) { Text("扫码登录") }
-                Button(onClick = { sessdataLogin = true }) { Text("SESSDATA登录") }
-            }
-            if (viewModel.biliReady) {
-                Text(
-                    if (viewModel.biliCanRefresh) "已扫码登录，会在需要时自动更新" else "已保存登录信息",
-                    modifier = Modifier.padding(top = 8.dp),
+        }
+    }
+}
+
+@Composable
+private fun AccountCard(
+    title: String,
+    loggedIn: Boolean,
+    content: @Composable () -> Unit,
+) {
+    Surface(
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                LabelBadge(
+                    if (loggedIn) "已登录" else "未登录",
+                    if (loggedIn) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            TextButton(onClick = viewModel::clearBili) { Text("清除") }
-            Button(
-                onClick = onOpenFavorites,
-                modifier = Modifier.padding(top = 16.dp, bottom = 24.dp),
-            ) { Text("查看收藏夹") }
+            content()
         }
     }
 }
@@ -2070,37 +2198,33 @@ fun PurchasesScreen(
     viewModel: PurchasesViewModel = viewModel(),
 ) {
     Column(Modifier.fillMaxSize()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-            }
-            Text("已购买作品", style = MaterialTheme.typography.titleLarge)
-        }
+        AppTopBar(title = "已购买作品", onBack = onBack)
         when {
-            viewModel.loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator()
-            }
-            viewModel.purchases.isEmpty() -> Box(Modifier.fillMaxSize().padding(24.dp)) {
-                EmptyHint(viewModel.error ?: "没有已购买作品。")
-            }
+            viewModel.loading -> LoadingState("正在读取已购买作品", Modifier.fillMaxSize())
+            viewModel.purchases.isEmpty() -> EmptyState(
+                title = viewModel.error ?: "没有已购买作品",
+                modifier = Modifier.fillMaxSize(),
+            )
             else -> LazyColumn(Modifier.fillMaxSize()) {
                 items(viewModel.purchases, key = { it.workno }) { item ->
-                    WorkFactsBlock(
-                        facts = WorkFacts(
-                            title = item.title,
-                            circle = item.circle,
-                            vas = item.vas,
-                            tags = emptyList(),
-                            release = item.release,
-                            sourceId = item.workno,
-                        ),
-                        coverUrl = item.coverUrl,
-                        singleLine = true,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onOpenWork(item.workno) }
-                            .padding(vertical = 4.dp),
-                    )
+                    Surface(
+                        onClick = { onOpenWork(item.workno) },
+                        color = Color.Transparent,
+                    ) {
+                        WorkFactsBlock(
+                            facts = WorkFacts(
+                                title = item.title,
+                                circle = item.circle,
+                                vas = item.vas,
+                                tags = emptyList(),
+                                release = item.release,
+                                sourceId = item.workno,
+                            ),
+                            coverUrl = item.coverUrl,
+                            singleLine = true,
+                            modifier = Modifier.padding(vertical = 4.dp),
+                        )
+                    }
                 }
             }
         }

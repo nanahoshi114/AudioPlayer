@@ -6,9 +6,35 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.DisposableEffect
+import com.nanahoshi.audioplayer.data.AccentMode
+import com.nanahoshi.audioplayer.data.ThemeMode
+import com.nanahoshi.audioplayer.ui.settings.AppearanceScreen
+import com.nanahoshi.audioplayer.ui.theme.ThemeAccent
+import com.nanahoshi.audioplayer.ui.theme.presetAccent
+import com.nanahoshi.audioplayer.ui.theme.rememberCoverAccent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -18,8 +44,10 @@ import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.NavigationBar
@@ -31,11 +59,20 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.IntOffset
+import com.nanahoshi.audioplayer.data.db.DownloadStatus
+import com.nanahoshi.audioplayer.ui.components.LocalTopBarOverride
+import com.nanahoshi.audioplayer.ui.theme.LocalReduceMotion
+import com.nanahoshi.audioplayer.ui.theme.Motion
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
@@ -54,6 +91,7 @@ import com.nanahoshi.audioplayer.ui.library.FavoriteScreen
 import com.nanahoshi.audioplayer.ui.library.FilePreviewScreen
 import com.nanahoshi.audioplayer.ui.library.RemotePreviewScreen
 import com.nanahoshi.audioplayer.ui.library.LibraryScreen
+import com.nanahoshi.audioplayer.ui.library.LibraryWorkScreen
 import com.nanahoshi.audioplayer.ui.player.MiniPlayer
 import com.nanahoshi.audioplayer.ui.player.NowPlayingScreen
 import com.nanahoshi.audioplayer.ui.playlist.PlaylistDetailScreen
@@ -68,7 +106,37 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            AudioPlayerTheme {
+            val graph = (application as AudioPlayerApplication).graph
+            val appearance by graph.appearance.state.collectAsStateWithLifecycle()
+            val player by graph.player.state.collectAsStateWithLifecycle()
+            val systemDark = isSystemInDarkTheme()
+            val dark = when (appearance.themeMode) {
+                ThemeMode.SYSTEM -> systemDark
+                ThemeMode.LIGHT -> false
+                ThemeMode.DARK -> true
+            }
+            val coverAccent = rememberCoverAccent(
+                player.coverUri.takeIf { appearance.accentMode == AccentMode.COVER },
+            )
+            val accent = when (appearance.accentMode) {
+                AccentMode.SYSTEM -> ThemeAccent.System
+                AccentMode.COVER -> coverAccent?.let { ThemeAccent.Seed(it) } ?: ThemeAccent.Default
+                AccentMode.PRESET -> presetAccent(appearance.presetId)
+            }
+            DisposableEffect(dark) {
+                enableEdgeToEdge(
+                    statusBarStyle = SystemBarStyle.auto(
+                        android.graphics.Color.TRANSPARENT,
+                        android.graphics.Color.TRANSPARENT,
+                    ) { dark },
+                    navigationBarStyle = SystemBarStyle.auto(
+                        android.graphics.Color.argb(0xe6, 0xFF, 0xFF, 0xFF),
+                        android.graphics.Color.argb(0x80, 0x1b, 0x1b, 0x1b),
+                    ) { dark },
+                )
+                onDispose { }
+            }
+            AudioPlayerTheme(darkTheme = dark, accent = accent) {
                 PlayerApp()
             }
         }
@@ -77,6 +145,8 @@ class MainActivity : ComponentActivity() {
 
 private object Routes {
     const val Library = "library"
+    const val LibraryWork = "library/work/{folderId}"
+    fun libraryWork(folderId: Long) = "library/work/$folderId"
     const val Playlists = "playlists"
     const val Online = "online"
     const val OnlineWork = "online/work/{sourceId}"
@@ -85,6 +155,7 @@ private object Routes {
     const val Settings = "settings"
     const val ModelSettings = "settings/models"
     const val CacheSettings = "settings/cache"
+    const val Appearance = "settings/appearance"
     const val Purchases = "purchases"
     const val NowPlaying = "now"
     const val Downloads = "downloads"
@@ -104,8 +175,13 @@ private fun PlayerApp() {
     val navController = rememberNavController()
     val backStack by navController.currentBackStackEntryAsState()
     val route = backStack?.destination?.route
-    val showBars = route == Routes.Library || route == Routes.Playlists ||
-        route == Routes.Online || route == Routes.Mine || route == Routes.Settings
+    var lastTab by remember { mutableStateOf(Routes.Library) }
+    SideEffect {
+        if (isTab(route)) lastTab = route!!
+    }
+    val highlight = if (isTab(route)) route else lastTab
+    val showTopBar = isTab(route)
+    val showBottomDock = showTopBar || route == Routes.OnlineWork || route == Routes.LibraryWork
     val context = LocalContext.current
     val graph = (context.applicationContext as AudioPlayerApplication).graph
     val messages = graph.messages
@@ -114,6 +190,29 @@ private fun PlayerApp() {
         .collectAsStateWithLifecycle()
     val sizeConfirm by graph.whisper.sizeConfirmJob.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
+    val topBarOverride = remember { mutableStateOf<(@Composable () -> Unit)?>(null) }
+    val reduceMotion = LocalReduceMotion.current
+    val downloads by graph.downloads.observe().collectAsStateWithLifecycle(emptyList())
+    val whisperJobs by graph.whisper.observe().collectAsStateWithLifecycle(emptyList())
+    val translations by graph.db.translations().observe().collectAsStateWithLifecycle(emptyList())
+    val activeTasks = downloads.count { it.status == DownloadStatus.QUEUED || it.status == DownloadStatus.RUNNING } +
+        whisperJobs.count { it.status == DownloadStatus.QUEUED || it.status == DownloadStatus.RUNNING } +
+        translations.count { it.status == DownloadStatus.QUEUED || it.status == DownloadStatus.RUNNING }
+    val fade = if (reduceMotion) snap<Float>() else tween<Float>(220, easing = Motion.enter)
+    val fadeAway = if (reduceMotion) snap<Float>() else tween<Float>(Motion.short, easing = Motion.exit)
+    val slide = if (reduceMotion) snap<IntOffset>() else tween<IntOffset>(Motion.medium, easing = Motion.enter)
+    val slideAway = if (reduceMotion) snap<IntOffset>() else tween<IntOffset>(Motion.medium, easing = Motion.exit)
+    val barEnter = if (reduceMotion) EnterTransition.None else slideInVertically(slide) { -it } + fadeIn(fade)
+    val barExit = if (reduceMotion) ExitTransition.None else slideOutVertically(slideAway) { -it } + fadeOut(fadeAway)
+    val dockEnter = if (reduceMotion) EnterTransition.None else slideInVertically(slide) { it } + fadeIn(fade)
+    val dockExit = if (reduceMotion) ExitTransition.None else slideOutVertically(slideAway) { it } + fadeOut(fadeAway)
+    val title = when (route) {
+        Routes.Playlists -> "播放列表"
+        Routes.Online -> "在线搜索"
+        Routes.Mine -> "我的"
+        Routes.Settings -> "设置"
+        else -> "音频库"
+    }
     val notificationPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { }
@@ -150,38 +249,63 @@ private fun PlayerApp() {
             },
         )
     }
+    SharedTransitionLayout {
+    val shared = this
+    CompositionLocalProvider(LocalTopBarOverride provides topBarOverride) {
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
-            if (showBars) {
-                TopAppBar(
-                    title = {
-                        Text(
-                            when (route) {
-                                Routes.Playlists -> "播放列表"
-                                Routes.Online -> "在线搜索"
-                                Routes.Mine -> "我的"
-                                Routes.Settings -> "设置"
-                                else -> "音频库"
-                            },
-                        )
-                    },
-                    actions = {
-                        IconButton(onClick = { navController.navigate(Routes.Downloads) }) {
-                            Icon(Icons.Default.Download, contentDescription = "下载")
-                        }
-                    },
-                )
+            AnimatedVisibility(visible = showTopBar, enter = barEnter, exit = barExit) {
+                val selection = topBarOverride.value
+                if (route == Routes.Library && selection != null) {
+                    selection()
+                } else {
+                    TopAppBar(
+                        title = {
+                            AnimatedContent(
+                                targetState = title,
+                                transitionSpec = { fadeIn(fade) togetherWith fadeOut(fadeAway) },
+                                label = "tabTitle",
+                            ) { value ->
+                                Text(value)
+                            }
+                        },
+                        actions = {
+                            IconButton(onClick = { navController.navigate(Routes.Downloads) }) {
+                                BadgedBox(
+                                    badge = {
+                                        if (activeTasks > 0) {
+                                            Badge {
+                                                Text(if (activeTasks > 99) "99+" else activeTasks.toString())
+                                            }
+                                        }
+                                    },
+                                ) {
+                                    Icon(Icons.Default.Download, contentDescription = "下载")
+                                }
+                            }
+                        },
+                    )
+                }
             }
         },
         bottomBar = {
-            if (showBars) {
+            AnimatedVisibility(visible = showBottomDock, enter = dockEnter, exit = dockExit) {
+                val dockScope = this
                 Column {
-                    MiniPlayer(onOpen = { navController.navigate(Routes.NowPlaying) })
+                    MiniPlayer(
+                        onOpen = { navController.navigate(Routes.NowPlaying) },
+                        coverModifier = with(shared) {
+                            Modifier.sharedElement(
+                                rememberSharedContentState(key = "player-cover"),
+                                animatedVisibilityScope = dockScope,
+                            )
+                        },
+                    )
                     NavigationBar {
                         NavigationBarItem(
-                            selected = route == Routes.Library,
+                            selected = highlight == Routes.Library,
                             onClick = {
                                 navController.navigate(Routes.Library) {
                                     popUpTo(navController.graph.findStartDestination().id) { saveState = true }
@@ -193,7 +317,7 @@ private fun PlayerApp() {
                             label = { Text("音频库") },
                         )
                         NavigationBarItem(
-                            selected = route == Routes.Playlists,
+                            selected = highlight == Routes.Playlists,
                             onClick = {
                                 navController.navigate(Routes.Playlists) {
                                     popUpTo(navController.graph.findStartDestination().id) { saveState = true }
@@ -205,7 +329,7 @@ private fun PlayerApp() {
                             label = { Text("播放列表") },
                         )
                         NavigationBarItem(
-                            selected = route == Routes.Online,
+                            selected = highlight == Routes.Online,
                             onClick = {
                                 navController.navigate(Routes.Online) {
                                     popUpTo(navController.graph.findStartDestination().id) { saveState = true }
@@ -217,7 +341,7 @@ private fun PlayerApp() {
                             label = { Text("在线搜索") },
                         )
                         NavigationBarItem(
-                            selected = route == Routes.Mine,
+                            selected = highlight == Routes.Mine,
                             onClick = {
                                 navController.navigate(Routes.Mine) {
                                     popUpTo(navController.graph.findStartDestination().id) { saveState = true }
@@ -229,7 +353,7 @@ private fun PlayerApp() {
                             label = { Text("我的") },
                         )
                         NavigationBarItem(
-                            selected = route == Routes.Settings,
+                            selected = highlight == Routes.Settings,
                             onClick = {
                                 navController.navigate(Routes.Settings) {
                                     popUpTo(navController.graph.findStartDestination().id) { saveState = true }
@@ -248,12 +372,69 @@ private fun PlayerApp() {
         NavHost(
             navController = navController,
             startDestination = Routes.Library,
-            modifier = Modifier.padding(padding),
+            // 子页面自带顶栏，也会再垫一次状态栏高度；这里先声明已经垫过，避免顶部出现两份空白。
+            modifier = Modifier.padding(padding).consumeWindowInsets(padding),
+            enterTransition = {
+                if (reduceMotion) {
+                    EnterTransition.None
+                } else {
+                    val from = initialState.destination.route
+                    val to = targetState.destination.route
+                    when {
+                        to == Routes.NowPlaying -> slideInVertically(slide) { it } + fadeIn(fade)
+                        isTab(from) && isTab(to) -> fadeIn(fade) + scaleIn(fade, initialScale = 0.96f)
+                        else -> slideInHorizontally(slide) { it / 4 } + fadeIn(fade)
+                    }
+                }
+            },
+            exitTransition = {
+                if (reduceMotion) {
+                    ExitTransition.None
+                } else {
+                    val from = initialState.destination.route
+                    val to = targetState.destination.route
+                    when {
+                        to == Routes.NowPlaying -> fadeOut(fadeAway)
+                        isTab(from) && isTab(to) -> fadeOut(fadeAway) + scaleOut(fadeAway, targetScale = 0.98f)
+                        else -> slideOutHorizontally(slideAway) { -it / 8 } + fadeOut(fadeAway)
+                    }
+                }
+            },
+            popEnterTransition = {
+                if (reduceMotion) {
+                    EnterTransition.None
+                } else if (initialState.destination.route == Routes.NowPlaying) {
+                    fadeIn(fade)
+                } else {
+                    slideInHorizontally(slide) { -it / 4 } + fadeIn(fade)
+                }
+            },
+            popExitTransition = {
+                if (reduceMotion) {
+                    ExitTransition.None
+                } else if (initialState.destination.route == Routes.NowPlaying) {
+                    slideOutVertically(slideAway) { it } + fadeOut(fadeAway)
+                } else {
+                    slideOutHorizontally(slideAway) { it / 4 } + fadeOut(fadeAway)
+                }
+            },
         ) {
             composable(Routes.Library) {
                 LibraryScreen(
                     onOpenPreview = { fileId -> navController.navigate(Routes.preview(fileId)) },
-                    onOpenWork = { sourceId -> navController.navigate(Routes.onlineWork(sourceId)) },
+                    onOpenLibraryWork = { id -> navController.navigate(Routes.libraryWork(id)) },
+                )
+            }
+            composable(
+                route = Routes.LibraryWork,
+                arguments = listOf(navArgument("folderId") { type = NavType.LongType }),
+            ) { entry ->
+                val id = entry.arguments?.getLong("folderId") ?: return@composable
+                LibraryWorkScreen(
+                    folderId = id,
+                    onBack = { navController.popBackStack() },
+                    onOpenPreview = { fileId -> navController.navigate(Routes.preview(fileId)) },
+                    onOpenOnline = { sourceId -> navController.navigate(Routes.onlineWork(sourceId)) },
                 )
             }
             composable(Routes.Playlists) {
@@ -285,6 +466,7 @@ private fun PlayerApp() {
                     onOpenStored = { navController.navigate(Routes.Stored) },
                     onOpenModels = { navController.navigate(Routes.ModelSettings) },
                     onOpenCache = { navController.navigate(Routes.CacheSettings) },
+                    onOpenAppearance = { navController.navigate(Routes.Appearance) },
                 )
             }
             composable(Routes.Playlist) { entry ->
@@ -295,7 +477,18 @@ private fun PlayerApp() {
                     onDeleted = { navController.popBackStack() },
                 )
             }
-            composable(Routes.NowPlaying) { NowPlayingScreen(onBack = { navController.popBackStack() }) }
+            composable(Routes.NowPlaying) {
+                val playingScope = this
+                NowPlayingScreen(
+                    onBack = { navController.popBackStack() },
+                    coverModifier = with(shared) {
+                        Modifier.sharedElement(
+                            rememberSharedContentState(key = "player-cover"),
+                            animatedVisibilityScope = playingScope,
+                        )
+                    },
+                )
+            }
             composable(Routes.Downloads) { DownloadScreen(onBack = { navController.popBackStack() }) }
             composable(Routes.Stored) {
                 StoredFilesScreen(
@@ -305,6 +498,9 @@ private fun PlayerApp() {
             }
             composable(Routes.ModelSettings) {
                 ModelSettingsScreen(onBack = { navController.popBackStack() })
+            }
+            composable(Routes.Appearance) {
+                AppearanceScreen(onBack = { navController.popBackStack() })
             }
             composable(Routes.CacheSettings) {
                 CacheScreen(onBack = { navController.popBackStack() })
@@ -334,4 +530,9 @@ private fun PlayerApp() {
             }
         }
     }
+    }
+    }
 }
+
+private fun isTab(route: String?) = route == Routes.Library || route == Routes.Playlists ||
+    route == Routes.Online || route == Routes.Mine || route == Routes.Settings

@@ -10,17 +10,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.ListItem
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import com.nanahoshi.audioplayer.ui.components.AppTopBar
+import com.nanahoshi.audioplayer.ui.components.EmptyState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -36,7 +34,6 @@ import com.nanahoshi.audioplayer.bilibili.FavFolder
 import com.nanahoshi.audioplayer.bilibili.FavVideo
 import com.nanahoshi.audioplayer.graph
 import com.nanahoshi.audioplayer.ui.CoverImage
-import com.nanahoshi.audioplayer.ui.EmptyHint
 import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
@@ -194,19 +191,16 @@ fun FavoriteScreen(onBack: () -> Unit, folderId: Long? = null, viewModel: Favori
     }
 
     Column(Modifier.fillMaxSize()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = {
-                if (folder != null) viewModel.closeFolder() else onBack()
-            }) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-            }
-            Text(
-                folder?.title ?: "收藏夹",
-                style = MaterialTheme.typography.titleLarge,
-            )
-        }
+        AppTopBar(
+            title = folder?.title ?: "收藏夹",
+            onBack = { if (folder != null) viewModel.closeFolder() else onBack() },
+        )
         when {
-            folder == null && folders.isEmpty() && !loading -> EmptyHint("没有收藏夹。若刚保存过登录信息，请返回后重新进入。")
+            folder == null && folders.isEmpty() && !loading -> EmptyState(
+                title = "没有收藏夹",
+                message = "若刚保存过登录信息，请返回后重新进入。",
+                modifier = Modifier.weight(1f),
+            )
             folder == null -> LazyColumn(Modifier.weight(1f)) {
                 items(folders, key = { it.id }) { item ->
                     ListItem(
@@ -216,7 +210,10 @@ fun FavoriteScreen(onBack: () -> Unit, folderId: Long? = null, viewModel: Favori
                     )
                 }
             }
-            videos.isEmpty() && !loading -> EmptyHint("这个收藏夹里没有可导入的视频。")
+            videos.isEmpty() && !loading -> EmptyState(
+                title = "这个收藏夹里没有可导入的视频",
+                modifier = Modifier.weight(1f),
+            )
             else -> LazyColumn(state = listState, modifier = Modifier.weight(1f)) {
                 items(videos, key = { it.bvid }) { video ->
                     val checked = video.bvid in selected
@@ -234,7 +231,7 @@ fun FavoriteScreen(onBack: () -> Unit, folderId: Long? = null, viewModel: Favori
             CircularProgressIndicator(Modifier.padding(16.dp).align(Alignment.CenterHorizontally))
         }
         if (folder != null) {
-            Button(
+            FilledTonalButton(
                 onClick = { viewModel.cacheSelected() },
                 enabled = !importing && !caching && selected.isNotEmpty(),
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),

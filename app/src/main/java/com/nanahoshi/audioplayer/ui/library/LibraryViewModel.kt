@@ -83,10 +83,14 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     val searchQuery = MutableStateFlow("")
     val workFileSource = MutableStateFlow<TrackSource?>(null)
     val workSources = MutableStateFlow(false)
-    private val workRootId = MutableStateFlow<Long?>(null)
+    val workRootId = MutableStateFlow<Long?>(null)
+    val workRoot = workRootId.flatMapLatest { id ->
+        if (id == null) kotlinx.coroutines.flow.flowOf(null) else graph.library.observeFolder(id)
+    }
     val pendingAsmr = MutableStateFlow<AsmrPreview?>(null)
     private var rjLookup: Job? = null
     private var openJob: Job? = null
+    private var sourceCheckJob: Job? = null
     private var openGeneration = 0
     val listing = combine(
         currentFolderId,
@@ -189,6 +193,17 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun openWork(folderId: Long) {
+        viewModelScope.launch {
+            val folder = graph.library.folder(folderId)
+            if (folder == null) {
+                graph.messages.value = "没有这个作品"
+                return@launch
+            }
+            openFolder(folder)
+        }
+    }
+
     fun openFolder(folder: FolderEntity) {
         folderScroll[folder.id] = LazyListState()
         if (sourceFilter.value != LibrarySourceFilter.LOCAL) {
@@ -204,10 +219,12 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         val generation = openGeneration
         val work = !folder.asmrSourceId.isNullOrBlank()
         if (work) {
+            sourceCheckJob?.cancel()
             workRootId.value = folder.id
             workFileSource.value = null
             workSources.value = false
         } else if (folder.asmrWorkId == null) {
+            sourceCheckJob?.cancel()
             workRootId.value = null
             workFileSource.value = null
             workSources.value = false
@@ -240,6 +257,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         workFileSource.value = source
         clearSelection()
         openJob?.cancel()
+        sourceCheckJob?.cancel()
         openGeneration += 1
         val generation = openGeneration
         openJob = viewModelScope.launch {
@@ -269,11 +287,24 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun applyWorkSources(folderId: Long) {
         val sources = graph.library.prepareWorkSources(folderId) ?: return
-        if (!sources.purchased && !sources.hasPlay) return
-        workSources.value = true
-        workFileSource.value = when {
-            sources.hasPlay -> TrackSource.DLSITE
-            else -> TrackSource.ASMR
+        if (sources.hasPlay) {
+            workFileSource.value = TrackSource.DLSITE
+            workSources.value = true
+            return
+        }
+        if (sources.purchased == true) {
+            workFileSource.value = TrackSource.ASMR
+            workSources.value = true
+            return
+        }
+        if (sources.purchased == false) return
+        // 没有 Play 文件时，购买状态只决定要不要给出切换；放后台查，别让打开作品等它。
+        sourceCheckJob = viewModelScope.launch {
+            val purchased = graph.library.checkPurchased(folderId)
+            if (purchased && workRootId.value == folderId) {
+                workFileSource.value = TrackSource.ASMR
+                workSources.value = true
+            }
         }
     }
 
@@ -344,6 +375,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun clearWorkSource() {
+        sourceCheckJob?.cancel()
         workRootId.value = null
         workFileSource.value = null
         workSources.value = false
@@ -403,7 +435,12 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun cacheFolder(folderId: Long) = launch {
-        val count = graph.downloads.enqueue(graph.library.asmrTracksInTree(folderId))
+        val tracks = graph.library.asmrTracksInTree(folderId)
+        // 作品外面没有当前来源，按打开作品时的默认顺序取 Play，其次 asmr.one。
+        val source = workFileSource.value
+            ?.takeIf { current -> tracks.any { it.source == current } }
+            ?: if (tracks.any { it.source == TrackSource.DLSITE }) TrackSource.DLSITE else TrackSource.ASMR
+        val count = graph.downloads.enqueue(tracks.filter { it.source == source })
         graph.messages.value = if (count == 0) "没有需要下载的音频" else "已加入 $count 个下载"
     }
 
@@ -529,9 +566,18 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
                 graph.player.playTrack(track)
                 return@launch
             }
-            val tracks = graph.library.tracksIn(folderId).sortedForLibrary(graph.librarySort.sort.value)
-            val index = tracks.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
-            graph.player.replaceAndPlay(tracks.ifEmpty { listOf(track) }, index)
+            // 作品文件夹里同一路径会有 DLsite 和 asmr.one 两首，队列只放当前显示的那一套。
+            val source = workFileSource.value
+            val tracks = graph.library.tracksIn(folderId)
+                .filter { source == null || it.source == source }
+                .sortedForLibrary(graph.librarySort.sort.value)
+            val index = tracks.indexOfFirst { it.id == track.id }
+            if (index < 0) {
+                // 搜索结果里点到不在当前文件夹或不在当前来源的曲目时，只播放这一首。
+                graph.player.replaceAndPlay(listOf(track))
+                return@launch
+            }
+            graph.player.replaceAndPlay(tracks, index)
         }
     }
 

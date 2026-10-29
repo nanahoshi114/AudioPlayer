@@ -8,26 +8,30 @@ import kotlinx.coroutines.CancellationException
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Album
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.Icon
+import com.nanahoshi.audioplayer.ui.components.AppTopBar
+import com.nanahoshi.audioplayer.ui.components.EmptyState
+import com.nanahoshi.audioplayer.ui.components.SelectionAction
+import com.nanahoshi.audioplayer.ui.components.SelectionTopBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -127,52 +131,52 @@ fun StoredFilesScreen(
         )
     }
     Column(Modifier.fillMaxSize()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = {
-                if (selecting) {
-                    selecting = false
-                    selected = emptySet()
-                } else {
-                    onBack()
-                }
-            }) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-            }
-            Text("下载管理", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-        }
         if (selecting) {
-            Row(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("已选 ${chosen.size}", modifier = Modifier.padding(end = 8.dp))
-                TextButton(onClick = {
+            SelectionTopBar(
+                count = chosen.size,
+                onClose = {
                     selecting = false
                     selected = emptySet()
-                }) { Text("取消") }
-                TextButton(onClick = { if (chosen.isNotEmpty()) confirmDelete = true }, enabled = chosen.isNotEmpty()) {
-                    Text("删除")
-                }
-                TextButton(
-                    onClick = { shareStored(context, chosen.map { File(it.path) }) },
-                    enabled = chosen.isNotEmpty(),
-                ) { Text("导出") }
-                if (single?.sourceId != null) {
-                    TextButton(onClick = { onOpenWork(single.sourceId) }) { Text("作品") }
-                }
-            }
+                },
+                actions = buildList {
+                    add(
+                        SelectionAction(
+                            "导出",
+                            Icons.Default.Share,
+                            { shareStored(context, chosen.map { File(it.path) }) },
+                            enabled = chosen.isNotEmpty(),
+                        ),
+                    )
+                    if (single?.sourceId != null) {
+                        add(SelectionAction("作品", Icons.Default.Album, { onOpenWork(single.sourceId) }))
+                    }
+                    add(
+                        SelectionAction(
+                            "删除",
+                            Icons.Default.Delete,
+                            { if (chosen.isNotEmpty()) confirmDelete = true },
+                            destructive = true,
+                            enabled = chosen.isNotEmpty(),
+                        ),
+                    )
+                },
+            )
+        } else {
+            AppTopBar(title = "下载管理", onBack = onBack)
         }
         OutlinedTextField(
             value = query,
             onValueChange = { query = it },
-            label = { Text("文件名、RJ 号或作品名") },
+            placeholder = { Text("文件名、RJ 号或作品名") },
+            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
             singleLine = true,
+            shape = RoundedCornerShape(28.dp),
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
         )
         when {
-            viewModel.loading && viewModel.items.isEmpty() -> EmptyHint("正在读取已下载的文件。")
-            viewModel.items.isEmpty() -> EmptyHint("没有已下载的文件。")
-            visible.isEmpty() -> EmptyHint("没有匹配的文件。")
+            viewModel.loading && viewModel.items.isEmpty() -> EmptyState(title = "正在读取已下载的文件", modifier = Modifier.fillMaxSize())
+            viewModel.items.isEmpty() -> EmptyState(title = "没有已下载的文件", modifier = Modifier.fillMaxSize())
+            visible.isEmpty() -> EmptyState(title = "没有匹配的文件", modifier = Modifier.fillMaxSize())
             else -> LazyColumn(Modifier.fillMaxSize()) {
                 items(visible, key = { it.path }) { item ->
                     val on = item.path in selected

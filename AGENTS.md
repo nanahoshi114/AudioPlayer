@@ -29,11 +29,13 @@ Kotlin 2.2.10，AGP 9.4.1，compileSdk / targetSdk 37，minSdk 24，Java 11。�
 
 | 位置 | 做什么 |
 | --- | --- |
-| `ui/library` | 音频库、收藏夹导入、图片和文本预览 |
+| `ui/components` | 顶栏、多选栏、来源标签、空状态、封面 |
+| `ui/library` | 音频库、作品页、收藏夹导入、图片和文本预览 |
 | `ui/playlist` | 播放列表 |
 | `ui/player` | 正在播放、底部小条、字幕按钮 |
 | `ui/asmr` | 在线搜索、作品详情、我的、已购买列表 |
-| `ui/settings` | 设置、听写和翻译、清理缓存 |
+| `ui/settings` | 设置、外观、听写和翻译、清理缓存 |
+| `ui/theme` | 配色、主题色生成、封面取色、动效参数 |
 | `ui/download` | 进行中的下载、听写、翻译；已落盘文件的下载管理 |
 | `playback` | 播放服务、在线音频、字幕读取 |
 | `bilibili` | 播放地址、收藏夹、字幕、扫码登录 |
@@ -41,16 +43,18 @@ Kotlin 2.2.10，AGP 9.4.1，compileSdk / targetSdk 37，minSdk 24，Java 11。�
 | `dlsite` | 商店、商品页、登录、已购 Play、试听 |
 | `data` | 库、下载、已落盘文件、凭证、听写、翻译 |
 | `data/db` | Room，当前第 12 版 |
-| `AppGraph.kt` | 在 `Application.onCreate` 里组装。顺序是 db、credentials、bilibili、asmr、dlsite、librarySort、cache、library、downloads、subtitles、translator、whisper、player |
+| `AppGraph.kt` | 在 `Application.onCreate` 里组装。顺序是 db、credentials、bilibili、asmr、dlsite、librarySort、appearance、cache、library、downloads、subtitles、translator、whisper、player |
 
-底栏五页：音频库、播放列表、在线搜索、我的、设置。作品详情、已购买、收藏夹、正在播放、下载、下载管理、听写和翻译、清理缓存、文件预览是单独一页。
+底栏五页：音频库、播放列表、在线搜索、我的、设置。作品页和作品详情打开时底栏和播放条留着，顶部标题栏隐藏。已购买、收藏夹、正在播放、下载、下载管理、听写和翻译、清理缓存、文件预览是单独一页，顶栏和底栏都隐藏。
 
 ## 不要改坏
 
 - 还没保存进库的队列项用 `PlayerClient.playQueueItem`。`playTrack` 只在 `track.id > 0` 时追加。
 - DLsite 试听行的 source 是 `DLSITE`，但 `fileKey` 为空。空 `fileKey` 不要带上 DLsite 登录。
+- 作品页是单独路由 `library/work/{folderId}`，用自己的 `LibraryViewModel` 实例，不和音频库列表共用。作品同时有 DLsite 和 asmr.one 两套文件时，作品页按 `workFileSource` 切换显示，点一首播放也只把该来源的曲目放进队列，「缓存到本地」也只缓存该来源（在作品外面发起时按 Play 优先取一套）；普通文件夹仍然是整个文件夹一起播放和下载。作品里已经有 Play 文件时，打开直接显示切换，不再查 DLsite 的购买状态；没有 Play 文件时才在后台确认购买状态，买过才显示切换，不能拖住打开。返回在子文件夹里先上一级，到作品根再退出，不能用 `up()` 越过作品根。
 - 字幕按钮只在字幕已就绪、当前没有句子、且不是「没有听出人声」时出现。句子之间的空隙不要把按钮露出来。
-- 字幕全文列表点一行跳到该句起始，列表留在原页。正在播放页上的当前句仍用来打开全文列表。当前句颜色：深色 `0xFF90CAF9`，浅色 `0xFF1565C0`。
+- 字幕全文列表点一行跳到该句起始，列表留在原页。正在播放页上的当前句仍用来打开全文列表。当前句颜色：深色 `0xFF90CAF9`，浅色 `0xFF1565C0`。深浅按应用实际主题（`LocalDarkTheme`）判断，不要直接用 `isSystemInDarkTheme()`，否则「外观」里强制深色或浅色时会错。
+- 「外观」存在 `AppearancePreferences`（SharedPreferences `appearance`）：主题模式（跟随系统/浅色/深色）和主题色来源（系统取色/跟随封面/预设）。系统取色是默认；Android 12 以下退回默认靛蓝。封面取色只在选了「跟随封面」时才加载封面，取不出彩色时保持上一次的颜色。预设里的「靛蓝」用手调的默认配色，其余预设由 `seedColorScheme` 生成。状态栏和导航栏图标颜色跟着实际主题走，不跟系统。
 - 听写结果写在 `filesDir/subtitles/{sha256}.json`。同一文件内容、同一听写地址、同一模型、字幕文件还在时，不重新上传。换地址或换模型会再跑并覆盖。旧记录没有模型时，仍按地址对应的原接口匹配，不强迫重跑。
 - 「生成字幕」设 `skipTranslate = true`，不请求翻译。「生成字幕和翻译」才在听写完成后翻译。重试沿用原来的 `skipTranslate`。
 - 手动「生成翻译」跑在 `TranslateCenter` 自己的协程里。离开正在播放页只取消等待，不取消这次翻译。

@@ -1,6 +1,7 @@
 package com.nanahoshi.audioplayer.ui.download
 
 import android.app.Application
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -11,16 +12,18 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import com.nanahoshi.audioplayer.ui.components.AppTopBar
+import com.nanahoshi.audioplayer.ui.components.EmptyState
+import com.nanahoshi.audioplayer.ui.components.RoundedProgress
+import com.nanahoshi.audioplayer.ui.components.SectionHeader
+import com.nanahoshi.audioplayer.ui.components.StatusBadge
+import com.nanahoshi.audioplayer.ui.components.StatusTone
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -39,7 +42,6 @@ import com.nanahoshi.audioplayer.data.db.TranslateMark
 import com.nanahoshi.audioplayer.data.db.TranslationJobEntity
 import com.nanahoshi.audioplayer.data.db.WhisperJobEntity
 import com.nanahoshi.audioplayer.graph
-import com.nanahoshi.audioplayer.ui.EmptyHint
 
 class DownloadViewModel(app: Application) : AndroidViewModel(app) {
     private val graph = app.graph()
@@ -80,6 +82,7 @@ class DownloadViewModel(app: Application) : AndroidViewModel(app) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun DownloadScreen(
     onBack: () -> Unit,
@@ -89,32 +92,31 @@ fun DownloadScreen(
     val whisperJobs by viewModel.whisperJobs.collectAsStateWithLifecycle(emptyList())
     val translationJobs by viewModel.translationJobs.collectAsStateWithLifecycle(emptyList())
     Column(Modifier.fillMaxSize()) {
-        IconButton(onClick = onBack) {
-            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-        }
+        AppTopBar(title = "下载", onBack = onBack)
         if (jobs.isEmpty() && whisperJobs.isEmpty() && translationJobs.isEmpty()) {
-            EmptyHint("还没有下载。在作品里可以选择单个音频，或缓存整个文件夹。")
+            EmptyState(
+                title = "还没有下载",
+                message = "在作品里可以选择单个音频，或缓存整个文件夹。",
+                modifier = Modifier.fillMaxSize(),
+            )
         } else {
             LazyColumn(Modifier.fillMaxSize()) {
-                items(jobs, key = { "download-${it.id}" }) { job ->
-                    DownloadRow(
-                        job,
-                        onRetry = { viewModel.retry(job.id) },
-                        onPlay = if (job.status == DownloadStatus.DONE && !job.localPath.isNullOrBlank()) {
-                            { viewModel.play(job) }
-                        } else {
-                            null
-                        },
-                    )
-                }
-                if (whisperJobs.isNotEmpty() || translationJobs.isNotEmpty()) {
-                    item(key = "whisper-heading") {
-                        Text(
-                            "生成字幕",
-                            style = MaterialTheme.typography.titleMedium,
-                            modifier = Modifier.padding(start = 16.dp, top = 24.dp, bottom = 8.dp),
+                if (jobs.isNotEmpty()) {
+                    stickyHeader(key = "download-heading") { SectionHeader("下载") }
+                    items(jobs, key = { "download-${it.id}" }) { job ->
+                        DownloadRow(
+                            job,
+                            onRetry = { viewModel.retry(job.id) },
+                            onPlay = if (job.status == DownloadStatus.DONE && !job.localPath.isNullOrBlank()) {
+                                { viewModel.play(job) }
+                            } else {
+                                null
+                            },
                         )
                     }
+                }
+                if (whisperJobs.isNotEmpty() || translationJobs.isNotEmpty()) {
+                    stickyHeader(key = "whisper-heading") { SectionHeader("生成字幕") }
                     items(whisperJobs, key = { "whisper-${it.id}" }) { job ->
                         WhisperJobRow(
                             job,
@@ -137,29 +139,28 @@ private fun DownloadRow(job: DownloadEntity, onRetry: () -> Unit, onPlay: (() ->
         DownloadStatus.QUEUED -> "排队"
         DownloadStatus.RUNNING -> "下载中"
         DownloadStatus.DONE -> "完成"
-        DownloadStatus.FAILED -> job.error ?: "失败"
+        DownloadStatus.FAILED -> "失败"
     }
     ListItem(
         modifier = if (onPlay != null) Modifier.clickable(onClick = onPlay) else Modifier,
         headlineContent = { Text(job.title) },
         supportingContent = {
             Column(Modifier.fillMaxWidth()) {
-                Text(status)
-                if (job.status == DownloadStatus.RUNNING || job.status == DownloadStatus.QUEUED) {
-                    if (job.bytesTotal > 0) {
-                        LinearProgressIndicator(
-                            progress = { (job.bytesDone.toFloat() / job.bytesTotal).coerceIn(0f, 1f) },
-                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                        )
-                    } else if (job.status == DownloadStatus.RUNNING) {
-                        LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 8.dp))
-                    }
+                StatusBadge(status, toneFor(job.status))
+                if (job.status == DownloadStatus.FAILED && !job.error.isNullOrBlank()) {
+                    Text(job.error, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+                if (job.status == DownloadStatus.RUNNING || (job.status == DownloadStatus.QUEUED && job.bytesTotal > 0)) {
+                    RoundedProgress(
+                        progress = if (job.bytesTotal > 0) job.bytesDone.toFloat() / job.bytesTotal else null,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
                 }
             }
         },
         trailingContent = {
             if (job.status == DownloadStatus.FAILED) {
-                TextButton(onClick = onRetry) { Text("重试") }
+                FilledTonalButton(onClick = onRetry) { Text("重试") }
             }
         },
     )
@@ -187,13 +188,11 @@ private fun WhisperJobRow(job: WhisperJobEntity, onRetry: () -> Unit, onCancel: 
         headlineContent = { Text(job.title) },
         supportingContent = {
             Column(Modifier.fillMaxWidth()) {
-                Text(status)
-                if (translating) {
-                    LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 8.dp))
-                } else if (job.status == DownloadStatus.RUNNING) {
-                    LinearProgressIndicator(
-                        progress = { job.progress.coerceIn(0f, 1f) },
-                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                StatusBadge(status, whisperTone(job, translating, stopped))
+                if (translating || job.status == DownloadStatus.RUNNING || job.status == DownloadStatus.QUEUED) {
+                    RoundedProgress(
+                        progress = if (translating || job.progress <= 0f) null else job.progress,
+                        modifier = Modifier.padding(top = 8.dp),
                     )
                 }
             }
@@ -227,9 +226,17 @@ private fun TranslationJobRow(job: TranslationJobEntity, onCancel: () -> Unit) {
         headlineContent = { Text(job.title) },
         supportingContent = {
             Column(Modifier.fillMaxWidth()) {
-                Text(status)
+                StatusBadge(
+                    status,
+                    when {
+                        stopped -> StatusTone.Neutral
+                        running -> StatusTone.Active
+                        job.status == DownloadStatus.FAILED -> StatusTone.Error
+                        else -> StatusTone.Success
+                    },
+                )
                 if (running) {
-                    LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 8.dp))
+                    RoundedProgress(progress = null, modifier = Modifier.padding(top = 8.dp))
                 }
             }
         },
@@ -241,6 +248,24 @@ private fun TranslationJobRow(job: TranslationJobEntity, onCancel: () -> Unit) {
         },
     )
     shownReply?.let { ReplyDialog(it) { shownReply = null } }
+}
+
+@Composable
+private fun toneFor(status: DownloadStatus) = when (status) {
+    DownloadStatus.QUEUED -> StatusTone.Neutral
+    DownloadStatus.RUNNING -> StatusTone.Active
+    DownloadStatus.DONE -> StatusTone.Success
+    DownloadStatus.FAILED -> StatusTone.Error
+}
+
+private fun whisperTone(job: WhisperJobEntity, translating: Boolean, stopped: Boolean) = when {
+    stopped -> StatusTone.Neutral
+    translating -> StatusTone.Active
+    job.translateStatus == TranslateMark.FAILED -> StatusTone.Error
+    job.status == DownloadStatus.FAILED -> StatusTone.Error
+    job.status == DownloadStatus.DONE -> StatusTone.Success
+    job.status == DownloadStatus.RUNNING -> StatusTone.Active
+    else -> StatusTone.Neutral
 }
 
 @Composable
