@@ -1,17 +1,6 @@
 package com.nanahoshi.audioplayer.ui.player
 
-import android.Manifest
-import android.app.Activity
-import android.content.Context
-import android.content.ContextWrapper
-import android.content.Intent
-import android.content.pm.PackageManager
-import android.net.Uri
-import android.os.Build
-import android.provider.Settings
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
@@ -103,8 +92,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.core.app.ActivityCompat
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nanahoshi.audioplayer.playback.PlayerUiState
@@ -118,6 +105,7 @@ import com.nanahoshi.audioplayer.ui.components.AppTopBar
 import com.nanahoshi.audioplayer.ui.components.EmptyState
 import com.nanahoshi.audioplayer.ui.components.SourceBadge
 import com.nanahoshi.audioplayer.ui.components.pressScale
+import com.nanahoshi.audioplayer.ui.components.rememberLocalNetworkAccess
 import com.nanahoshi.audioplayer.ui.formatDuration
 import com.nanahoshi.audioplayer.ui.theme.LocalDarkTheme
 import com.nanahoshi.audioplayer.ui.theme.LocalReduceMotion
@@ -763,57 +751,6 @@ private fun SleepTimerDialog(onDismiss: () -> Unit, onStart: (Long) -> Unit) {
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
-}
-
-private class LocalNetworkAccess(val run: (Boolean, () -> Unit) -> Unit)
-
-@Composable
-private fun rememberLocalNetworkAccess(onDenied: () -> Unit): LocalNetworkAccess {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    var pending by remember { mutableStateOf<(() -> Unit)?>(null) }
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        val next = pending
-        pending = null
-        if (granted) {
-            next?.invoke()
-            return@rememberLauncherForActivityResult
-        }
-        onDenied()
-        val activity = context.findActivity()
-        val permanent = activity != null && !ActivityCompat.shouldShowRequestPermissionRationale(
-            activity,
-            Manifest.permission.ACCESS_LOCAL_NETWORK,
-        )
-        if (permanent) {
-            context.startActivity(
-                Intent(
-                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                    Uri.fromParts("package", context.packageName, null),
-                ),
-            )
-        }
-    }
-    return LocalNetworkAccess { needed, action ->
-        val allowed = Build.VERSION.SDK_INT < 37 || ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.ACCESS_LOCAL_NETWORK,
-        ) == PackageManager.PERMISSION_GRANTED
-        if (!needed || allowed) {
-            action()
-        } else {
-            pending = action
-            launcher.launch(Manifest.permission.ACCESS_LOCAL_NETWORK)
-        }
-    }
-}
-
-private fun Context.findActivity(): Activity? {
-    var current = this
-    while (current is ContextWrapper) {
-        if (current is Activity) return current
-        current = current.baseContext
-    }
-    return null
 }
 
 @Composable

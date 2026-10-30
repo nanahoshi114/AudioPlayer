@@ -59,6 +59,13 @@ class WhisperCenter(
 
     fun observe(): Flow<List<WhisperJobEntity>> = db.whisper().observe()
 
+    /** 重试沿用任务自己的地址；只有局域网地址才需要先拿到本地网络权限。 */
+    fun needsLocalNetwork(job: WhisperJobEntity): Boolean {
+        val model = jobCredentialModel(job)
+        val base = job.endpoint ?: effectiveWhisperBase(model, credentials.whisperBaseUrl(model))
+        return isLocalNetworkAddress(base)
+    }
+
     fun acceptSizeConfirm() {
         val id = sizeConfirm.value ?: return
         sizeAnswers[id]?.complete(true)
@@ -261,7 +268,7 @@ class WhisperCenter(
         val latestDone = prior.lastOrNull { it.status == DownloadStatus.DONE }
         if (
             latestDone != null &&
-            latestDone.endpoint == endpoint &&
+            sameWhisperEndpoint(latestDone.endpoint, endpoint, model) &&
             whisperModelsMatch(latestDone.model, model, endpoint) &&
             cueFile(fingerprint).isFile
         ) {
@@ -270,7 +277,7 @@ class WhisperCenter(
         }
         val busy = prior.filter {
             (it.status == DownloadStatus.QUEUED || it.status == DownloadStatus.RUNNING) &&
-                it.endpoint == endpoint &&
+                sameWhisperEndpoint(it.endpoint, endpoint, model) &&
                 whisperModelsMatch(it.model, model, endpoint)
         }
         if (busy.isNotEmpty()) {
@@ -281,7 +288,7 @@ class WhisperCenter(
             }
         }
         val failed = prior.lastOrNull {
-            it.status == DownloadStatus.FAILED && it.endpoint == endpoint &&
+            it.status == DownloadStatus.FAILED && sameWhisperEndpoint(it.endpoint, endpoint, model) &&
                 whisperModelsMatch(it.model, model, endpoint) &&
                 (trackId == null || it.trackId == trackId)
         }
@@ -654,7 +661,7 @@ class WhisperCenter(
         val latestDone = db.whisper().forFingerprint(job.fingerprint).lastOrNull {
             it.id != job.id &&
                 it.status == DownloadStatus.DONE &&
-                it.endpoint == job.endpoint &&
+                sameWhisperEndpoint(it.endpoint, job.endpoint, requested) &&
                 whisperModelsMatch(it.model, requested, it.endpoint)
         }
         if (latestDone == null || !cueFile(job.fingerprint).isFile) return false

@@ -23,6 +23,10 @@ import okhttp3.Request
 import java.io.File
 import java.util.concurrent.TimeUnit
 
+data class DeleteResult(val deleted: Int, val unlinked: Int) {
+    val total: Int get() = deleted + unlinked
+}
+
 class DownloadCenter(
     context: Context,
     private val db: AppDatabase,
@@ -85,22 +89,32 @@ class DownloadCenter(
         true
     }
 
-    suspend fun deleteDownloaded(tracks: List<TrackEntity>): Int = withContext(Dispatchers.IO) {
-        var removed = 0
+    /** 删 App 下载的文件；识别得到的曲目（本地文件是用户自己的）只取消识别，不动磁盘上的文件。 */
+    suspend fun deleteDownloaded(tracks: List<TrackEntity>): DeleteResult = withContext(Dispatchers.IO) {
+        var deleted = 0
+        var unlinked = 0
         for (track in tracks) {
             if (track.source != TrackSource.ASMR && track.source != TrackSource.DLSITE && track.source != TrackSource.BILIBILI) {
                 continue
             }
             val path = track.localUri
-            if (!localFileReady(path)) continue
-            val file = File(path!!)
-            if (file.exists() && !file.delete()) continue
-            db.tracks().clearLocalUri(track.id)
-            db.downloads().deleteFinishedForTrack(track.id)
-            removed += 1
+            if (localFileReady(path)) {
+                val file = File(path!!)
+                if (file.exists() && !file.delete()) continue
+                db.tracks().clearLocalUri(track.id)
+                db.downloads().deleteFinishedForTrack(track.id)
+                deleted += 1
+            } else if (track.source != TrackSource.BILIBILI && isRecognizedLocal(path)) {
+                db.tracks().clearLocalUri(track.id)
+                db.downloads().deleteFinishedForTrack(track.id)
+                unlinked += 1
+            }
         }
-        removed
+        DeleteResult(deleted, unlinked)
     }
+
+    private fun isRecognizedLocal(path: String?): Boolean =
+        path != null && (path.startsWith("content:", ignoreCase = true) || path.startsWith("file:", ignoreCase = true))
 
     suspend fun enqueue(tracks: List<TrackEntity>): Int = withContext(Dispatchers.IO) {
         var added = 0

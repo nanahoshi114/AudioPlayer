@@ -348,6 +348,81 @@ class LibraryRepository(
         error(recognizeNotice(side, asmrMatched = false, extraPath = extraPath))
     }
 
+    /**
+     * 作品已经在音频库里：把手机上的一个文件夹对照这部作品的文件，对上的曲目挂上本地文件。
+     * 曲目 id 不变，磁盘上的文件不动；本地可以少，不能多出作品里没有的。
+     */
+    suspend fun recognizeLocalTree(workFolderId: Long, treeUri: Uri, preferred: TrackSource?): String =
+        withContext(Dispatchers.IO) {
+            val root = db.folders().get(workFolderId) ?: error("找不到作品")
+            if (root.asmrSourceId == null) error("这不是作品")
+            backfillContentSources(workFolderId)
+            val workId = workIdOf(root)
+            val source = preferred?.takeIf { workHasSource(workId, it) }
+                ?: if (workHasSource(workId, TrackSource.DLSITE)) TrackSource.DLSITE else TrackSource.ASMR
+            val tree = LocalAudio.readTree(context, treeUri)
+            if (tree == null || tree.allFiles().isEmpty()) error("这个文件夹里没有可对照的文件")
+
+            val children = db.folders().all().groupBy { it.parentId }
+            suspend fun workLevel(folderId: Long): WorkLevel {
+                val files = db.tracks().inFolder(folderId)
+                    .filter { it.source == source }
+                    .map { WorkFile(it.title, it.id.toString(), null, true) }
+                val folders = children[folderId].orEmpty()
+                    .filter { it.contentSource == null || it.contentSource == source.name }
+                    .map { WorkFolder(it.name, workLevel(it.id)) }
+                return WorkLevel(files, folders)
+            }
+            val work = workLevel(workFolderId)
+            if (work.files.isEmpty() && work.folders.isEmpty()) error("这个作品还没有读到文件")
+
+            val picked = HashMap<Long, Uri>()
+            var counter = 0L
+            fun localLevel(node: AudioNode): LocalLevel = LocalLevel(
+                files = node.files.map { uri ->
+                    val index = counter++
+                    picked[index] = uri
+                    LocalMatchFile(LocalAudio.displayName(context, uri), index, null)
+                },
+                folders = node.children.map { child -> LocalMatchFolder(counter++, child.name, localLevel(child)) },
+            )
+            when (val fit = fitLocalFolder(localLevel(tree), work)) {
+                FolderFit.Empty -> error("这个文件夹里没有可对照的文件")
+                is FolderFit.Extra -> error("对不上，多出来的内容：${fit.path}")
+                is FolderFit.Ready -> {
+                    var linked = 0
+                    var busy = 0
+                    try {
+                        db.withTransaction {
+                            for ((index, remote) in fit.assignment.tracks) {
+                                val track = db.tracks().getById(remote.storageKey.toLong()) ?: continue
+                                // 已经下载到 App 目录的曲目保留下载副本。
+                                if (track.localUri?.startsWith("/") == true) continue
+                                val uri = picked.getValue(index).toString()
+                                // 同一个本地文件已经挂在别的曲目上时跳过，不覆盖，也不撞唯一索引。
+                                val owner = db.tracks().findByLocalUri(uri)
+                                if (owner != null && owner.id != track.id) {
+                                    busy += 1
+                                    continue
+                                }
+                                db.tracks().updateLocalUri(track.id, uri)
+                                linked += 1
+                            }
+                        }
+                    } catch (failure: Exception) {
+                        if (failure.hasConstraint()) error("这个文件夹里的文件已经挂在其他曲目上，没有改动")
+                        throw failure
+                    }
+                    val name = if (source == TrackSource.DLSITE) "DLsite" else "asmr.one"
+                    when {
+                        busy == 0 -> "$name 匹配成功，已关联 $linked 首"
+                        linked == 0 -> "$name 匹配成功，但有 $busy 首的文件已经挂在其他曲目上，没有改动；可先取消那边的识别"
+                        else -> "$name 匹配成功，已关联 $linked 首；$busy 首的文件已经挂在其他曲目上，没有改动"
+                    }
+                }
+            }
+        }
+
     suspend fun importAsmr(input: String, parentId: Long?) = withContext(Dispatchers.IO) {
         val work = asmr.loadWork(input)
         if (db.folders().findBySourceId(work.sourceId) != null) error("已经在音频库")

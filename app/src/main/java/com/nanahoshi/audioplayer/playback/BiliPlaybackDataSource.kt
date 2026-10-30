@@ -129,12 +129,8 @@ class BiliPlaybackDataSource(
             ?: throw IOException("无法识别音频")
         val track = runBlocking(Dispatchers.IO) { db.tracks().getById(trackId) }
             ?: throw IOException("找不到音频")
-        val local = track.localUri
-        if (!local.isNullOrBlank() && local.startsWith("/") && File(local).isFile) {
-            val fileSpec = dataSpec.buildUpon().setUri(Uri.fromFile(File(local))).build()
-            current = fallback
-            return fallback.open(fileSpec)
-        }
+        // 识别挂上的 content:/file: 和下载到 App 目录的文件都在这里读本地。
+        openStored(dataSpec, track.localUri)?.let { return it }
         val url = track.remoteUrl
         if (url.isNullOrBlank()) throw IOException("没有可播放的地址")
         val workno = runBlocking(Dispatchers.IO) { worknoOf(track) }

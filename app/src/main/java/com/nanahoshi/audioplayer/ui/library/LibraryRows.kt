@@ -420,8 +420,12 @@ internal fun TrackRow(
                         val label = if (track.source == TrackSource.BILIBILI) "缓存音轨" else "下载"
                         DropdownMenuItem(text = { Text(label) }, onClick = { menu = false; onDownload() })
                     }
-                    if (downloaded && appCopy && onDeleteDownloaded != null) {
-                        val label = if (track.source == TrackSource.BILIBILI) "删除已缓存的音轨" else "删除已下载的文件"
+                    if (downloaded && onDeleteDownloaded != null) {
+                        val label = when {
+                            track.source == TrackSource.BILIBILI -> "删除已缓存的音轨"
+                            !appCopy -> "取消识别"
+                            else -> "删除已下载的文件"
+                        }
                         DropdownMenuItem(
                             text = { Text(label) },
                             onClick = { menu = false; onDeleteDownloaded() },
@@ -469,5 +473,60 @@ internal fun FileRow(
             }
         },
         modifier = modifier.clickable(onClick = onClick),
+    )
+}
+
+@Composable
+internal fun CachePromptDialog(
+    prompt: CachePrompt?,
+    onAnswer: (Any?) -> Unit,
+) {
+    when (prompt) {
+        null -> Unit
+        is CachePrompt.Source -> CachePickDialog(
+            title = "缓存哪个来源？",
+            message = "这部作品已购买，asmr.one 上也有收录。",
+            options = listOf(TrackSource.DLSITE to "DLsite（已购买）", TrackSource.ASMR to "asmr.one"),
+            onPick = onAnswer,
+            onDismiss = { onAnswer(null) },
+        )
+        is CachePrompt.Format -> CachePickDialog(
+            title = "下载哪种格式？",
+            message = "有些音频同时有 ${prompt.conflict.extensions.joinToString(" / ") { it.uppercase() }} 两种格式（文件名前缀相同），只下载你选的那种。",
+            options = prompt.conflict.extensions.map { it to it.uppercase() },
+            onPick = onAnswer,
+            onDismiss = { onAnswer(null) },
+        )
+    }
+}
+
+@Composable
+private fun CachePickDialog(
+    title: String,
+    message: String,
+    options: List<Pair<Any, String>>,
+    onPick: (Any) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column {
+                Text(message)
+                options.forEach { (value, label) ->
+                    Text(
+                        label,
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onPick(value) }
+                            .padding(vertical = 14.dp),
+                    )
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }

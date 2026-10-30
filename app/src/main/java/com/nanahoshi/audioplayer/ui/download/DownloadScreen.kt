@@ -24,6 +24,7 @@ import com.nanahoshi.audioplayer.ui.components.RoundedProgress
 import com.nanahoshi.audioplayer.ui.components.SectionHeader
 import com.nanahoshi.audioplayer.ui.components.StatusBadge
 import com.nanahoshi.audioplayer.ui.components.StatusTone
+import com.nanahoshi.audioplayer.ui.components.rememberLocalNetworkAccess
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -55,6 +56,13 @@ class DownloadViewModel(app: Application) : AndroidViewModel(app) {
 
     fun retryWhisper(id: Long) {
         graph.whisper.retry(id)
+    }
+
+    /** 重试会沿用任务自己的听写地址；局域网地址要先拿到本地网络权限。 */
+    fun retryNeedsLocalNetwork(job: WhisperJobEntity): Boolean = graph.whisper.needsLocalNetwork(job)
+
+    fun reportLocalNetworkDenied() {
+        graph.messages.value = "需要允许访问本地网络，才能连接这台设备"
     }
 
     fun cancelWhisper(id: Long) {
@@ -91,6 +99,7 @@ fun DownloadScreen(
     val jobs by viewModel.jobs.collectAsStateWithLifecycle(emptyList())
     val whisperJobs by viewModel.whisperJobs.collectAsStateWithLifecycle(emptyList())
     val translationJobs by viewModel.translationJobs.collectAsStateWithLifecycle(emptyList())
+    val localNetwork = rememberLocalNetworkAccess { viewModel.reportLocalNetworkDenied() }
     Column(Modifier.fillMaxSize()) {
         AppTopBar(title = "下载", onBack = onBack)
         if (jobs.isEmpty() && whisperJobs.isEmpty() && translationJobs.isEmpty()) {
@@ -120,7 +129,11 @@ fun DownloadScreen(
                     items(whisperJobs, key = { "whisper-${it.id}" }) { job ->
                         WhisperJobRow(
                             job,
-                            onRetry = { viewModel.retryWhisper(job.id) },
+                            onRetry = {
+                                localNetwork.run(viewModel.retryNeedsLocalNetwork(job)) {
+                                    viewModel.retryWhisper(job.id)
+                                }
+                            },
                             onCancel = { viewModel.cancelWhisper(job.id) },
                         )
                     }

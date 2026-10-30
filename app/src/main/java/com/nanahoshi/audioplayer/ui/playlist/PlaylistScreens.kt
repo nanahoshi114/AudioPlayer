@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -16,14 +15,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DragHandle
-import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Button
@@ -68,7 +64,7 @@ fun PlaylistListScreen(
         if (playlists.isEmpty()) {
             EmptyState(
                 title = "还没有播放列表",
-                message = "点右下角新建，再从音频库加入曲目。",
+                message = "点右下角新建。在音频库里多选曲目，再加入播放列表。",
                 modifier = Modifier.fillMaxSize(),
             )
         } else {
@@ -108,13 +104,8 @@ fun PlaylistDetailScreen(
 ) {
     val playlist by viewModel.playlist(playlistId).collectAsStateWithLifecycle(null)
     val rows by viewModel.playlistTracks(playlistId).collectAsStateWithLifecycle(emptyList())
-    val pickerFolders by viewModel.pickerFolders.collectAsStateWithLifecycle(emptyList())
-    val pickerTracks by viewModel.pickerTracks.collectAsStateWithLifecycle(emptyList())
-    val pickerFolder by viewModel.pickerFolder.collectAsStateWithLifecycle(null)
     var renaming by remember { mutableStateOf(false) }
-    var adding by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
-    var selected by remember { mutableStateOf(listOf<Long>()) }
     val listState = rememberLazyListState()
     val reorderState = rememberReorderableLazyListState(listState) { from, to ->
         viewModel.move(playlistId, from.index, to.index)
@@ -152,7 +143,7 @@ fun PlaylistDetailScreen(
             OutlinedButton(onClick = { viewModel.appendToQueue(playlistId) }, modifier = Modifier.weight(1f)) { Text("加到末尾") }
         }
         if (rows.isEmpty()) {
-            EmptyState(title = "这个列表还是空的", modifier = Modifier.fillMaxSize())
+            EmptyState(title = "这个列表还是空的", message = "在音频库里多选曲目，再加入播放列表。", modifier = Modifier.fillMaxSize())
         } else {
             LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                 itemsIndexed(rows, key = { _, row -> row.itemId }) { index, row ->
@@ -168,16 +159,6 @@ fun PlaylistDetailScreen(
             }
         }
     }
-    ExtendedFloatingActionButton(
-        onClick = {
-            selected = emptyList()
-            viewModel.resetPicker()
-            adding = true
-        },
-        icon = { Icon(Icons.Default.Add, contentDescription = null) },
-        text = { Text("加入音频") },
-        modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
-    )
     }
 
     if (renaming) {
@@ -189,62 +170,6 @@ fun PlaylistDetailScreen(
                 viewModel.rename(playlistId, it)
                 renaming = false
             },
-        )
-    }
-    if (adding) {
-        AlertDialog(
-            onDismissRequest = { adding = false },
-            title = { Text("加入音频") },
-            text = {
-                LazyColumn(Modifier.heightIn(max = 420.dp)) {
-                    if (pickerFolder != null) {
-                        item(key = "up") {
-                            ListItem(
-                                headlineContent = { Text(pickerFolder?.name ?: "返回") },
-                                leadingContent = {
-                                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回上一级")
-                                },
-                                modifier = Modifier.clickable { viewModel.upPicker() },
-                            )
-                        }
-                    }
-                    items(pickerFolders, key = { "folder-${it.id}" }) { folder ->
-                        val work = folder.asmrSourceId != null
-                        ListItem(
-                            headlineContent = { Text(folder.name) },
-                            supportingContent = { Text(if (work) "作品" else "文件夹") },
-                            leadingContent = {
-                                if (work) CoverImage(folder.coverUri) else Icon(Icons.Default.Folder, contentDescription = null)
-                            },
-                            modifier = Modifier.clickable { viewModel.openPickerFolder(folder.id) },
-                        )
-                    }
-                    if (pickerFolders.isEmpty() && pickerTracks.isEmpty()) {
-                        item(key = "empty") { Text(if (pickerFolder == null) "音频库是空的" else "这个文件夹是空的") }
-                    }
-                    items(pickerTracks, key = { "track-${it.id}" }) { track ->
-                        val checked = track.id in selected
-                        Row(
-                            Modifier.fillMaxWidth().clickable {
-                                selected = if (checked) selected - track.id else selected + track.id
-                            },
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Checkbox(checked = checked, onCheckedChange = {
-                                selected = if (it) selected + track.id else selected - track.id
-                            })
-                            Text(track.title, modifier = Modifier.padding(start = 8.dp))
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    viewModel.addTracks(playlistId, selected.toList())
-                    adding = false
-                }) { Text("加入") }
-            },
-            dismissButton = { TextButton(onClick = { adding = false }) { Text("取消") } },
         )
     }
 }

@@ -49,6 +49,21 @@ internal fun whisperModelsMatch(stored: String?, requested: String, endpoint: St
     return actual == requested
 }
 
+/**
+ * 比较两条件听写地址是否指向同一个服务。线上接口以前要填到 `/v1`，现在只存主机基址，
+ * 所以按本次请求的模型去掉 `/v1` 再比；本机任务接口拿 `/v1` 区分路由，不能去掉。
+ */
+internal fun sameWhisperEndpoint(a: String?, b: String?, model: String?): Boolean {
+    val left = canonicalWhisperEndpoint(a, model) ?: return false
+    return left == canonicalWhisperEndpoint(b, model)
+}
+
+internal fun canonicalWhisperEndpoint(raw: String?, model: String?): String? {
+    val base = raw?.trim()?.trimEnd('/')?.takeIf { it.isNotEmpty() } ?: return null
+    val route = knownWhisperModel(model) ?: inferredWhisperModel(base)
+    return if (route == WHISPER_MODEL_JOBS) base else base.removeSuffix("/v1")
+}
+
 internal fun whisperHost(base: String?): String? {
     val raw = base?.trim()?.takeIf { it.isNotEmpty() } ?: return null
     return try {

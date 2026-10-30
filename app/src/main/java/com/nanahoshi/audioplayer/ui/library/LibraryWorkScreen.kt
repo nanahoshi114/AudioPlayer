@@ -1,6 +1,7 @@
 package com.nanahoshi.audioplayer.ui.library
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
@@ -21,6 +22,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
@@ -32,6 +34,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -65,6 +68,7 @@ fun LibraryWorkScreen(
     val workFileSource by viewModel.workFileSource.collectAsStateWithLifecycle()
     val workSources by viewModel.workSources.collectAsStateWithLifecycle()
     val busy by viewModel.busy.collectAsStateWithLifecycle()
+    val cachePrompt by viewModel.cachePrompt.collectAsStateWithLifecycle()
     val playlists by viewModel.playlists.collectAsStateWithLifecycle(emptyList())
     val selectedTracks by viewModel.selectedTrackIds.collectAsStateWithLifecycle()
     val selectedFolders by viewModel.selectedFolderIds.collectAsStateWithLifecycle()
@@ -83,6 +87,13 @@ fun LibraryWorkScreen(
     val listState = viewModel.listState(currentId, true)
     LaunchedEffect(currentFolder?.id, currentFolder?.name) {
         trail = libraryTrail(trail, currentFolder)
+    }
+    val context = LocalContext.current
+    val openTree = rememberLauncherForActivityResult(OpenPersistableTree()) { uri ->
+        if (uri != null) {
+            persistRead(context, uri)
+            viewModel.recognizeIntoWork(rootId ?: folderId, uri)
+        }
     }
     fun leaveOrUp() {
         if (selecting) {
@@ -170,6 +181,12 @@ fun LibraryWorkScreen(
                             onClick = { viewModel.cacheFolder(headerFolder.id) },
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                         ) { Text("缓存到本地") }
+                    }
+                    item(key = "recognize") {
+                        OutlinedButton(
+                            onClick = { openTree.launch(null) },
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                        ) { Text("识别本地文件夹") }
                     }
                 }
                 item(key = "files-title") { SectionHeader("文件") }
@@ -278,6 +295,8 @@ fun LibraryWorkScreen(
             }
         }
     }
+
+    CachePromptDialog(cachePrompt, viewModel::answerCache)
 
     if (pickingPlaylist) {
         PlaylistPickDialog(

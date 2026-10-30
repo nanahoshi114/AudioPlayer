@@ -9,7 +9,13 @@ import com.nanahoshi.audioplayer.asmr.AsmrException
 import com.nanahoshi.audioplayer.asmr.AsmrPreview
 import com.nanahoshi.audioplayer.bilibili.BiliPart
 import com.nanahoshi.audioplayer.bilibili.BilibiliException
+import com.nanahoshi.audioplayer.data.CacheCandidate
+import com.nanahoshi.audioplayer.data.DeleteResult
+import com.nanahoshi.audioplayer.data.FormatConflict
 import com.nanahoshi.audioplayer.data.LibrarySort
+import com.nanahoshi.audioplayer.data.LocalAudio
+import com.nanahoshi.audioplayer.data.findFormatConflicts
+import com.nanahoshi.audioplayer.data.idsToDrop
 import com.nanahoshi.audioplayer.data.TrackSource
 import com.nanahoshi.audioplayer.data.WorkFill
 import com.nanahoshi.audioplayer.data.libraryFileSource
@@ -21,6 +27,7 @@ import com.nanahoshi.audioplayer.data.db.TrackEntity
 import com.nanahoshi.audioplayer.graph
 import com.nanahoshi.audioplayer.playback.pickSubtitleName
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -55,6 +62,11 @@ sealed interface LibraryEntry {
         override val name: String get() = file.name
         override val addedAt: Long get() = file.addedAt
     }
+}
+
+sealed interface CachePrompt {
+    data class Source(val folderId: Long) : CachePrompt
+    data class Format(val conflict: FormatConflict) : CachePrompt
 }
 
 data class PendingBiliImport(
@@ -399,6 +411,10 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         graph.messages.value = graph.library.recognizeLocalFolder(folderId, input)
     }
 
+    fun recognizeIntoWork(folderId: Long, tree: Uri) = launch {
+        graph.messages.value = graph.library.recognizeLocalTree(folderId, tree, workFileSource.value)
+    }
+
     fun importRj(input: String) = launch {
         graph.library.importAsmr(input, currentFolderId.value)
         graph.messages.value = "已导入作品"
@@ -423,24 +439,75 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun deleteDownloadedTrack(track: TrackEntity) = launch {
-        val count = graph.downloads.deleteDownloaded(listOf(track))
-        graph.messages.value = if (count == 0) "没有已下载的文件" else "已删除已下载的文件"
+        graph.messages.value = deleteDownloadedNotice(graph.downloads.deleteDownloaded(listOf(track)))
     }
 
     fun deleteDownloadedSelection() = launch {
         val tracks = selectedTracks()
         clearSelection()
-        val count = graph.downloads.deleteDownloaded(tracks)
-        graph.messages.value = if (count == 0) "没有已下载的文件" else "已删除 $count 个已下载文件"
+        graph.messages.value = deleteDownloadedNotice(graph.downloads.deleteDownloaded(tracks))
     }
 
-    fun cacheFolder(folderId: Long) = launch {
+    val cachePrompt = MutableStateFlow<CachePrompt?>(null)
+    private var cacheJob: Job? = null
+    private var cacheAnswer: CompletableDeferred<Any?>? = null
+
+    fun answerCache(answer: Any?) {
+        cacheAnswer?.complete(answer)
+    }
+
+    private suspend fun askCache(prompt: CachePrompt): Any? {
+        val answer = CompletableDeferred<Any?>()
+        cacheAnswer = answer
+        cachePrompt.value = prompt
+        try {
+            return answer.await()
+        } finally {
+            cachePrompt.value = null
+            cacheAnswer = null
+        }
+    }
+
+    fun cacheFolder(folderId: Long) {
+        cacheJob?.cancel()
+        cacheJob = viewModelScope.launch {
+            try {
+                cacheWork(folderId)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                graph.messages.value = error.message ?: "操作失败"
+            }
+        }
+    }
+
+    private suspend fun cacheWork(folderId: Long) {
+        // 已购买（读缓存）且 asmr.one 也有这部作品时，让用户选来源。
+        val sources = graph.library.prepareWorkSources(folderId)
+        val bothKnown = sources != null && (sources.hasPlay || sources.purchased == true) && sources.hasAsmr
+        var chosen: TrackSource? = null
+        if (bothKnown) {
+            chosen = askCache(CachePrompt.Source(folderId)) as? TrackSource ?: return
+            if (chosen == TrackSource.DLSITE && !sources!!.hasPlay) {
+                if (graph.library.ensureWorkSource(folderId, TrackSource.DLSITE) == WorkFill.EMPTY) {
+                    graph.messages.value = "无法读取已购买文件"
+                    return
+                }
+            }
+        }
         val tracks = graph.library.asmrTracksInTree(folderId)
-        // 作品外面没有当前来源，按打开作品时的默认顺序取 Play，其次 asmr.one。
-        val source = workFileSource.value
-            ?.takeIf { current -> tracks.any { it.source == current } }
+        // 没弹窗时：当前来源优先，作品外面按 Play 优先，其次 asmr.one。
+        val source = chosen
+            ?: workFileSource.value?.takeIf { current -> tracks.any { it.source == current } }
             ?: if (tracks.any { it.source == TrackSource.DLSITE }) TrackSource.DLSITE else TrackSource.ASMR
-        val count = graph.downloads.enqueue(tracks.filter { it.source == source })
+        val pending = tracks.filter { it.source == source && !LocalAudio.hasStoredCopy(it.localUri) }
+        var dropped = emptySet<Long>()
+        val conflicts = findFormatConflicts(pending.map { CacheCandidate(it.id, it.folderId, it.title) })
+        for (conflict in conflicts) {
+            val keep = askCache(CachePrompt.Format(conflict)) as? String ?: return
+            dropped = dropped + idsToDrop(conflict, keep)
+        }
+        val count = graph.downloads.enqueue(pending.filter { it.id !in dropped })
         graph.messages.value = if (count == 0) "没有需要下载的音频" else "已加入 $count 个下载"
     }
 
@@ -718,3 +785,10 @@ private fun FolderEntity.matchesRj(digits: String): Boolean {
 
 private fun rjNumber(raw: String): String =
     raw.uppercase().removePrefix("RJ").removePrefix("VJ").filter { it.isDigit() }.trimStart('0').ifEmpty { "0" }
+
+private fun deleteDownloadedNotice(result: DeleteResult): String = when {
+    result.total == 0 -> "没有已下载的文件"
+    result.unlinked == 0 -> if (result.deleted == 1) "已删除已下载的文件" else "已删除 ${result.deleted} 个已下载文件"
+    result.deleted == 0 -> "已取消识别 ${result.unlinked} 首，手机上的原文件没有动"
+    else -> "已删除 ${result.deleted} 个已下载文件，取消识别 ${result.unlinked} 首"
+}

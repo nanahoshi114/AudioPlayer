@@ -127,6 +127,7 @@ fun LibraryScreen(
     val currentFolder by viewModel.currentFolder.collectAsStateWithLifecycle(null)
     val folderId by viewModel.currentFolderId.collectAsStateWithLifecycle()
     val pending by viewModel.pendingBili.collectAsStateWithLifecycle()
+    val cachePrompt by viewModel.cachePrompt.collectAsStateWithLifecycle()
     val selectedTracks by viewModel.selectedTrackIds.collectAsStateWithLifecycle()
     val selectedFolders by viewModel.selectedFolderIds.collectAsStateWithLifecycle()
     val selecting = selectedTracks.isNotEmpty() || selectedFolders.isNotEmpty()
@@ -160,21 +161,27 @@ fun LibraryScreen(
     }
     if (selecting) {
         val selectedCount = selectedTracks.size + selectedFolders.size
+        // 选中了作品时，播放和加入列表的键都收起来，作品要进作品页再操作。
+        val selectsWork = folders.any { it.id in selectedFolders && !it.asmrSourceId.isNullOrBlank() }
         SideEffect {
             topBar?.value = {
                 SelectionTopBar(
                     count = selectedCount,
                     onClose = viewModel::clearSelection,
-                    actions = listOf(
-                        SelectionAction("下一个播放", Icons.Default.SkipNext, viewModel::playNextSelection),
-                        SelectionAction("加到末尾", Icons.AutoMirrored.Filled.PlaylistAdd, viewModel::appendSelection),
-                        SelectionAction("下载", Icons.Default.Download, viewModel::downloadSelection),
-                        SelectionAction("加入播放列表", Icons.AutoMirrored.Filled.QueueMusic, {
-                            if (playlists.isEmpty()) viewModel.note("请先新建播放列表") else pickingPlaylist = true
-                        }),
-                        SelectionAction("删除已下载的文件", Icons.Default.Delete, viewModel::deleteDownloadedSelection, destructive = true),
-                        SelectionAction("移除", Icons.Default.Delete, { confirmDelete = true }, destructive = true),
-                    ),
+                    actions = buildList {
+                        if (!selectsWork) {
+                            add(SelectionAction("下一个播放", Icons.Default.SkipNext, viewModel::playNextSelection))
+                            add(SelectionAction("加到末尾", Icons.AutoMirrored.Filled.PlaylistAdd, viewModel::appendSelection))
+                            add(SelectionAction("下载", Icons.Default.Download, viewModel::downloadSelection))
+                            add(
+                                SelectionAction("加入播放列表", Icons.AutoMirrored.Filled.QueueMusic, {
+                                    if (playlists.isEmpty()) viewModel.note("请先新建播放列表") else pickingPlaylist = true
+                                }),
+                            )
+                        }
+                        add(SelectionAction("删除已下载的文件", Icons.Default.Delete, viewModel::deleteDownloadedSelection, destructive = true))
+                        add(SelectionAction("移除", Icons.Default.Delete, { confirmDelete = true }, destructive = true))
+                    },
                 )
             }
         }
@@ -426,6 +433,8 @@ fun LibraryScreen(
     }
     }
 
+    CachePromptDialog(cachePrompt, viewModel::answerCache)
+
     pendingAsmr?.let { preview ->
         AlertDialog(
             onDismissRequest = viewModel::dismissAsmrPreview,
@@ -621,7 +630,7 @@ fun LibraryScreen(
 private fun rjHint(name: String): String =
     Regex("(?i)(?:RJ|VJ|BJ)\\d+").find(name)?.value?.uppercase().orEmpty()
 
-private fun persistRead(context: Context, uri: Uri) {
+internal fun persistRead(context: Context, uri: Uri) {
     try {
         context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
     } catch (_: SecurityException) {
@@ -634,7 +643,7 @@ private class OpenPersistableDocument : ActivityResultContracts.OpenDocument() {
         super.createIntent(context, input).addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
 }
 
-private class OpenPersistableTree : ActivityResultContracts.OpenDocumentTree() {
+internal class OpenPersistableTree : ActivityResultContracts.OpenDocumentTree() {
     override fun createIntent(context: Context, input: Uri?): Intent =
         super.createIntent(context, input).addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
 }

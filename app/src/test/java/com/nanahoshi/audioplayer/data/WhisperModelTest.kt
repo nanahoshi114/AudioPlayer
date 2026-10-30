@@ -90,6 +90,25 @@ class WhisperModelTest {
     }
 
     @Test
+    fun oldEndpointWithV1MatchesTheSameService() {
+        assertEquals(
+            "https://api.openai.com",
+            canonicalWhisperEndpoint(" https://api.openai.com/v1/ ", WHISPER_MODEL_1),
+        )
+        assertTrue(sameWhisperEndpoint("https://api.openai.com/v1", "https://api.openai.com", WHISPER_MODEL_1))
+        assertTrue(sameWhisperEndpoint("http://192.168.1.20:8000/v1", "http://192.168.1.20:8000", WHISPER_MODEL_LOCAL))
+        assertTrue(sameWhisperEndpoint("http://192.168.1.20:8000/v1/", "http://192.168.1.20:8000", WHISPER_MODEL_QWEN3))
+        assertFalse(sameWhisperEndpoint("https://api.openai.com/v1", "https://api.openai.com.evil/v1", WHISPER_MODEL_1))
+        assertFalse(sameWhisperEndpoint(null, "https://api.openai.com", WHISPER_MODEL_1))
+    }
+
+    @Test
+    fun jobsEndpointKeepsTheV1RouteBoundary() {
+        assertFalse(sameWhisperEndpoint("http://192.168.1.20:8765/v1", "http://192.168.1.20:8765", WHISPER_MODEL_JOBS))
+        assertTrue(sameWhisperEndpoint("http://192.168.1.20:8765/", "http://192.168.1.20:8765", WHISPER_MODEL_JOBS))
+    }
+
+    @Test
     fun qwenHttpOriginDropsTheSocketPath() {
         assertEquals("https://dashscope.aliyuncs.com", qwenHttpOrigin("wss://dashscope.aliyuncs.com/api/v1"))
         assertNull(qwenHttpOrigin("   "))
