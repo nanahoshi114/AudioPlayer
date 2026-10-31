@@ -1779,8 +1779,6 @@ private fun TrialBlock(
 
 class MineViewModel(app: Application) : AndroidViewModel(app) {
     private val graph = app.graph()
-    var loginId by mutableStateOf("")
-    var password by mutableStateOf("")
     var cookie by mutableStateOf("")
     var loggedIn by mutableStateOf(graph.dlsite.hasSession())
         private set
@@ -1788,6 +1786,13 @@ class MineViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var error by mutableStateOf<String?>(null)
         private set
+    var webLoginVisible by mutableStateOf(false)
+        private set
+    var webLoginLoading by mutableStateOf(false)
+        private set
+    var webLoginError by mutableStateOf<String?>(null)
+        private set
+    private var webLoginJob: Job? = null
     var biliReady by mutableStateOf(graph.credentials.hasCookie())
         private set
     var biliCanRefresh by mutableStateOf(graph.credentials.hasBiliRefresh())
@@ -1803,20 +1808,37 @@ class MineViewModel(app: Application) : AndroidViewModel(app) {
     private var qrJob: Job? = null
     private var qrGeneration = 0
 
-    fun login() {
-        viewModelScope.launch {
-            loading = true
-            error = null
+    fun openWebLogin() {
+        webLoginError = null
+        webLoginVisible = true
+    }
+
+    fun dismissWebLogin() {
+        webLoginJob?.cancel()
+        webLoginJob = null
+        webLoginVisible = false
+        webLoginLoading = false
+        webLoginError = null
+    }
+
+    fun completeWebLogin(cookie: String) {
+        if (webLoginLoading) return
+        webLoginJob?.cancel()
+        webLoginJob = viewModelScope.launch {
+            webLoginLoading = true
+            webLoginError = null
             try {
-                graph.dlsite.login(loginId, password)
-                password = ""
+                graph.dlsite.loginWithCookie(cookie, loadPurchases = false)
                 loggedIn = true
+                error = null
+                webLoginVisible = false
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                error = failure.message ?: "登录失败"
+                webLoginError = failure.message ?: "登录失败"
             } finally {
-                loading = false
+                webLoginLoading = false
+                webLoginJob = null
             }
         }
     }
@@ -1841,6 +1863,7 @@ class MineViewModel(app: Application) : AndroidViewModel(app) {
 
     fun logout() {
         graph.dlsite.logout()
+        clearDlsiteWebCookies()
         loggedIn = false
     }
 
@@ -1972,31 +1995,30 @@ fun MineScreen(
             onDismiss = { sessdataLogin = false },
         )
     }
+    if (viewModel.webLoginVisible) {
+        DlsiteWebLoginDialog(
+            loading = viewModel.webLoginLoading,
+            error = viewModel.webLoginError,
+            onComplete = viewModel::completeWebLogin,
+            onDismiss = viewModel::dismissWebLogin,
+        )
+    }
     var cookieOpen by remember { mutableStateOf(false) }
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         item(key = "dlsite") {
             AccountCard(title = "DLsite", loggedIn = viewModel.loggedIn) {
                 if (!viewModel.loggedIn) {
-                    OutlinedTextField(
-                        value = viewModel.loginId,
-                        onValueChange = { viewModel.loginId = it },
-                        label = { Text("账号") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
-                    )
-                    OutlinedTextField(
-                        value = viewModel.password,
-                        onValueChange = { viewModel.password = it },
-                        label = { Text("密码") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                    )
                     Button(
-                        onClick = viewModel::login,
+                        onClick = viewModel::openWebLogin,
                         enabled = !viewModel.loading,
                         modifier = Modifier.padding(top = 12.dp),
-                    ) { Text("登录") }
+                    ) { Text("网页登录") }
+                    Text(
+                        "在应用内打开 DLsite 登录页，登录完成后点右上角「完成」。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
                     TextButton(onClick = { cookieOpen = !cookieOpen }) {
                         Text(if (cookieOpen) "收起 Cookie" else "使用 Cookie")
                     }
@@ -2020,6 +2042,7 @@ fun MineScreen(
                         enabled = !viewModel.loading,
                         modifier = Modifier.padding(top = 12.dp),
                     ) { Text("查看已购买作品") }
+                    TextButton(onClick = viewModel::openWebLogin) { Text("重新登录") }
                     TextButton(onClick = viewModel::logout) { Text("退出") }
                 }
             }

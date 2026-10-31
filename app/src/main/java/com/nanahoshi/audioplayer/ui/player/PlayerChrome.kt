@@ -43,6 +43,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DragHandle
@@ -80,6 +81,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -113,6 +115,7 @@ import com.nanahoshi.audioplayer.ui.theme.Motion
 import com.nanahoshi.audioplayer.ui.theme.SubtitleLarge
 import com.nanahoshi.audioplayer.ui.theme.SubtitleReader
 import com.nanahoshi.audioplayer.ui.theme.pressSpec
+import kotlinx.coroutines.launch
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
 
@@ -233,6 +236,13 @@ fun NowPlayingScreen(
     var sleepDialog by remember { mutableStateOf(false) }
     var queueExpanded by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
+    val queueSheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val queueScope = rememberCoroutineScope()
+    fun closeQueue() {
+        queueScope.launch { queueSheet.hide() }.invokeOnCompletion {
+            if (!queueSheet.isVisible) queueExpanded = false
+        }
+    }
     val listState = rememberLazyListState()
     val reorderState = rememberReorderableLazyListState(listState) { from, to ->
         viewModel.client.move(from.index, to.index)
@@ -275,7 +285,7 @@ fun NowPlayingScreen(
                 TextButton(onClick = {
                     confirmClear = false
                     viewModel.client.clearQueue()
-                    queueExpanded = false
+                    closeQueue()
                 }) { Text("清空") }
             },
             dismissButton = {
@@ -476,14 +486,19 @@ fun NowPlayingScreen(
     if (queueExpanded) {
         ModalBottomSheet(
             onDismissRequest = { queueExpanded = false },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            sheetState = queueSheet,
+            sheetGesturesEnabled = false,
+            dragHandle = null,
         ) {
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                Modifier.fillMaxWidth().padding(horizontal = 8.dp).padding(top = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text("播放队列", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f).padding(start = 16.dp))
                 TextButton(onClick = { confirmClear = true }, enabled = queue.isNotEmpty()) { Text("清空") }
+                IconButton(onClick = { closeQueue() }) {
+                    Icon(Icons.Default.Close, contentDescription = "关闭")
+                }
             }
             if (queue.isEmpty()) {
                 EmptyState(title = "队列是空的", modifier = Modifier.padding(bottom = 24.dp))

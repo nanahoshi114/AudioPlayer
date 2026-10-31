@@ -94,7 +94,7 @@ Referer: https://www.dlsite.com/{站点}/
 
 ### 登录和已购
 
-可以用账号密码登录，也可以粘贴整段 Cookie。两种方式成功后会再打开 Play 的登录页和 `api/authorize`，让 Play 也认这次登录。Cookie 存在加密偏好里，App 不保存密码，也不把 Cookie 写进日志。
+登录在 WebView 里完成，也可以粘贴整段 Cookie。两种方式成功后会再打开 Play 的登录页和 `api/authorize`，让 Play 也认这次登录；WebView 拿到的 Cookie 会先去掉 Cloudflare 项。Cookie 存在加密偏好里，App 不保存密码，也不把 Cookie 写进日志。
 
 登录后不会自动列已购作品。打开「查看已购买作品」时：
 
@@ -335,6 +335,8 @@ GET https://www.dlsite.com/maniax/circle/profile/=/maker_id/{社团编号}.html/
 社团编号形如 `RG` 加数字。客户端打开这页是为了补社团资料，不是为了拿音频。
 
 ## 3. 登录
+
+> 2026-11-01：`login.dlsite.com` 对非浏览器请求返回 Cloudflare 403 challenge。播放器改为在 WebView 里打开这一页，登录完成后读取 Cookie、去掉 Cloudflare 项，再用 Play 接口验证。下面保留账号密码表单的接口记录，但不再是播放器的登录路径。
 
 登录用账号自己的邮箱和密码。客户端写明不支持用社交账号登录。2026-10-08 只打开了登录页，没有提交账号。
 

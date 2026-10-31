@@ -8,15 +8,12 @@ import com.nanahoshi.audioplayer.data.fileExtension
 import com.nanahoshi.audioplayer.data.isAsmrAudio
 import com.nanahoshi.audioplayer.data.previewKind
 import com.nanahoshi.audioplayer.data.toHttps
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
-import okhttp3.Cookie
-import okhttp3.CookieJar
-import okhttp3.FormBody
-import okhttp3.HttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
@@ -91,7 +88,8 @@ class DlsiteClient(private val credentials: CredentialStore) {
     @Volatile
     private var playAccessCookie: String? = null
 
-    fun hasSession(): Boolean = credentials.dlsiteCookie() != null
+    fun hasSession(): Boolean =
+        credentials.dlsiteCookie()?.let { mergeDlsiteCookies(it).isNotBlank() } == true
 
     suspend fun search(
         keyword: String,
@@ -240,57 +238,20 @@ class DlsiteClient(private val credentials: CredentialStore) {
         }
     }
 
-    suspend fun login(loginId: String, password: String) = withContext(Dispatchers.IO) {
-        val id = loginId.trim()
-        if (id.isEmpty() || password.isEmpty()) throw DlsiteException("请输入账号和密码")
-        val jar = HeaderCookieJar()
-        val authed = client.newBuilder().cookieJar(jar).build()
-        val page = authed.newCall(
-            Request.Builder()
-                .url("https://login.dlsite.com/login?user=self")
-                .header("User-Agent", USER_AGENT)
-                .header("Referer", "https://www.dlsite.com/")
-                .build(),
-        ).execute().use { response ->
-            if (!response.isSuccessful) throw DlsiteException("无法打开登录页")
-            response.body?.string().orEmpty()
-        }
-        val token = TOKEN.find(page)?.groupValues?.get(1)
-            ?: TOKEN_ALT.find(page)?.groupValues?.get(1)
-            ?: throw DlsiteException("登录页没有准备好")
-        val form = FormBody.Builder()
-            .add("_token", token)
-            .add("login_id", id)
-            .add("password", password)
-            .build()
-        val posting = authed.newBuilder().followRedirects(false).followSslRedirects(false).build()
-        val loggedIn = posting.newCall(
-            Request.Builder()
-                .url("https://login.dlsite.com/login")
-                .header("User-Agent", USER_AGENT)
-                .header("Referer", "https://login.dlsite.com/login")
-                .post(form)
-                .build(),
-        ).execute().use { response ->
-            val body = response.body?.string().orEmpty()
-            "ログイン中です" in body || response.code in 300..399
-        }
-        if (!loggedIn) throw DlsiteException("账号或密码不正确")
-        authorizePlay(authed)
-        credentials.saveDlsiteCookie(withAdult(jar.header()))
-        owned = null
-    }
-
-    suspend fun loginWithCookie(raw: String) = withContext(Dispatchers.IO) {
-        val cookie = raw.trim()
-        if (cookie.isEmpty() || !cookie.contains("=")) throw DlsiteException("请粘贴 Cookie")
+    suspend fun loginWithCookie(raw: String, loadPurchases: Boolean = true) = withContext(Dispatchers.IO) {
+        val cookie = mergeDlsiteCookies(raw)
+        if (cookie.isBlank() || !cookie.contains("=")) throw DlsiteException("请粘贴 Cookie")
         credentials.saveDlsiteCookie(withAdult(cookie))
         try {
             execute(request("https://play.dlsite.com/login/", PLAY_REFERER, acceptJson = false, authed = true))
             execute(request("https://play.dlsite.com/api/authorize", PLAY_REFERER, acceptJson = true, authed = true))
             owned = null
-            salesIds()
-        } catch (error: DlsiteException) {
+            if (loadPurchases) salesIds()
+        } catch (cancelled: CancellationException) {
+            credentials.clearDlsiteCookie()
+            owned = null
+            throw cancelled
+        } catch (error: Exception) {
             credentials.clearDlsiteCookie()
             owned = null
             throw error
@@ -403,7 +364,11 @@ class DlsiteClient(private val credentials: CredentialStore) {
             }
         }
 
-    fun cookieHeader(): String? = credentials.dlsiteCookie()?.let(::withAdult)
+    fun cookieHeader(): String? {
+        val cookie = credentials.dlsiteCookie() ?: return null
+        val merged = mergeDlsiteCookies(cookie)
+        return if (merged.isBlank()) null else withAdult(merged)
+    }
 
     private fun salesIds(): Set<String> {
         owned?.let { return it }
@@ -537,27 +502,6 @@ class DlsiteClient(private val credentials: CredentialStore) {
         return emptyList()
     }
 
-    private fun authorizePlay(authed: OkHttpClient) {
-        val login = authed.newCall(
-            Request.Builder()
-                .url("https://play.dlsite.com/login/")
-                .header("User-Agent", USER_AGENT)
-                .header("Referer", PLAY_REFERER)
-                .build(),
-        ).execute()
-        login.close()
-        authed.newCall(
-            Request.Builder()
-                .url("https://play.dlsite.com/api/authorize")
-                .header("User-Agent", USER_AGENT)
-                .header("Referer", PLAY_REFERER)
-                .header("Accept", "application/json")
-                .build(),
-        ).execute().use { response ->
-            if (response.code == 401) throw DlsiteException("登录已失效，请重新登录")
-        }
-    }
-
     private fun playGet(url: String): String = get(url, PLAY_REFERER, acceptJson = true, authed = true)
 
     private fun playPost(url: String, json: String): String {
@@ -614,21 +558,6 @@ class DlsiteClient(private val credentials: CredentialStore) {
 
     private data class DownloadToken(val url: String, val cookie: String)
 
-    private class HeaderCookieJar : CookieJar {
-        private val all = mutableListOf<Cookie>()
-
-        override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
-            for (cookie in cookies) {
-                all.removeAll { it.name == cookie.name && it.domain == cookie.domain }
-                all += cookie
-            }
-        }
-
-        override fun loadForRequest(url: HttpUrl): List<Cookie> = all.filter { it.matches(url) }
-
-        fun header(): String = all.distinctBy { it.name }.joinToString("; ") { "${it.name}=${it.value}" }
-    }
-
     companion object {
         const val USER_AGENT =
             "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36"
@@ -637,8 +566,6 @@ class DlsiteClient(private val credentials: CredentialStore) {
         private const val PAGE_SIZE = 20
         private const val TEXT_LIMIT = 512 * 1024
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
-        private val TOKEN = Regex("""name="_token"[^>]*value="([^"]+)"""")
-        private val TOKEN_ALT = Regex("""value="([^"]+)"[^>]*name="_token"""")
         private val PRODUCT_ID = Regex("""data-(?:list_item_)?product_id="([^"]+)"""")
         private val THUMB = Regex("""class="work_thumb[\s\S]*?(?:data-src|src)="([^"]+)"""")
         private val WORK_TYPE = Regex("""\btype_([A-Z]{2,4})\b""")
@@ -689,29 +616,14 @@ class DlsiteClient(private val credentials: CredentialStore) {
         private fun encode(value: String): String =
             URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
 
-        private fun withAdult(cookie: String): String = mergeCookies(cookie, "adultchecked=1")
+        private fun withAdult(cookie: String): String = mergeDlsiteCookies(cookie, "adultchecked=1")
 
         internal fun playAccessCookie(session: String?, extras: List<String>): String {
             var merged = session.orEmpty()
             extras.forEach { part ->
-                if (part.isNotBlank()) merged = mergeCookies(merged, part)
+                if (part.isNotBlank()) merged = mergeDlsiteCookies(merged, part)
             }
             return merged
-        }
-
-        private fun mergeCookies(base: String, extra: String): String {
-            val map = linkedMapOf<String, String>()
-            fun put(header: String) {
-                header.split(';').forEach { part ->
-                    val trimmed = part.trim()
-                    if (!trimmed.contains('=')) return@forEach
-                    val key = trimmed.substringBefore('=').trim()
-                    if (key.isNotEmpty()) map[key] = trimmed.substringAfter('=').trim()
-                }
-            }
-            put(base)
-            put(extra)
-            return map.entries.joinToString("; ") { "${it.key}=${it.value}" }
         }
 
         internal fun parseSearchCards(html: String): List<DlsiteHit> = parseHits(html).works
