@@ -7,6 +7,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.nanahoshi.audioplayer.asmr.AsmrException
 import com.nanahoshi.audioplayer.asmr.AsmrPreview
+import com.nanahoshi.audioplayer.asmr.WorkFacts
 import com.nanahoshi.audioplayer.bilibili.BiliPart
 import com.nanahoshi.audioplayer.bilibili.BilibiliException
 import com.nanahoshi.audioplayer.data.CacheCandidate
@@ -710,30 +711,71 @@ private data class LibraryRequest(
 
 private val RJ_QUERY = Regex("\\d{1,7}")
 
-private fun searchListing(
+internal fun searchListing(
     query: String,
     sort: LibrarySort,
     folders: List<FolderEntity>,
     tracks: List<TrackEntity>,
     files: List<LibraryFileEntity>,
 ): LibraryListing {
-    val rjFolders = if (RJ_QUERY.matches(query)) {
-        folders.filter { it.matchesRj(query) }.sortedForLibrary(sort)
-    } else {
-        emptyList()
+    val byId = folders.associateBy { it.id }
+    val workRoots = LinkedHashMap<Long, FolderEntity>()
+    val directFolders = LinkedHashMap<Long, FolderEntity>()
+
+    fun addFolder(folder: FolderEntity) {
+        // 作品内部的子文件夹和音频都归到作品根，搜索结果里一个作品只出现一次。
+        val root = workRootOf(folder.id, byId)
+        if (root != null) {
+            workRoots[root.id] = root
+        } else {
+            directFolders[folder.id] = folder
+        }
     }
-    val rjIds = rjFolders.map { it.id }.toSet()
-    val namedFolders = folders
-        .filter { it.id !in rjIds && it.name.contains(query, ignoreCase = true) }
-        .sortedForLibrary(sort)
-    val matchedTracks = tracks.filter { it.title.contains(query, ignoreCase = true) }
-    val matchedFiles = files.filter { it.name.contains(query, ignoreCase = true) && !isSubtitleFile(it.name) }
+
+    val digits = RJ_QUERY.matches(query)
+    for (folder in folders) {
+        val rjMatch = digits && folder.matchesRj(query)
+        val nameMatch = folder.name.contains(query, ignoreCase = true)
+        val tagMatch = folder.asmrSourceId != null &&
+            !rjMatch &&
+            !nameMatch &&
+            folder.workTags().any { it.contains(query, ignoreCase = true) }
+        if (rjMatch || nameMatch || tagMatch) addFolder(folder)
+    }
+
+    val directTracks = mutableListOf<TrackEntity>()
+    tracks.forEach { track ->
+        if (!track.title.contains(query, ignoreCase = true)) return@forEach
+        val root = workRootOf(track.folderId, byId)
+        if (root != null) workRoots[root.id] = root else directTracks += track
+    }
+
+    val directFiles = mutableListOf<LibraryFileEntity>()
+    files.forEach { file ->
+        if (isSubtitleFile(file.name) || !file.name.contains(query, ignoreCase = true)) return@forEach
+        val root = workRootOf(file.folderId, byId)
+        if (root != null) workRoots[root.id] = root else directFiles += file
+    }
+
     return LibraryListing(
-        folders = rjFolders + namedFolders,
-        entries = mixedEntries(matchedTracks, matchedFiles, sort, files),
+        folders = (workRoots.values + directFolders.values).sortedForLibrary(sort),
+        entries = mixedEntries(directTracks, directFiles, sort, files),
         browsing = false,
     )
 }
+
+/** 向上找最近的作品根；普通文件夹返回 null。 */
+private fun workRootOf(folderId: Long?, byId: Map<Long, FolderEntity>): FolderEntity? {
+    var current = folderId?.let(byId::get)
+    while (current != null) {
+        if (!current.asmrSourceId.isNullOrBlank()) return current
+        current = current.parentId?.let(byId::get)
+    }
+    return null
+}
+
+private fun FolderEntity.workTags(): List<String> =
+    WorkFacts.fromJson(workMeta)?.tags.orEmpty()
 
 private fun filteredListing(
     filter: LibrarySourceFilter,

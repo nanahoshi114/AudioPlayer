@@ -110,6 +110,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var subtitlesReady by mutableStateOf(false)
         private set
+    var subtitleNotice by mutableStateOf<String?>(null)
+        private set
     var showChinese by mutableStateOf(true)
     var offerBiliCache by mutableStateOf(false)
         private set
@@ -136,6 +138,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 generatedEmpty = false
                 fromGenerated = false
                 subtitlesReady = false
+                subtitleNotice = null
                 showChinese = true
                 reloadSubtitles(queueItemId)
                 offerBiliCache = biliNeedsCache(queueItemId)
@@ -241,8 +244,9 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     fun cacheCurrent() {
         viewModelScope.launch {
             val row = currentRow() ?: return@launch
-            val bvid = row.bvid ?: return@launch
-            val cid = row.cid ?: return@launch
+            // 没入库的队列项把 bvid/cid 放在 workno/fileKey。
+            val bvid = row.bvid ?: row.workno ?: return@launch
+            val cid = row.cid ?: row.fileKey?.toLongOrNull() ?: return@launch
             val added = if (row.trackId != null && row.trackId > 0L) {
                 val track = graph.db.tracks().getById(row.trackId)
                 if (track != null) graph.downloads.enqueue(listOf(track)) else 0
@@ -269,12 +273,15 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun biliNeedsCache(queueItemId: Long): Boolean {
         val row = graph.library.queueSnapshot().find { it.queueItemId == queueItemId } ?: return false
         if (row.source != com.nanahoshi.audioplayer.data.TrackSource.BILIBILI) return false
-        val path = row.localUri
+        // 没入库的队列项没有 trackId，本地路径会放在 remoteUrl，bvid/cid 会放在 workno/fileKey。
+        val path = row.localUri ?: row.remoteUrl
         if (!path.isNullOrBlank() && path.startsWith("/") && java.io.File(path).isFile) return false
+        val bvid = row.bvid ?: row.workno
+        val cid = row.cid ?: row.fileKey?.toLongOrNull()
         return com.nanahoshi.audioplayer.data.readyBiliAudio(
             getApplication<Application>().filesDir,
-            row.bvid,
-            row.cid,
+            bvid,
+            cid,
         ) == null
     }
 
@@ -325,6 +332,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         if (queueItemId <= 0L) {
             fromGenerated = false
             subtitlesReady = true
+            subtitleNotice = null
             return
         }
         val row = graph.library.queueSnapshot().find { it.queueItemId == queueItemId }
@@ -332,6 +340,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             if (client.state.value.queueItemId == queueItemId) {
                 fromGenerated = false
                 subtitlesReady = true
+                subtitleNotice = null
             }
             return
         }
@@ -340,6 +349,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         subtitleCues = loaded.cues
         generatedEmpty = loaded.generatedEmpty
         fromGenerated = loaded.generated
+        subtitleNotice = loaded.notice
         subtitlesReady = true
     }
 

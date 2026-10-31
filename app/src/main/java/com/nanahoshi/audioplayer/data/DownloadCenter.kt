@@ -1,8 +1,10 @@
 package com.nanahoshi.audioplayer.data
 
 import android.content.Context
+import android.util.Log
 import com.nanahoshi.audioplayer.asmr.AsmrClient
 import com.nanahoshi.audioplayer.bilibili.BiliPart
+import com.nanahoshi.audioplayer.bilibili.BiliSubtitle
 import com.nanahoshi.audioplayer.bilibili.BilibiliClient
 import com.nanahoshi.audioplayer.data.db.AppDatabase
 import com.nanahoshi.audioplayer.dlsite.DlsiteClient
@@ -10,18 +12,24 @@ import com.nanahoshi.audioplayer.dlsite.RemotePlayable
 import com.nanahoshi.audioplayer.data.db.DownloadEntity
 import com.nanahoshi.audioplayer.data.db.DownloadStatus
 import com.nanahoshi.audioplayer.data.db.TrackEntity
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
 import java.io.File
 import java.util.concurrent.TimeUnit
+
+private const val TAG = "DownloadCenter"
 
 data class DeleteResult(val deleted: Int, val unlinked: Int) {
     val total: Int get() = deleted + unlinked
@@ -46,6 +54,7 @@ class DownloadCenter(
         .build()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val kick = Channel<Unit>(Channel.CONFLATED)
+    private val subtitleLock = Mutex()
 
     fun observe(): Flow<List<DownloadEntity>> = db.downloads().observe()
 
@@ -101,6 +110,9 @@ class DownloadCenter(
             if (localFileReady(path)) {
                 val file = File(path!!)
                 if (file.exists() && !file.delete()) continue
+                if (track.source == TrackSource.BILIBILI) {
+                    deleteBiliSubtitle(filesDir, track.bvid, track.cid)
+                }
                 db.tracks().clearLocalUri(track.id)
                 db.downloads().deleteFinishedForTrack(track.id)
                 deleted += 1
@@ -478,6 +490,7 @@ class DownloadCenter(
             db.downloads().setLocalPath(job.id, dest.absolutePath)
             attachBili(bvid, cid, dest.absolutePath)
             db.downloads().finish(job.id, dest.length(), dest.length())
+            cacheBiliSubtitleLater(bvid, cid)
             return
         }
         dest.parentFile?.mkdirs()
@@ -524,6 +537,39 @@ class DownloadCenter(
         attachBili(bvid, cid, dest.absolutePath)
         val size = dest.length()
         db.downloads().finish(job.id, size, size)
+        cacheBiliSubtitleLater(bvid, cid)
+    }
+
+    /** 音轨已经缓存好，再慢慢取视频自带字幕；取不到不影响音轨缓存。 */
+    private fun cacheBiliSubtitleLater(bvid: String, cid: Long) {
+        if (bvid.isBlank() || cid <= 0L) return
+        if (readBiliSubtitle(filesDir, bvid, cid) != null) return
+        scope.launch {
+            subtitleLock.withLock {
+                if (readBiliSubtitle(filesDir, bvid, cid) != null) return@withLock
+                // 音轨被删掉后就不用再补字幕了。
+                if (readyBiliAudio(filesDir, bvid, cid) == null) return@withLock
+                try {
+                    withTimeoutOrNull(30_000L) {
+                        when (val result = bilibili.subtitleDocument(bvid, cid)) {
+                            is BiliSubtitle.Ready -> {
+                                if (readyBiliAudio(filesDir, bvid, cid) == null) return@withTimeoutOrNull
+                                val saved = writeBiliSubtitle(filesDir, bvid, cid, result.document)
+                                Log.d(TAG, "bili subtitle cached bvid=$bvid cid=$cid saved=$saved")
+                            }
+                            else -> Log.d(
+                                TAG,
+                                "bili subtitle skipped bvid=$bvid cid=$cid result=${result::class.simpleName}",
+                            )
+                        }
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    Log.w(TAG, "bili subtitle failed: ${error.javaClass.simpleName}")
+                }
+            }
+        }
     }
 
     private suspend fun attachBili(bvid: String, cid: Long, path: String) {

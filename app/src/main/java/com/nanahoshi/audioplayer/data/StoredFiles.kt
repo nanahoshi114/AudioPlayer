@@ -226,6 +226,7 @@ class StoredCatalog(
     private suspend fun deleteAudio(item: StoredItem, file: File) {
         subtitles.discardStored(item.trackId, item.path, item.remoteUrl)
         if (file.isFile && !file.delete()) return
+        deleteBiliSubtitleBeside(file)
         val tracks = buildSet {
             item.trackId?.takeIf { it > 0L }?.let { add(it) }
             db.tracks().findByLocalUri(item.path)?.id?.let { add(it) }

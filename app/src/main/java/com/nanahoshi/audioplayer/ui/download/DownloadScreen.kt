@@ -36,6 +36,7 @@ import com.nanahoshi.audioplayer.dlsite.RemotePlayable
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nanahoshi.audioplayer.data.db.DownloadEntity
 import com.nanahoshi.audioplayer.data.db.DownloadStatus
@@ -43,6 +44,7 @@ import com.nanahoshi.audioplayer.data.db.TranslateMark
 import com.nanahoshi.audioplayer.data.db.TranslationJobEntity
 import com.nanahoshi.audioplayer.data.db.WhisperJobEntity
 import com.nanahoshi.audioplayer.graph
+import kotlinx.coroutines.launch
 
 class DownloadViewModel(app: Application) : AndroidViewModel(app) {
     private val graph = app.graph()
@@ -75,18 +77,31 @@ class DownloadViewModel(app: Application) : AndroidViewModel(app) {
 
     fun play(job: DownloadEntity) {
         val path = job.localPath ?: return
-        graph.player.replaceAndPlayRemote(
-            listOf(
-                RemotePlayable(
-                    title = job.title,
-                    artist = null,
-                    coverUri = null,
-                    remoteUrl = path,
-                    source = TrackSource.LOCAL,
-                    referer = "",
+        viewModelScope.launch {
+            // 已经入库的曲目按曲目播放，队列才带 bvid/cid，缓存过的字幕也能读到。
+            val track = job.trackId.takeIf { it > 0L }?.let { graph.library.track(it) }
+            if (track != null && track.localUri == path) {
+                graph.player.replaceAndPlay(listOf(track))
+                return@launch
+            }
+            // 没入库的 B 站缓存（例如从收藏夹直接缓存）借 workno/fileKey 带上 bvid/cid，
+            // 播放队列里不新增列，字幕也能按这两个字段找回。
+            val bili = job.source == TrackSource.BILIBILI.name
+            graph.player.replaceAndPlayRemote(
+                listOf(
+                    RemotePlayable(
+                        title = job.title,
+                        artist = null,
+                        coverUri = null,
+                        remoteUrl = path,
+                        source = if (bili) TrackSource.BILIBILI else TrackSource.LOCAL,
+                        referer = if (bili) "https://www.bilibili.com/video/${job.workKey.orEmpty()}" else "",
+                        workno = job.workKey.takeIf { bili },
+                        fileKey = job.fileKey.takeIf { bili },
+                    ),
                 ),
-            ),
-        )
+            )
+        }
     }
 }
 

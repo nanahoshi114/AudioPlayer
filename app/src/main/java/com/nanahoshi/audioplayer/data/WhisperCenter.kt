@@ -96,6 +96,8 @@ class WhisperCenter(
         val track = row.trackId?.let { db.tracks().getById(it) }
         materialize(track?.localUri)?.let { return@withContext it }
         materialize(row.localUri)?.let { return@withContext it }
+        // 从下载管理播放的缓存音轨没有 trackId，本地路径放在 remoteUrl。
+        materialize(row.remoteUrl?.takeIf { it.startsWith("/") })?.let { return@withContext it }
         val url = row.remoteUrl
         if (!url.isNullOrBlank()) {
             val done = db.downloads().latestForUrl(url)

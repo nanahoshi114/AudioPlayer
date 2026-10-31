@@ -59,6 +59,8 @@ import com.nanahoshi.audioplayer.data.db.LibraryFileEntity
 import com.nanahoshi.audioplayer.data.db.PlaylistEntity
 import com.nanahoshi.audioplayer.data.db.TrackEntity
 import com.nanahoshi.audioplayer.ui.CoverImage
+import com.nanahoshi.audioplayer.ui.components.BadgeItem
+import com.nanahoshi.audioplayer.ui.components.BadgeLine
 import com.nanahoshi.audioplayer.ui.components.LabelBadge
 import com.nanahoshi.audioplayer.ui.components.SourceBadge
 import com.nanahoshi.audioplayer.ui.formatDuration
@@ -323,17 +325,18 @@ private fun WorkPreviewRow(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(top = 2.dp),
             )
-            Row(
-                Modifier.padding(top = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                if (facts.sourceId.isNotBlank()) {
-                    LabelBadge(facts.sourceId, MaterialTheme.colorScheme.primary)
-                }
-                facts.tags.take(3).forEach { tag ->
-                    LabelBadge(tag, MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
+            BadgeLine(
+                leading = buildList {
+                    if (facts.sourceId.isNotBlank()) {
+                        add(BadgeItem(facts.sourceId, MaterialTheme.colorScheme.primary))
+                    }
+                },
+                tags = facts.tags.take(8).map {
+                    BadgeItem(it, MaterialTheme.colorScheme.onSurfaceVariant)
+                },
+                totalTags = facts.tags.size,
+                modifier = Modifier.padding(top = 6.dp),
+            )
         }
         if (!selecting) {
             Box {

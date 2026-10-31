@@ -4,6 +4,7 @@ import com.nanahoshi.audioplayer.data.CredentialStore
 import com.nanahoshi.audioplayer.data.toHttps
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
@@ -60,6 +61,18 @@ data class FavVideoPage(
     val videos: List<FavVideo>,
     val hasMore: Boolean,
 )
+
+/** B站字幕的取用结果。空列表不等于出错，要区分没字幕、需要登录和读取失败。 */
+sealed interface BiliSubtitle {
+    data class Ready(val document: String) : BiliSubtitle
+    data object NeedsLogin : BiliSubtitle
+    data object Missing : BiliSubtitle
+    data object Failed : BiliSubtitle
+}
+
+/** 字幕列表为空时，判断是不是登录问题：没有 Cookie，或接口没认出登录态（过期/失效时 login_mid 为 0）。 */
+internal fun biliNeedsLogin(hasSession: Boolean, loginMid: Long): Boolean =
+    !hasSession || loginMid == 0L
 
 data class BiliAudio(
     val url: String,
@@ -186,33 +199,64 @@ class BilibiliClient(
         return FavVideoPage(videos, hasMore)
     }
 
-    suspend fun subtitleDocument(bvid: String, cid: Long): String? = try {
-        val root = playerInfo(bvid, cid)
-        if (root.optInt("code") != 0) {
-            Log.w(TAG, "subtitle skipped code=${root.optInt("code")}")
-            null
-        } else {
-            val data = root.optJSONObject("data")
-            val returnedBvid = data?.optString("bvid").orEmpty()
-            val returnedCid = data?.optLong("cid") ?: 0L
-            if ((returnedBvid.isNotBlank() && returnedBvid != bvid) || (returnedCid != 0L && returnedCid != cid)) {
-                Log.w(TAG, "subtitle skipped mismatched bvid=$returnedBvid cid=$returnedCid")
-                null
+    suspend fun subtitleDocument(bvid: String, cid: Long): BiliSubtitle {
+        var last: BiliSubtitle = BiliSubtitle.Failed
+        repeat(2) { attempt ->
+            last = fetchSubtitle(bvid, cid)
+            if (last is BiliSubtitle.Ready || last is BiliSubtitle.NeedsLogin) return last
+            // 限流时字幕列表或正文可能为空，换一次新的播放信息地址再试。
+            if (attempt == 0) delay(SUBTITLE_RETRY_DELAY_MS)
+        }
+        return last
+    }
+
+    private suspend fun fetchSubtitle(bvid: String, cid: Long): BiliSubtitle {
+        return try {
+            val root = playerInfo(bvid, cid)
+            val code = root.optInt("code")
+            if (code != 0) {
+                Log.w(TAG, "subtitle skipped code=$code bvid=$bvid cid=$cid")
+                BiliSubtitle.Failed
             } else {
-                val list = data?.optJSONObject("subtitle")?.optJSONArray("subtitles")
+                val data = root.optJSONObject("data") ?: return BiliSubtitle.Failed
+                val returnedBvid = data.optString("bvid").orEmpty()
+                val returnedCid = data.optLong("cid")
+                if ((returnedBvid.isNotBlank() && returnedBvid != bvid) || (returnedCid != 0L && returnedCid != cid)) {
+                    Log.w(TAG, "subtitle skipped mismatched bvid=$returnedBvid cid=$returnedCid")
+                    return BiliSubtitle.Failed
+                }
+                val list = data.optJSONObject("subtitle")?.optJSONArray("subtitles")
+                val count = list?.length() ?: 0
+                val needLogin = data.optBoolean("need_login_subtitle")
+                val loginMid = data.optLong("login_mid")
+                if (count == 0) {
+                    Log.w(TAG, "subtitle empty bvid=$bvid cid=$cid needLogin=$needLogin loginMid=$loginMid")
+                    return if (biliNeedsLogin(!credentials.cookie().isNullOrBlank(), loginMid)) {
+                        BiliSubtitle.NeedsLogin
+                    } else {
+                        BiliSubtitle.Missing
+                    }
+                }
                 val url = pickSubtitleUrl(list)
                 if (url == null) {
-                    null
-                } else {
-                    get(url, referer = "https://www.bilibili.com/video/$bvid")
+                    Log.w(TAG, "subtitle url missing bvid=$bvid cid=$cid tracks=$count")
+                    return BiliSubtitle.Failed
                 }
+                val document = get(url, referer = "https://www.bilibili.com/video/$bvid")
+                val body = try {
+                    JSONObject(document).optJSONArray("body")?.length() ?: 0
+                } catch (_: Exception) {
+                    0
+                }
+                Log.d(TAG, "subtitle loaded bvid=$bvid cid=$cid tracks=$count body=$body")
+                if (body == 0) BiliSubtitle.Failed else BiliSubtitle.Ready(document)
             }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            Log.w(TAG, "subtitle skipped: ${error.javaClass.simpleName}")
+            BiliSubtitle.Failed
         }
-    } catch (error: CancellationException) {
-        throw error
-    } catch (error: Exception) {
-        Log.w(TAG, "subtitle skipped: ${error.javaClass.simpleName}")
-        null
     }
 
     private suspend fun playerInfo(bvid: String, cid: Long): JSONObject {
@@ -598,6 +642,7 @@ class BilibiliClient(
         private const val KEY_TTL_MS = 30 * 60 * 1000L
         private const val DEFAULT_TICKET_TTL_SEC = 259200L
         private const val PAGE_SIZE = 20
+        private const val SUBTITLE_RETRY_DELAY_MS = 500L
         private const val QR_WAITING = 86101
         private const val QR_SCANNED = 86090
         private const val QR_EXPIRED = 86038

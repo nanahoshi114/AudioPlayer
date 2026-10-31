@@ -353,29 +353,40 @@ fun NowPlayingScreen(
                                     )
                                     TextButton(onClick = { discardPrompt = true }) { Text("删除字幕") }
                                 }
-                                viewModel.subtitlesReady -> Row(
-                                    Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                ) {
-                                    FilledTonalButton(
-                                        onClick = {
-                                            localNetwork.run(viewModel.generateNeedsLocalNetwork()) {
-                                                viewModel.requestGenerate(translate = true)
-                                            }
-                                        },
-                                        modifier = Modifier.weight(1f),
-                                    ) {
-                                        Text("生成字幕和翻译", textAlign = TextAlign.Center)
+                                viewModel.subtitlesReady -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    viewModel.subtitleNotice?.let { notice ->
+                                        Text(
+                                            notice,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            textAlign = TextAlign.Center,
+                                            modifier = Modifier.padding(bottom = 8.dp),
+                                        )
                                     }
-                                    OutlinedButton(
-                                        onClick = {
-                                            localNetwork.run(viewModel.generateNeedsLocalNetwork()) {
-                                                viewModel.requestGenerate(translate = false)
-                                            }
-                                        },
-                                        modifier = Modifier.weight(1f),
+                                    Row(
+                                        Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                                     ) {
-                                        Text("生成字幕", textAlign = TextAlign.Center)
+                                        FilledTonalButton(
+                                            onClick = {
+                                                localNetwork.run(viewModel.generateNeedsLocalNetwork()) {
+                                                    viewModel.requestGenerate(translate = true)
+                                                }
+                                            },
+                                            modifier = Modifier.weight(1f),
+                                        ) {
+                                            Text("生成字幕和翻译", textAlign = TextAlign.Center)
+                                        }
+                                        OutlinedButton(
+                                            onClick = {
+                                                localNetwork.run(viewModel.generateNeedsLocalNetwork()) {
+                                                    viewModel.requestGenerate(translate = false)
+                                                }
+                                            },
+                                            modifier = Modifier.weight(1f),
+                                        ) {
+                                            Text("生成字幕", textAlign = TextAlign.Center)
+                                        }
                                     }
                                 }
                             }

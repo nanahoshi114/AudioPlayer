@@ -4,10 +4,13 @@ import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
 import com.nanahoshi.audioplayer.asmr.AsmrClient
+import com.nanahoshi.audioplayer.bilibili.BiliSubtitle
 import com.nanahoshi.audioplayer.bilibili.BilibiliClient
 import com.nanahoshi.audioplayer.data.LocalAudio
 import com.nanahoshi.audioplayer.data.db.AppDatabase
 import com.nanahoshi.audioplayer.data.TrackSource
+import com.nanahoshi.audioplayer.data.readBiliSubtitle
+import com.nanahoshi.audioplayer.data.writeBiliSubtitle
 import com.nanahoshi.audioplayer.data.db.DownloadStatus
 import com.nanahoshi.audioplayer.data.db.QueuedTrack
 import com.nanahoshi.audioplayer.data.db.TrackEntity
@@ -24,6 +27,13 @@ data class LoadedSubtitles(
     val cues: List<SubtitleCue>,
     val generatedEmpty: Boolean,
     val generated: Boolean,
+    val notice: String? = null,
+)
+
+/** 一首曲目的字幕，以及取不到时需要告诉用户的原因。 */
+data class TrackSubtitles(
+    val cues: List<SubtitleCue>,
+    val notice: String? = null,
 )
 
 class SubtitleSource(
@@ -36,9 +46,11 @@ class SubtitleSource(
         try {
             val generated = generated(row)
             if (generated != null) return@withContext LoadedSubtitles(generated, generated.isEmpty(), true)
-            val trackId = row.trackId ?: return@withContext LoadedSubtitles(emptyList(), false, false)
-            val track = db.tracks().getById(trackId) ?: return@withContext LoadedSubtitles(emptyList(), false, false)
-            LoadedSubtitles(withOverlay(row, cuesFor(track)), false, false)
+            val track = row.trackId?.takeIf { it > 0L }?.let { db.tracks().getById(it) }
+                ?: bilibiliRowTrack(row)
+                ?: return@withContext LoadedSubtitles(emptyList(), false, false)
+            val trackSubtitles = cuesFor(track)
+            LoadedSubtitles(withOverlay(row, trackSubtitles.cues), false, false, trackSubtitles.notice)
         } catch (error: CancellationException) {
             throw error
         } catch (_: Exception) {
@@ -55,18 +67,18 @@ class SubtitleSource(
         removeGenerated(storedRow(trackId, localPath, remoteUrl))
     }
 
-    suspend fun cuesFor(track: TrackEntity): List<SubtitleCue> = withContext(Dispatchers.IO) {
+    suspend fun cuesFor(track: TrackEntity): TrackSubtitles = withContext(Dispatchers.IO) {
         try {
             when (track.source) {
                 TrackSource.BILIBILI -> bilibiliCues(track)
-                TrackSource.ASMR -> parseSubtitleDocument(asmrText(track).orEmpty())
-                TrackSource.DLSITE -> emptyList()
-                TrackSource.LOCAL -> parseSubtitleDocument(localText(track).orEmpty())
+                TrackSource.ASMR -> TrackSubtitles(parseSubtitleDocument(asmrText(track).orEmpty()))
+                TrackSource.DLSITE -> TrackSubtitles(emptyList())
+                TrackSource.LOCAL -> TrackSubtitles(parseSubtitleDocument(localText(track).orEmpty()))
             }
         } catch (error: CancellationException) {
             throw error
         } catch (_: Exception) {
-            emptyList()
+            TrackSubtitles(emptyList())
         }
     }
 
@@ -197,11 +209,27 @@ class SubtitleSource(
     private fun isFile(path: String?): Boolean =
         !path.isNullOrBlank() && path.startsWith("/") && File(path).isFile
 
-    private suspend fun bilibiliCues(track: TrackEntity): List<SubtitleCue> {
-        val bvid = track.bvid ?: return emptyList()
-        val cid = track.cid ?: return emptyList()
-        val document = bilibili.subtitleDocument(bvid, cid) ?: return emptyList()
-        return parseSubtitleDocument(document)
+    private suspend fun bilibiliCues(track: TrackEntity): TrackSubtitles {
+        val bvid = track.bvid ?: return TrackSubtitles(emptyList())
+        val cid = track.cid ?: return TrackSubtitles(emptyList())
+        // 缓存音轨时顺带存下的字幕，播放时优先读本地，不再依赖登录和网络。
+        readBiliSubtitle(context.filesDir, bvid, cid)?.let { document ->
+            val cues = parseSubtitleDocument(document)
+            if (cues.isNotEmpty()) return TrackSubtitles(cues)
+        }
+        return when (val result = bilibili.subtitleDocument(bvid, cid)) {
+            is BiliSubtitle.Ready -> {
+                val cues = parseSubtitleDocument(result.document)
+                // 音轨已经在本地时，顺手把这次拿到的字幕补存下来。
+                if (cues.isNotEmpty() && LocalAudio.hasStoredCopy(track.localUri)) {
+                    writeBiliSubtitle(context.filesDir, bvid, cid, result.document)
+                }
+                TrackSubtitles(cues)
+            }
+            BiliSubtitle.NeedsLogin -> TrackSubtitles(emptyList(), "B站字幕需要登录后显示，可在「我的」重新登录")
+            BiliSubtitle.Failed -> TrackSubtitles(emptyList(), "B站字幕读取失败，可稍后再试")
+            BiliSubtitle.Missing -> TrackSubtitles(emptyList())
+        }
     }
 
     private suspend fun asmrText(track: TrackEntity): String? {
@@ -306,3 +334,34 @@ class SubtitleSource(
         const val MAX_BYTES = 512 * 1024
     }
 }
+
+/**
+ * 没入库的 B 站队列项（例如从收藏夹直接缓存的音轨）没有 trackId，
+ * 用队列里保存的 workno / fileKey 当 bvid / cid，读同一份缓存字幕。
+ */
+internal fun bilibiliRowTrack(row: QueuedTrack): TrackEntity? {
+    if (row.source != TrackSource.BILIBILI) return null
+    val bvid = (row.bvid?.takeIf { BVID_ROW.matches(it) }
+        ?: row.workno?.trim()?.takeIf { BVID_ROW.matches(it) })
+        ?: return null
+    val cid = row.cid?.takeIf { it > 0L }
+        ?: row.fileKey?.toLongOrNull()?.takeIf { it > 0L }
+        ?: return null
+    val local = row.localUri?.takeIf { it.startsWith("/") }
+        ?: row.remoteUrl?.takeIf { it.startsWith("/") }
+    return TrackEntity(
+        id = 0L,
+        source = TrackSource.BILIBILI,
+        title = row.title,
+        artist = row.artist,
+        durationMs = row.durationMs,
+        coverUri = row.coverUri,
+        localUri = local,
+        bvid = bvid,
+        cid = cid,
+        page = row.page,
+        addedAt = 0L,
+    )
+}
+
+private val BVID_ROW = Regex("BV[0-9A-Za-z]{10}")

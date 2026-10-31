@@ -137,6 +137,8 @@ import com.nanahoshi.audioplayer.ui.CollapsingTop
 import com.nanahoshi.audioplayer.ui.CoverImage
 import com.nanahoshi.audioplayer.ui.EmptyHint
 import com.nanahoshi.audioplayer.ui.components.AppTopBar
+import com.nanahoshi.audioplayer.ui.components.BadgeItem
+import com.nanahoshi.audioplayer.ui.components.BadgeLine
 import com.nanahoshi.audioplayer.ui.components.EmptyState
 import com.nanahoshi.audioplayer.ui.components.LabelBadge
 import com.nanahoshi.audioplayer.ui.components.LoadingState
@@ -145,7 +147,6 @@ import com.nanahoshi.audioplayer.ui.components.WorkHeader
 import com.nanahoshi.audioplayer.ui.components.SkeletonWorkList
 import com.nanahoshi.audioplayer.ui.formatDuration
 import com.nanahoshi.audioplayer.ui.theme.LocalReduceMotion
-import com.nanahoshi.audioplayer.ui.theme.LocalSourceColors
 import com.nanahoshi.audioplayer.ui.theme.Motion
 import com.nanahoshi.audioplayer.ui.library.LibraryEntry
 import com.nanahoshi.audioplayer.ui.library.mixedEntries
@@ -1073,7 +1074,6 @@ fun OnlineSearchScreen(
 @Composable
 private fun OnlineResultCard(item: OnlineHit, onClick: () -> Unit) {
     val facts = item.facts()
-    val sources = LocalSourceColors.current
     Surface(
         onClick = onClick,
         enabled = item.sourceId.isNotBlank(),
@@ -1098,16 +1098,21 @@ private fun OnlineResultCard(item: OnlineHit, onClick: () -> Unit) {
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(top = 2.dp),
                 )
-                Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    if (item.fromAsmr) {
-                        LabelBadge("asmr.one", sources.asmr)
-                    } else {
-                        LabelBadge("DLsite", sources.dlsite)
-                    }
-                    if (item.asmrMissing) {
-                        LabelBadge("asmr.one未收录", MaterialTheme.colorScheme.error)
-                    }
-                }
+                BadgeLine(
+                    leading = buildList {
+                        if (facts.sourceId.isNotBlank()) {
+                            add(BadgeItem(facts.sourceId, MaterialTheme.colorScheme.primary))
+                        }
+                        if (item.asmrMissing) {
+                            add(BadgeItem("asmr.one未收录", MaterialTheme.colorScheme.error))
+                        }
+                    },
+                    tags = facts.tags.take(8).map {
+                        BadgeItem(it, MaterialTheme.colorScheme.onSurfaceVariant)
+                    },
+                    totalTags = facts.tags.size,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
             }
         }
     }
