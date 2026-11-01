@@ -6,9 +6,9 @@ Android 已接入 YouTube 搜索、播放列表、独立音轨在线播放和下
 
 ### 入口与调用链
 
-「在线搜索」增加「作品 / YouTube」切换，YouTube 支持关键词、11 位视频编号、视频链接、`search_query` 链接和播放列表。输入解析与桌面端优先级相同：搜索参数优先；常见观看链接同时含视频和列表时优先单个视频；其它列表输入读列表。
+「在线搜索」提供「作品 / B站 / YouTube」切换，YouTube 支持关键词、11 位视频编号、视频链接、`search_query` 链接和播放列表。输入解析与桌面端优先级相同：搜索参数优先；常见观看链接同时含视频和列表时优先单个视频；其它列表输入读列表。
 
-- [`YouTubeClient.kt`](../app/src/main/java/com/nanahoshi/audioplayer/youtube/YouTubeClient.kt)：`lookup`、`playlist`、`accountStatus`、`resolveAudio`、`downloadAudio`。
+- [`YouTubeClient.kt`](../app/src/main/java/com/nanahoshi/audioplayer/youtube/YouTubeClient.kt)：`lookup`、`playlist`、`accountStatus`、`videoInfo`、`resolveAudio`、`downloadAudio`。
 - [`YouTubeModels.kt`](../app/src/main/java/com/nanahoshi/audioplayer/youtube/YouTubeModels.kt)：输入识别、返回字段、分页节点解析、音轨选择、地址参数和授权头处理。
 - [`YouTubeSolver.kt`](../app/src/main/java/com/nanahoshi/audioplayer/youtube/YouTubeSolver.kt)：系统 WebView 适配。
 - [`YouTubeScreens.kt`](../app/src/main/java/com/nanahoshi/audioplayer/ui/youtube/YouTubeScreens.kt)：搜索、列表、播放、保存、多选下载和登录卡片。
@@ -16,6 +16,14 @@ Android 已接入 YouTube 搜索、播放列表、独立音轨在线播放和下
 搜索最多 3 页、40 条，列表最多 5 页、200 条；按视频编号去重，返回标题、作者、封面和毫秒时长。搜索读取 `videoRenderer`，列表读取 `playlistVideoRenderer`，下一页读取 `continuationItemRenderer` 内的 token。列表后续页失败时返回已有结果并提示不完整，搜索失败则报错。搜索和列表请求可取消，账号切换会取消旧请求并清空原结果。
 
 「我的」里的「喜欢的视频」「稍后观看」使用 `LL` / `WL`，请求 `browseId=VLLL` / `VLWL`，没有另一套私有列表接口。登录方式是粘贴整段 Cookie，保存在现有加密偏好中，不使用 Google OAuth 或 WebView 网页登录，不自动续期。保存先落盘再请求首页确认状态，确认失败仍保留已保存内容。匿名首页配置不带 Cookie，带登录的接口使用与桌面端相同的 `SAPISIDHASH` 规则。
+
+### 剪贴板视频导入
+
+应用进入前台取得窗口焦点后，识别剪贴板中的 YouTube 单个视频地址，显示「是否要导入：」、标题和封面，确认后调用 `saveYouTube` 保存在线曲目。支持观看页、youtu.be、shorts、embed 和 live 形式的视频地址，校验真实域名和 11 位视频编号；不把裸 11 位文字或仅列表链接当成自动导入对象。
+
+`videoInfo(id)` 只调用官方 `GET https://www.youtube.com/oembed?url={稳定观看页}&format=json`，读取 `title`、`author_name` 和 `thumbnail_url`，不带 Cookie／Authorization，不解析媒体或执行签名脚本。封面只接受 ytimg.com 的 HTTPS 地址，其余退回固定视频封面。该接口不返回时长，尚未保存的剪贴板视频入库时 durationMs 为 0，播放仍在打开时按视频编号正常解析。已保存的视频直接复用库内标题和封面并标明已在库。
+
+2026-11-01 主机匿名只读探测 `jNQXAC9IVRw` 的 oEmbed 返回 HTTP 200，包含标题和封面；这是元信息验证，不代表该网络已通过媒体播放验证。剪贴板只保留候选身份与复制时间的摘要用于去重，不保存分享原文或临时媒体地址。
 
 ### 播放地址与脚本
 
@@ -34,22 +42,35 @@ Android 已接入 YouTube 搜索、播放列表、独立音轨在线播放和下
 
 ### 入库、队列和本地文件
 
-`TrackSource.YOUTUBE` 标识来源；`tracks.youtubeVideoId` 是可空、唯一索引的视频编号列，数据库从 12 升到 13，只新增这一列和索引，不设置默认值。作品编号、B 站 bvid/cid 不复用于 YouTube 曲目。
+`TrackSource.YOUTUBE` 标识来源；`tracks.youtubeVideoId` 是可空、唯一索引的视频编号列，数据库从 12 升到 13，只新增这一列和索引，不设置默认值。作品编号、B 站 bvid/cid 不复用于 YouTube 曲目。当前数据库为 14，后续 13→14 仅新增 B 站下载入库元数据列，不改变上述 YouTube 结构。
 
 - 点查找结果只播放这一首，不自动入库。已保存曲目使用 trackId；未入库内容走远端队列，`workno` 携带视频编号，`fileKey=audio`，`remoteUrl` 是稳定观看页地址而非临时媒体地址。
 - 队列与播放列表查询包含视频编号，冷启动恢复时重新取媒体地址；已下载时优先读取本地文件。在线播放使用现有 Media3 服务，支持后台播放和 Range 跳转。
 - 「保存到音频库」只保存在线曲目；「下载」完成后自动入库，已存在的同一编号复用原曲目，不移动原文件夹。按视频编号去重下载任务。
 - 下载文件为 `filesDir/youtube/{videoId}/audio.m4a`。每次运行先写独立的 `.part`，取消关闭 HTTP 并删除本次暂存，重试不会被旧请求的清理误删。启动时清理上次中断留下的 YouTube `.part`。
-- 正常写完、大小与声明长度一致（长度未知时除外）、至少 1024 字节且存在 MP4 `ftyp` 文件头后，才改成正式文件并在事务中关联曲目与完成记录。没有额外转码。
+- 每个 HTTP 请求最多读取 1 MiB，校验 `Content-Range` 的起点、终点和总大小，再按顺序拼接。断流、读取超时或 TLS 读取错误最多重试当前段两次，已经完成的段保留；不能把不匹配的段拼进文件。服务器忽略范围时只接受不超过 1 MiB 的小文件，不退回整部大文件读取。
+- 正常写完、大小与声明长度一致（长度未知的小文件除外）、至少 1024 字节且存在 MP4 `ftyp` 文件头后，才改成正式文件并在事务中关联曲目与完成记录。没有额外转码。每段保留 30 秒读取超时和 10 分钟请求上限，整部下载不再共用一个请求的十分钟期限。
 - 下载页支持 YouTube 排队/进行中任务中止及失败重试。中止只作用于这次任务；已经保存的在线曲目保留。
 - 下载管理以音频标题加 `.m4a` 显示文件，带大小，支持播放、导出、删除。删除音频会清掉本地路径、完成下载记录及对应生成字幕，在线曲目保留，不影响进行中的听写。
 - 不读取 YouTube 原生字幕；可先下载音轨再用现有听写、翻译和润色流程。临时缓存清理仍只处理 `cacheDir`。
 
+### 传输故障诊断
+
+媒体连接失败或响应读取失败时，`YouTubeTransfer` 日志记录阶段（`media_connect` / `media_read`）、异常类型链、HTTP 状态、已读与总字节数、耗时。不记录异常原文、完整堆栈、网址或请求头，避免泄漏签名媒体地址与登录信息。对用户仍保留原有失败文案，日志本身不包含请求参数或异常原文。
+
+### 2026-11-01 真机网络调查
+
+经用户同意，通过 adb 在 Realme RMX5010 上调试。`GvSm3Q8qnDo` 在手机当前代理下的匿名 VISIONOS 请求状态为 `OK`，返回 4 个独立 MP4 音轨。选择格式 140、总大小 117,270,266 字节，以相同手机应用 UID、相同代理和同一媒体地址做小流量对照：开放范围 `bytes=0-` 在 8 秒收到 65,536 字节（约 8 KB/s），不带范围的请求在 8 秒收到 98,304 字节（约 12 KB/s）；限定 `bytes=0-1048575` 两次都完整收到 1 MiB，分别约 1.00 秒和 0.90 秒。完整签名媒体地址和凭证未输出。
+
+这证实该环境下大范围请求被显著限速，修复采用上面的 1 MiB 分段读取。调查期间还捕获到系统 `SSLProtocolException` / `BAD_DECRYPT`，但未能将早期异常与最终失败逐条对应；不能把它直接记为已确认的下载根因。接口要求登录、未返回独立音轨属于更早的解析阶段，和这次已开始传输的限速分别处理。
+
+分段修复包覆盖安装后，同一视频的下载任务完整收到 117,270,266 字节，状态变为 `DONE`；正式音频文件大小一致、MP4 `ftyp` 文件头有效，原曲目被复用，库内仍只有一个相同视频编号。点击完成任务后播放器进入 `PLAYING`，播放进度持续推进。
+
 ### 验证记录与限制
 
-2026-11-01 Kotlin 编译及 109 项单元测试通过，离线签名/`n` 包装脚本样例通过；主机 SQLite 核对了 12→13 升级后的列结构和旧行保留。Android WebView、Room 迁移与下载完成入库的设备测试已补充并编译通过，尚未运行，需要在设备上执行后才能确认平台行为。
+2026-11-01 分段修复后的 Kotlin 编译、Debug APK 构建及 113 项定向单元测试通过，其中 18 项为 YouTube 测试；新增覆盖分段拼接、保留完成段并重试中断段、拒绝偏移错误、脱敏诊断和异常原因保留。此前离线签名/`n` 包装脚本样例通过；主机 SQLite 核对了 12→13 升级后的列结构和旧行保留。Android WebView、Room 迁移与下载完成入库的设备测试已补充并编译通过，自动化设备测试尚未执行；上述真机下载和播放为通过 adb 操作的实际验收。
 
-同日主机侧匿名搜索 `me at the zoo` 返回 14 条视频；对公开视频 `jNQXAC9IVRw` 的播放解析被要求登录或验证，没有取得可用媒体地址，因此没有完成实际媒体下载验证。这个结果不应记录为“下载成功”。本次未安装到真机，系统 WebView 的真实执行、在线播放拖动进度、后台播放和离线播放仍需设备验收。
+早期主机侧匿名搜索 `me at the zoo` 返回 14 条视频；对公开视频 `jNQXAC9IVRw` 的播放解析被要求登录或验证，没有取得可用媒体地址，这次主机尝试不能记录为“下载成功”。后续真机验证结果见上节，说明不同网络出口的接口状态和传输表现会有差异。系统 WebView 的真实执行、在线播放拖动进度、后台播放和断网播放尚未逐项验收，不能由一个样例下载成功推断全部视频可用。
 
 ## 桌面端的调用方式（2026-11-01 源码核对）
 

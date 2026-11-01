@@ -7,6 +7,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -22,7 +23,10 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
+@Serializable
 data class BiliPart(
     val bvid: String,
     val cid: Long,
@@ -32,6 +36,8 @@ data class BiliPart(
     val durationMs: Long,
     val coverUrl: String,
 )
+
+data class BiliVideoDetails(val video: BiliVideoHit, val parts: List<BiliPart>)
 
 class BilibiliException(val code: Int, message: String) : Exception(message)
 
@@ -103,6 +109,49 @@ class BilibiliClient(
     @Volatile private var mixinKey: String? = null
     @Volatile private var mixinFetchedAt: Long = 0
     private val sessionRefreshLock = Any()
+    private val searchApi = BiliSearchApi { path, params, referer, refresh ->
+        val signed = WbiSigner.sign(params, mixin(refresh))
+        val url = "https://api.bilibili.com$path".toHttpUrl().newBuilder().apply {
+            signed.forEach { (key, value) -> addQueryParameter(key, value) }
+        }.build()
+        browseGet(url.toString(), referer)
+    }
+
+    suspend fun searchVideos(keyword: String, page: Int = 1) = searchApi.videos(keyword, page)
+    suspend fun searchUploaders(keyword: String, page: Int = 1) = searchApi.uploaders(keyword, page)
+    suspend fun uploaderVideos(mid: Long, page: Int = 1) = searchApi.uploads(mid, page)
+
+    /** 浏览请求可以随查询取消；不把服务端正文或带参数的网址放进异常。 */
+    private suspend fun browseGet(url: String, referer: String): String = withContext(Dispatchers.IO) {
+        prepareIdentity()
+        val request = Request.Builder().url(url).header("User-Agent", USER_AGENT)
+            .header("Referer", referer).header("Origin", originOf(referer))
+            .header("Accept", "application/json, text/plain, */*")
+            .apply { credentials.cookieHeader().takeIf { it.isNotBlank() }?.let { header("Cookie", it) } }.build()
+        suspendCancellableCoroutine { continuation ->
+            val call = http.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : okhttp3.Callback {
+                override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                    if (continuation.isActive) continuation.resumeWithException(BilibiliException(0, "连不上B站，请检查网络后重试"))
+                }
+                override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                    try {
+                        val raw = response.use {
+                            if (!it.isSuccessful) throw BilibiliException(it.code, biliSearchError(it.code))
+                            val body = it.body?.string().orEmpty()
+                            if (body.trimStart().startsWith('<')) throw BilibiliException(-412, biliSearchError(-412))
+                            body
+                        }
+                        if (continuation.isActive) continuation.resume(raw)
+                    } catch (error: Exception) {
+                        if (continuation.isActive) continuation.resumeWithException(
+                            if (error is BilibiliException) error else BilibiliException(0, "B站读取失败，请重试"))
+                    }
+                }
+            })
+        }
+    }
 
     suspend fun requestQrLogin(): QrLogin = withContext(Dispatchers.IO) {
         prepareIdentity()
@@ -335,19 +384,21 @@ class BilibiliClient(
         return mid
     }
 
-    suspend fun lookup(input: String): List<BiliPart> {
+    suspend fun lookup(input: String): List<BiliPart> = videoDetails(input).parts
+
+    suspend fun videoDetails(input: String): BiliVideoDetails {
         val bvid = BV_REGEX.find(input)?.value
             ?: throw BilibiliException(0, "请输入正确的 BV 号")
-        val body = get("https://api.bilibili.com/x/web-interface/view?bvid=$bvid")
+        val body = browseGet("https://api.bilibili.com/x/web-interface/view?bvid=$bvid", "https://www.bilibili.com/video/$bvid")
         val response = json.decodeFromString<ApiResponse<ViewData>>(body)
         val data = response.data
         if (response.code != 0 || data == null) {
-            throw BilibiliException(response.code, response.message.ifBlank { "找不到这个视频" })
+            throw BilibiliException(response.code, if (response.code != 0) biliSearchError(response.code) else "没有读到这个视频的信息")
         }
         val pages = data.pages.ifEmpty {
             listOf(PageInfo(cid = data.cid, page = 1, part = "", duration = data.duration))
         }
-        return pages.map { page ->
+        val parts = pages.map { page ->
             val title = if (pages.size > 1 && page.part.isNotBlank()) {
                 "${data.title} - ${page.part}"
             } else {
@@ -363,6 +414,8 @@ class BilibiliClient(
                 coverUrl = data.pic.toHttps(),
             )
         }
+        return BiliVideoDetails(BiliVideoHit(data.bvid.ifBlank { bvid }, data.title, data.owner.name,
+            data.pic.toHttps(), data.duration * 1000), parts)
     }
 
     fun resolveAudioBlocking(bvid: String, cid: Long): BiliAudio =

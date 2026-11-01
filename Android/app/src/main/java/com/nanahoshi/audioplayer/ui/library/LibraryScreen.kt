@@ -114,6 +114,7 @@ import com.nanahoshi.audioplayer.ui.formatDuration
 fun LibraryScreen(
     onOpenPreview: (Long) -> Unit,
     onOpenLibraryWork: (Long) -> Unit,
+    onImportOnline: () -> Unit,
     viewModel: LibraryViewModel = viewModel(),
 ) {
     val listing by viewModel.listing.collectAsStateWithLifecycle(LibraryListing(emptyList(), emptyList()))
@@ -126,17 +127,12 @@ fun LibraryScreen(
     val playlists by viewModel.playlists.collectAsStateWithLifecycle(emptyList())
     val currentFolder by viewModel.currentFolder.collectAsStateWithLifecycle(null)
     val folderId by viewModel.currentFolderId.collectAsStateWithLifecycle()
-    val pending by viewModel.pendingBili.collectAsStateWithLifecycle()
     val cachePrompt by viewModel.cachePrompt.collectAsStateWithLifecycle()
     val selectedTracks by viewModel.selectedTrackIds.collectAsStateWithLifecycle()
     val selectedFolders by viewModel.selectedFolderIds.collectAsStateWithLifecycle()
     val selecting = selectedTracks.isNotEmpty() || selectedFolders.isNotEmpty()
     val context = LocalContext.current
     var menuOpen by remember { mutableStateOf(false) }
-    var bvDialog by remember { mutableStateOf(false) }
-    var bvText by remember { mutableStateOf("") }
-    var rjDialog by remember { mutableStateOf(false) }
-    var rjText by remember { mutableStateOf("") }
     var pickingPlaylist by remember { mutableStateOf(false) }
     var pendingTree by remember { mutableStateOf<Uri?>(null) }
     var namingFolder by remember { mutableStateOf(false) }
@@ -414,20 +410,8 @@ fun LibraryScreen(
                     },
                 )
                 DropdownMenuItem(
-                    text = { Text("输入BV号导入") },
-                    onClick = {
-                        menuOpen = false
-                        bvText = ""
-                        bvDialog = true
-                    },
-                )
-                DropdownMenuItem(
-                    text = { Text("输入 RJ 号导入") },
-                    onClick = {
-                        menuOpen = false
-                        rjText = ""
-                        rjDialog = true
-                    },
+                    text = { Text("导入在线音频") },
+                    onClick = { menuOpen = false; onImportOnline() },
                 )
             }
         }
@@ -481,29 +465,6 @@ fun LibraryScreen(
         )
     }
 
-    if (rjDialog) {
-        AlertDialog(
-            onDismissRequest = { rjDialog = false },
-            title = { Text("导入 asmr.one 作品") },
-            text = {
-                OutlinedTextField(
-                    value = rjText,
-                    onValueChange = { rjText = it },
-                    label = { Text("RJ 号") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    rjDialog = false
-                    viewModel.importRj(rjText)
-                }) { Text("确定") }
-            },
-            dismissButton = { TextButton(onClick = { rjDialog = false }) { Text("取消") } },
-        )
-    }
-
     if (pickingPlaylist) {
         PlaylistPickDialog(
             playlists = playlists,
@@ -512,29 +473,6 @@ fun LibraryScreen(
                 viewModel.addSelectionToPlaylist(id)
             },
             onDismiss = { pickingPlaylist = false },
-        )
-    }
-
-    if (bvDialog) {
-        AlertDialog(
-            onDismissRequest = { bvDialog = false },
-            title = { Text("导入 B 站视频") },
-            text = {
-                OutlinedTextField(
-                    value = bvText,
-                    onValueChange = { bvText = it },
-                    label = { Text("BV 号或视频链接") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    bvDialog = false
-                    viewModel.lookupBvid(bvText, play = false)
-                }) { Text("确定") }
-            },
-            dismissButton = { TextButton(onClick = { bvDialog = false }) { Text("取消") } },
         )
     }
 
@@ -601,32 +539,7 @@ fun LibraryScreen(
             onDismiss = { confirmFolderDelete = null },
         )
     }
-
-    pending?.let { current ->
-        AlertDialog(
-            onDismissRequest = viewModel::dismissBili,
-            title = { Text("选择要导入的分段") },
-            text = {
-                LazyColumn {
-                    items(current.parts.size) { index ->
-                        val part = current.parts[index]
-                        Row(
-                            Modifier.fillMaxWidth().clickable { viewModel.togglePart(index) },
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Checkbox(checked = index in current.selected, onCheckedChange = { viewModel.togglePart(index) })
-                            Text(part.title, modifier = Modifier.padding(start = 8.dp))
-                        }
-                    }
-                }
-            },
-            confirmButton = { TextButton(onClick = viewModel::confirmBili) { Text("确定") } },
-            dismissButton = { TextButton(onClick = viewModel::dismissBili) { Text("取消") } },
-        )
-    }
 }
-
-
 
 private fun rjHint(name: String): String =
     Regex("(?i)(?:RJ|VJ|BJ)\\d+").find(name)?.value?.uppercase().orEmpty()

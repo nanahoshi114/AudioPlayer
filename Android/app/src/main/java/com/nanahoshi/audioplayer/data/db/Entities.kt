@@ -135,6 +135,7 @@ data class DownloadEntity(
     val workKey: String? = null,
     val localPath: String? = null,
     val fileKey: String? = null,
+    val biliImportPart: String? = null,
 )
 
 @Entity(tableName = "playlists")

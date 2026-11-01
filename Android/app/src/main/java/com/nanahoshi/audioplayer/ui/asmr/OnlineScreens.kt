@@ -1100,12 +1100,16 @@ fun OnlineSearchScreen(onOpenWork: (String) -> Unit) {
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilterChip(selected = source == "works", onClick = { source = "works" }, label = { Text("作品") })
+            FilterChip(selected = source == "bilibili", onClick = { source = "bilibili" }, label = { Text("B站") })
             FilterChip(selected = source == "youtube", onClick = { source = "youtube" }, label = { Text("YouTube") })
         }
         Box(Modifier.weight(1f)) {
             holder.SaveableStateProvider(source) {
-                if (source == "works") WorkSearchScreen(onOpenWork)
-                else com.nanahoshi.audioplayer.ui.youtube.YouTubeBrowser()
+                when (source) {
+                    "bilibili" -> com.nanahoshi.audioplayer.ui.bilibili.BiliBrowser()
+                    "youtube" -> com.nanahoshi.audioplayer.ui.youtube.YouTubeBrowser()
+                    else -> WorkSearchScreen(onOpenWork)
+                }
             }
         }
     }

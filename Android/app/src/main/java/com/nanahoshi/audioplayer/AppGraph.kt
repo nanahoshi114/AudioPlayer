@@ -39,6 +39,9 @@ class AppGraph(app: Application) {
     val bilibili = BilibiliClient(credentials)
     val youtube = YouTubeClient(
         { credentials.youtubeCookie() }, WebViewYouTubeSolver(app),
+        diagnostics = { event ->
+            android.util.Log.w("YouTubeTransfer", "stage=${event.stage} error=${event.errorTypes} http=${event.responseCode} bytes=${event.bytesRead}/${event.bytesTotal} elapsedMs=${event.elapsedMs}")
+        },
     )
     val asmr = AsmrClient()
     val dlsite = DlsiteClient(credentials)

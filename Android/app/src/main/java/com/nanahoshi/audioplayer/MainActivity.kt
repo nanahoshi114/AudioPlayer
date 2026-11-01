@@ -13,6 +13,7 @@ import androidx.compose.runtime.DisposableEffect
 import com.nanahoshi.audioplayer.data.AccentMode
 import com.nanahoshi.audioplayer.data.ThemeMode
 import com.nanahoshi.audioplayer.ui.settings.AppearanceScreen
+import com.nanahoshi.audioplayer.ui.settings.AboutScreen
 import com.nanahoshi.audioplayer.ui.theme.ThemeAccent
 import com.nanahoshi.audioplayer.ui.theme.presetAccent
 import com.nanahoshi.audioplayer.ui.theme.rememberCoverAccent
@@ -72,6 +73,8 @@ import com.nanahoshi.audioplayer.ui.components.LocalTopBarOverride
 import com.nanahoshi.audioplayer.ui.theme.LocalReduceMotion
 import com.nanahoshi.audioplayer.ui.theme.Motion
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ViewModelProvider
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
 import androidx.navigation.navArgument
@@ -98,8 +101,34 @@ import com.nanahoshi.audioplayer.ui.settings.CacheScreen
 import com.nanahoshi.audioplayer.ui.settings.ModelSettingsScreen
 import com.nanahoshi.audioplayer.ui.settings.SettingsScreen
 import com.nanahoshi.audioplayer.ui.theme.AudioPlayerTheme
+import com.nanahoshi.audioplayer.ui.importing.ClipboardImportDialog
+import com.nanahoshi.audioplayer.ui.importing.ClipboardImportViewModel
 
 class MainActivity : ComponentActivity() {
+    private val clipboardImport by lazy { ViewModelProvider(this)[ClipboardImportViewModel::class.java] }
+    private var clipboardCheckedThisEntry = false
+
+    override fun onStart() {
+        super.onStart()
+        clipboardCheckedThisEntry = false
+    }
+
+    override fun onResume() {
+        super.onResume()
+        window.decorView.post { inspectClipboardWhenReady() }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) inspectClipboardWhenReady()
+    }
+
+    private fun inspectClipboardWhenReady() {
+        if (clipboardCheckedThisEntry || !hasWindowFocus() || !lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) return
+        clipboardCheckedThisEntry = true
+        clipboardImport.inspectClipboard()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -135,7 +164,7 @@ class MainActivity : ComponentActivity() {
                 onDispose { }
             }
             AudioPlayerTheme(darkTheme = dark, accent = accent) {
-                PlayerApp()
+                PlayerApp(clipboardImport)
             }
         }
     }
@@ -155,6 +184,7 @@ private object Routes {
     const val ModelSettings = "settings/models"
     const val CacheSettings = "settings/cache"
     const val Appearance = "settings/appearance"
+    const val About = "settings/about"
     const val Purchases = "purchases"
     const val NowPlaying = "now"
     const val Downloads = "downloads"
@@ -170,7 +200,7 @@ private object Routes {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun PlayerApp() {
+private fun PlayerApp(clipboardImport: ClipboardImportViewModel) {
     val navController = rememberNavController()
     val backStack by navController.currentBackStackEntryAsState()
     val route = backStack?.destination?.route
@@ -234,6 +264,11 @@ private fun PlayerApp() {
                 }) { Text("确定") }
             },
         )
+    }
+    if (!sleepFinished) clipboardImport.controller.state?.let { state ->
+        val controller = clipboardImport.controller
+        ClipboardImportDialog(state, controller::dismiss, controller::confirm, controller::load,
+            controller::togglePart, controller::toggleAllParts)
     }
     SharedTransitionLayout {
     val shared = this
@@ -409,6 +444,13 @@ private fun PlayerApp() {
                 LibraryScreen(
                     onOpenPreview = { fileId -> navController.navigate(Routes.preview(fileId)) },
                     onOpenLibraryWork = { id -> navController.navigate(Routes.libraryWork(id)) },
+                    onImportOnline = {
+                        navController.navigate(Routes.Online) {
+                            popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                            launchSingleTop = true
+                            restoreState = true
+                        }
+                    },
                 )
             }
             composable(
@@ -458,6 +500,7 @@ private fun PlayerApp() {
                     onOpenModels = { navController.navigate(Routes.ModelSettings) },
                     onOpenCache = { navController.navigate(Routes.CacheSettings) },
                     onOpenAppearance = { navController.navigate(Routes.Appearance) },
+                    onOpenAbout = { navController.navigate(Routes.About) },
                 )
             }
             composable(Routes.Playlist) { entry ->
@@ -492,6 +535,9 @@ private fun PlayerApp() {
             }
             composable(Routes.Appearance) {
                 AppearanceScreen(onBack = { navController.popBackStack() })
+            }
+            composable(Routes.About) {
+                AboutScreen(onBack = { navController.popBackStack() })
             }
             composable(Routes.CacheSettings) {
                 CacheScreen(onBack = { navController.popBackStack() })

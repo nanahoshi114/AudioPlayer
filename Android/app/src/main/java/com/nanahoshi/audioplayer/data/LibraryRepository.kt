@@ -10,6 +10,7 @@ import com.nanahoshi.audioplayer.asmr.AsmrNode
 import com.nanahoshi.audioplayer.asmr.AsmrWork
 import com.nanahoshi.audioplayer.asmr.WorkFacts
 import com.nanahoshi.audioplayer.bilibili.BiliPart
+import com.nanahoshi.audioplayer.bilibili.biliImportPart
 import com.nanahoshi.audioplayer.dlsite.DlsiteClient
 import com.nanahoshi.audioplayer.dlsite.PlayEntry
 import com.nanahoshi.audioplayer.dlsite.RemotePlayable
@@ -513,7 +514,7 @@ class LibraryRepository(
 
     /** Returns the work's root folder. Inserts it under the library root when it is not there yet. */
     suspend fun ensureAsmrWork(work: AsmrWork): Long = withContext(Dispatchers.IO) {
-        db.folders().findBySourceId(work.sourceId)?.id ?: insertAsmrWork(work, null)
+        db.withTransaction { db.folders().findBySourceId(work.sourceId)?.id ?: insertAsmrWork(work, null) }
     }
 
     private suspend fun insertAsmrWork(work: AsmrWork, parentId: Long?): Long {
@@ -554,7 +555,23 @@ class LibraryRepository(
     }
 
     suspend fun importParts(parts: List<BiliPart>, folderId: Long? = null): List<TrackEntity> = withContext(Dispatchers.IO) {
-        parts.map { upsertBili(it, folderId) }
+        db.withTransaction { parts.map { upsertBili(it, folderId) } }
+    }
+
+    /** 入库意图必须读最新任务，搜索页可能在旧缓存任务运行中补上它。 */
+    internal suspend fun completeBiliDownload(jobId: Long, bvid: String, cid: Long, path: String) = db.withTransaction {
+        val job = db.downloads().get(jobId) ?: error("下载任务已经移除")
+        check(job.status == com.nanahoshi.audioplayer.data.db.DownloadStatus.RUNNING) { "下载任务已经结束，请重试" }
+        val size = java.io.File(path).length()
+        check(size > 0) { "音轨文件不存在，请重试" }
+        val track = job.biliImportPart?.let { upsertBili(biliImportPart(it, bvid, cid), null) }
+            ?: db.tracks().findByBvid(bvid, cid)
+        if (track != null) {
+            db.tracks().updateLocalUri(track.id, path)
+            db.downloads().attachTrack(jobId, track.id)
+        }
+        db.downloads().setLocalPath(jobId, path)
+        db.downloads().finish(jobId, size, size)
     }
 
     suspend fun deleteTrack(id: Long) = withContext(Dispatchers.IO) {

@@ -25,7 +25,7 @@ Kotlin 2.2.10，AGP 9.4.1，compileSdk / targetSdk 37，minSdk 24，Java 11。�
 ## 文档
 
 - `Android/README.md`：给用户看的功能说明。
-- `Android/docs/asmr-one-api.md`、`Android/docs/dlsite-api.md`、`Android/docs/whisper-api.md`：接口和播放器的调用方式。
+- `Android/docs/bilibili-api.md`、`Android/docs/asmr-one-api.md`、`Android/docs/dlsite-api.md`、`Android/docs/whisper-api.md`：接口和播放器的调用方式。
 - `Android/docs/youtube-api.md`：Android / DesktopDemo 的 YouTube 调用方式、验证限制，以及 2026-10-27 的只读调查。
 
 ## 代码地图
@@ -39,19 +39,19 @@ Kotlin 2.2.10，AGP 9.4.1，compileSdk / targetSdk 37，minSdk 24，Java 11。�
 | `ui/playlist` | 播放列表 |
 | `ui/player` | 正在播放、底部小条、字幕按钮 |
 | `ui/asmr` | 在线搜索、作品详情、我的、已购买列表 |
-| `ui/settings` | 设置、外观、听写和翻译、清理缓存 |
+| `ui/settings` | 设置、外观、听写和翻译、清理缓存、关于与检查更新 |
 | `ui/theme` | 配色、主题色生成、封面取色、动效参数 |
 | `ui/download` | 进行中的下载、听写、翻译；已落盘文件的下载管理 |
 | `playback` | 播放服务、在线音频、字幕读取 |
-| `bilibili` | 播放地址、收藏夹、字幕、扫码登录 |
+| `bilibili`、`ui/bilibili` | 视频和 UP 主搜索、投稿、分 P 操作、播放地址、收藏夹、字幕、扫码登录 |
 | `youtube`、`ui/youtube` | 搜索、列表、独立音轨播放下载、签名脚本与 Cookie |
 | `asmr` | asmr.one 作品、搜索、音轨地址 |
 | `dlsite` | 商店、商品页、登录、已购 Play、试听 |
 | `data` | 库、下载、已落盘文件、凭证、听写、翻译 |
-| `data/db` | Room，当前第 13 版 |
+| `data/db` | Room，当前第 14 版 |
 | `AppGraph.kt` | 在 `Application.onCreate` 里组装。顺序是 db、credentials、bilibili、youtube、asmr、dlsite、librarySort、appearance、cache、library、downloads、subtitles、translator、senseVoice、whisper、player |
 
-底栏五页：音频库、播放列表、在线搜索、我的、设置。作品页和作品详情打开时底栏和播放条留着，顶部标题栏隐藏。已购买、收藏夹、正在播放、下载、下载管理、听写和翻译、清理缓存、文件预览是单独一页，顶栏和底栏都隐藏。
+底栏五页：音频库、播放列表、在线搜索、我的、设置。作品页和作品详情打开时底栏和播放条留着，顶部标题栏隐藏。已购买、收藏夹、正在播放、下载、下载管理、听写和翻译、清理缓存、关于、文件预览是单独一页，顶栏和底栏都隐藏。
 
 ## 不要改坏
 
@@ -89,11 +89,27 @@ Kotlin 2.2.10，AGP 9.4.1，compileSdk / targetSdk 37，minSdk 24，Java 11。�
 
 ## YouTube
 
-- 在线搜索切换「作品 / YouTube」；「我的」粘贴 Cookie、读取 LL/WL，不做网页登录和自动续期。账号变化取消旧列表请求并清空结果。
+- 在线搜索切换「作品 / B站 / YouTube」；「我的」粘贴 Cookie、读取 LL/WL，不做网页登录和自动续期。账号变化取消旧列表请求并清空结果。
 - `TrackSource.YOUTUBE`，视频编号存 `tracks.youtubeVideoId`（可空唯一索引，12→13 无 DEFAULT）；未入库队列用 `workno` 存视频编号、`fileKey=audio`、`remoteUrl` 存稳定观看页地址。临时媒体地址不落库。
-- 下载只选独立 `audio/mp4`，不取带视频兜底、WebM/Opus。完成后在事务中自动入库并关联下载记录，同视频复用原曲目。音轨在 `filesDir/youtube/{videoId}/audio.m4a`，下载中止清本次 `.part`，不能删重试的暂存。
-- 签名组件复用桌面端 cjs，在隐藏 WebView 内适配输入输出；必须隔离 `globalThis.location`，禁止联网、文件访问和 Java 桥，不触碰 DLsite 的全局 Cookie。媒体 CDN 不带用户登录 Cookie。没有 PO Token，2026-11-01 匿名公开样例要求登录/验证，实际下载和设备行为尚未确认。
+- 下载只选独立 `audio/mp4`，不取带视频兜底、WebM/Opus。完成后在事务中自动入库并关联下载记录，同视频复用原曲目。音轨在 `filesDir/youtube/{videoId}/audio.m4a`，每个 HTTP 请求最多 1 MiB，校验 Content-Range 后拼接；断流最多重试当前段两次，保留完成的段。不要退回大文件 `Range: bytes=0-` 的整段读取：真机当前代理下约 8–12 KB/s，1 MiB 分段约 1 MB/s。下载中止清本次 `.part`，不能删重试的暂存。
+- 签名组件复用桌面端 cjs，在隐藏 WebView 内适配输入输出；必须隔离 `globalThis.location`，禁止联网、文件访问和 Java 桥，不触碰 DLsite 的全局 Cookie。媒体 CDN 不带用户登录 Cookie。没有 PO Token；2026-11-01 主机匿名样例要求登录/验证，但真机当前代理下 `GvSm3Q8qnDo` 匿名解析成功，分段修复后完整下载 117,270,266 字节并播放。不能以单一网络结果推断所有视频。
 - 队列、播放列表、下载管理、删除已下载文件和生成字幕都要保留 YouTube 视频身份。删除缓存只去本地副本和生成字幕，保留在线曲目；不请求 YouTube 原生字幕。
+
+## 剪贴板导入
+
+- `MainActivity` 每次进入前台只在 RESUMED 且窗口有焦点后读一次剪贴板，不在后台或焦点弹窗反复读取。`ClipboardImportViewModel` 属于 Activity，旋转时保留预览和进行中的导入。
+- 仅识别 BV、RJ、YouTube 单个视频链接／分享文字；明确视频链接优先于分享标题里的编号。只解析文本和 http(s) URI，不用 `coerceToText` 打开 content URI，不执行剪贴板 Intent，不写原文或异常原文到日志。
+- `ClipboardImportController` 先预览标题封面，确认后才入库根目录，不自动播放或下载。B 站多 P 默认全选可取消；RJ 沿用 asmr.one，YouTube 用 `videoInfo`（官方 oEmbed，不解析媒体／执行脚本）。取消和新候选通过代号隔离旧响应；导入中不允许重复确认或替换条目。
+- SharedPreferences `clipboard_import` 只记候选身份 + 系统复制时间的 SHA-256 摘要，处理同一份内容后不重复提示。复制时间 API 26 起可用；更旧系统仅按身份去重。不要清空用户剪贴板。数据库仍为 14。
+- 2026-11-01：138 项定向单测、Debug 和设备测试 APK 构建通过。剪贴板 ClipData 与确认弹窗设备用例已补充，但未运行、未安装手机；系统实际剪贴板读取和进入前台时序仍需真机验收。
+
+## B 站搜索和导入
+
+- 音频库「导入在线音频」只切换到在线搜索，恢复来源与页面状态，不携带当前文件夹；在线保存统一放根目录。不要恢复已移除的 BV/RJ 输入弹窗。
+- B 站有「视频 / UP主」搜索；数字在视频模式是关键词、在 UP 主模式是 UID。BV／主页链接优先识别。分页失败保留已读内容和页码，中止后不得自动续读；旧请求不能覆盖新查询。
+- 点视频不入库；多 P 播放单选，保存／下载多选，批量操作汇总后确认。未入库播放用远端队列，`workno=bvid`、`fileKey=cid`、稳定观看链接，MediaItem 转成 B 站 DASH 音轨，不直接播放观看页。
+- 搜索下载调用 `enqueueBili(parts, autoImport = true)`；默认 false，收藏夹缓存不变。`downloads.biliImportPart` 保存可空的分 P 入库元数据，13→14 不设 DEFAULT；正在运行的旧缓存任务可追加该意图，完成时必须重新读取。成功才在事务内复用／保存曲目并关联下载，失败不新增曲目，已有曲目不改文件夹。
+- [Android/docs/bilibili-api.md](Android/docs/bilibili-api.md) 记录接口、分页及验证限制。投稿接口主机匿名探测曾返回 HTTP 412，不能显示成“没有投稿”。
 
 ## B 站登录
 
@@ -101,11 +117,18 @@ Kotlin 2.2.10，AGP 9.4.1，compileSdk / targetSdk 37，minSdk 24，Java 11。�
 
 文字框在「SESSDATA登录」弹窗里，没点保存之前不参与请求。已经扫码登录又改了文字再保存，必须先让用户确认。`bili_ticket` 和 buvid 会单独更新，它们不是登录身份。
 
+## 关于和检查更新
+
+- 「设置 → 关于」从 PackageManager 读取实际安装包版本名和构建号，不在界面写死版本，也不为显示版本而改构建版本。
+- `AppUpdateClient` 用独立匿名 OkHttp 请求固定仓库的 `/releases/latest`，只读 JSON；要求正式版且已有 uploaded APK。版本按数字段比较（v 前缀、缺省零、预发布和构建标识），未知版本不猜测，保留发布页入口。本地版本更高不能提示降级。
+- 只在用户点击时检查，不自动检查、下载或安装。外部浏览器打开固定仓库的全部发布列表或对应 tag 页；不得用附件下载 URL、WebView、DownloadCenter 或安装权限代替。`browser.invalid` 仅用于 PackageManager 选浏览器，不请求该地址。接口与发布约定见 `Android/docs/update-api.md`。
+- 2026-11-02：真实 latest API 返回 v1.1，本地工程 1.2 应显示本机版本更高；146 项定向单测和两份 Debug APK 构建通过。About 设备用例只编译，浏览器往返与真实设备交互尚未运行，本轮未安装手机。
+
 ## 数据库
 
-`AppDatabase` 版本是 13，`exportSchema = false`。新安装用实体建表，升级只走 `MIGRATION_*`。Room 不能降级：手机上已是 13 时，装回更低版本会在启动时崩溃。
+`AppDatabase` 版本是 14，`exportSchema = false`。新安装用实体建表，升级只走 `MIGRATION_*`。Room 不能降级：手机上已是 14 时，装回更低版本会在启动时崩溃。
 
-新增可空列：`ALTER TABLE ... ADD COLUMN` 不要写 `DEFAULT`，Kotlin 字段不要加 `@ColumnInfo(defaultValue)`。`endpoint`、`translatedAt`、`translateStatus`、`skipTranslate`、`model` 都是这样。`skipTranslate` 为 `null` 或 `false` 时，旧任务听写完成后仍翻译。`model` 为空的旧任务仍按地址匹配，不强迫重跑。
+新增可空列：`ALTER TABLE ... ADD COLUMN` 不要写 `DEFAULT`，Kotlin 字段不要加 `@ColumnInfo(defaultValue)`。`endpoint`、`translatedAt`、`translateStatus`、`skipTranslate`、`model`、`biliImportPart` 都是这样。`skipTranslate` 为 `null` 或 `false` 时，旧任务听写完成后仍翻译。`model` 为空的旧任务仍按地址匹配，不强迫重跑。
 
 ## 提交
 

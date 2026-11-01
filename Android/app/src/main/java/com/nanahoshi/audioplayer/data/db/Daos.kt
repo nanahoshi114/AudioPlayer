@@ -180,6 +180,9 @@ interface LibraryFileDao {
 
 @Dao
 interface DownloadDao {
+    @Query("UPDATE downloads SET biliImportPart = :metadata WHERE id = :id AND source = 'BILIBILI'")
+    suspend fun setBiliImportPart(id: Long, metadata: String)
+
     @Query("UPDATE downloads SET status = 'RUNNING' WHERE id = :id AND status = 'QUEUED'")
     suspend fun startQueued(id: Long): Int
 

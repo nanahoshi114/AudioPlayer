@@ -6,12 +6,15 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -43,6 +46,7 @@ fun SettingsScreen(
     onOpenModels: () -> Unit,
     onOpenCache: () -> Unit,
     onOpenAppearance: () -> Unit,
+    onOpenAbout: () -> Unit,
     viewModel: SettingsViewModel = viewModel(),
 ) {
     val limit by viewModel.limitBytes.collectAsStateWithLifecycle()
@@ -101,6 +105,16 @@ fun SettingsScreen(
                 )
             }
         }
+        item(key = "app-title") {
+            Text("应用", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 20.dp, bottom = 8.dp))
+        }
+        item(key = "about") {
+            SettingsGroup {
+                SettingsRow(icon = { Icon(Icons.Default.Info, contentDescription = null) }, title = "关于",
+                    summary = "版本 ${viewModel.version.display} · 检查更新", onClick = onOpenAbout)
+            }
+            Spacer(Modifier.height(24.dp))
+        }
     }
 }
 
@@ -135,6 +149,7 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     private val graph = app.graph()
     val limitBytes = graph.cache.limitBytes
     val appearance = graph.appearance.state
+    internal val version = installedAppVersion(app)
     var usedBytes by mutableStateOf<Long?>(null)
         private set
 

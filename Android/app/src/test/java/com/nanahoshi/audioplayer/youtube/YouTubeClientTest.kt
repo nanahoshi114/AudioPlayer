@@ -24,6 +24,28 @@ class YouTubeClientTest {
     private val homepage = """{"VISITOR_DATA":"fixture-visitor","INNERTUBE_CLIENT_VERSION":"fixture-version","STS":1,"jsUrl":"/s/player/fixture/base.js"}"""
     private fun videoRenderer(video: String = id, renderer: String = "videoRenderer") = """{"$renderer":{"videoId":"$video","title":{"runs":[{"text":"Example"}]},"ownerText":{"simpleText":"Author"},"lengthText":{"simpleText":"1:02"}}}"""
 
+    @Test fun videoInfoReadsOnlyPublicMetadataWithoutMediaResolutionOrCredentials() = runBlocking {
+        var requests = 0
+        val client = YouTubeClient({ "SAPISID=fixture" }, solver) { request ->
+            requests++
+            assertEquals("www.youtube.com", request.url.host);assertEquals("/oembed", request.url.encodedPath)
+            assertEquals("https://www.youtube.com/watch?v=$id", request.url.queryParameter("url"))
+            assertNull(request.header("Cookie"));assertNull(request.header("Authorization"))
+            """{"title":"Example","author_name":"Author","thumbnail_url":"https://i.ytimg.com/vi/$id/hqdefault.jpg"}"""
+        }
+        val video = client.videoInfo(id)
+        assertEquals("Example", video.title);assertEquals("Author", video.author);assertEquals(id, video.id)
+        assertEquals(1, requests);assertEquals(0L, video.durationMs)
+    }
+    @Test fun videoInfoRejectsMissingTitleAndUsesTrustedCoverFallback() = runBlocking {
+        val client = YouTubeClient({ null }, solver) { """{"title":"Example","thumbnail_url":"https://untrusted.example/cover"}""" }
+        assertEquals("https://i.ytimg.com/vi/$id/hqdefault.jpg", client.videoInfo(id).coverUrl)
+        for (raw in listOf("{}", "null", """{"title":" "}""")) {
+            try { YouTubeClient({ null }, solver) { raw }.videoInfo(id);fail() } catch (_: YouTubeException) { }
+        }
+        try { YouTubeClient({ null }, solver) { error("must not request") }.videoInfo("invalid");fail() } catch (_: YouTubeException) { }
+    }
+
     @Test fun inputRoutingMatchesDesktopPriority() {
         for (input in listOf(id, "https://youtu.be/$id", "https://www.youtube.com/shorts/$id", "https://www.youtube.com/live/$id", "https://www.youtube.com/embed/$id")) {
             assertEquals(YouTubeInput(InputKind.VIDEO, id), inputOf(input))
@@ -198,6 +220,133 @@ class YouTubeClientTest {
             YouTubeClient({ null }, solver, media).copyAudio(YouTubeAudio(YouTubeVideo(id, "fixture"),
                 "https://example.googlevideo.com/v", "audio/mp4", emptyMap()), file) { done, _ -> written = done }
             assertArrayEquals(bytes, file.readBytes()); assertEquals(2048L, written)
+        } finally { file.delete() }
+    }
+
+    @Test fun transferDiagnosticsKeepTheCauseAndCountsWithoutSensitiveText() = runBlocking {
+        val secretMessage = "https://example.googlevideo.com/v?sig=do-not-log Cookie=do-not-log"
+        val failure = javax.net.ssl.SSLProtocolException(secretMessage).apply {
+            initCause(java.io.IOException("do-not-log"))
+        }
+        val media = okhttp3.OkHttpClient.Builder().addInterceptor { chain ->
+            val source = object : okio.Source {
+                private var emitted = false
+                override fun timeout() = okio.Timeout.NONE
+                override fun close() = Unit
+                override fun read(sink: Buffer, byteCount: Long): Long {
+                    if (emitted) throw failure
+                    emitted = true
+                    sink.write(ByteArray(2048))
+                    return 2048
+                }
+            }.buffer()
+            val body = object : okhttp3.ResponseBody() {
+                override fun contentLength() = 4096L
+                override fun contentType(): okhttp3.MediaType? = null
+                override fun source() = source
+            }
+            okhttp3.Response.Builder().request(chain.request()).protocol(okhttp3.Protocol.HTTP_1_1)
+                .code(200).message("OK").body(body).build()
+        }.build()
+        val events = java.util.concurrent.ConcurrentLinkedQueue<YouTubeDiagnostic>()
+        val client = YouTubeClient({ null }, solver, media, diagnostics = { events.add(it) })
+        val file = File.createTempFile("youtube-diagnostic", ".part")
+        try {
+            try {
+                client.copyAudio(YouTubeAudio(YouTubeVideo(id, "fixture"), "https://example.googlevideo.com/v", "audio/mp4", emptyMap()), file) { _, _ -> }
+                fail()
+            } catch (error: YouTubeException) {
+                assertTrue(generateSequence<Throwable>(error) { it.cause }.any { it === failure })
+            }
+            assertEquals(3, events.size)
+            val event = events.last()
+            assertEquals("media_read", event.stage)
+            assertEquals("SSLProtocolException > IOException", event.errorTypes)
+            assertEquals(200, event.responseCode)
+            assertEquals(2048L, event.bytesRead)
+            assertEquals(4096L, event.bytesTotal)
+            assertFalse(event.toString().contains("do-not-log"))
+            assertFalse(event.toString().contains("https://"))
+            assertFalse(event.toString().contains("Cookie"))
+            assertFalse(file.exists())
+        } finally { file.delete() }
+    }
+
+    @Test fun boundedChunksAreJoinedWithoutGaps() = runBlocking {
+        val bytes = ByteArray(2 * 1024 * 1024 + 1500) { (it % 251).toByte() }
+        "ftyp".toByteArray().copyInto(bytes, 4)
+        val ranges = java.util.concurrent.ConcurrentLinkedQueue<String>()
+        val media = okhttp3.OkHttpClient.Builder().addInterceptor { chain ->
+            val header = chain.request().header("Range")!!
+            ranges.add(header)
+            val (start,end) = header.removePrefix("bytes=").split('-').map { it.toInt() }
+            val last = minOf(end, bytes.lastIndex)
+            okhttp3.Response.Builder().request(chain.request()).protocol(okhttp3.Protocol.HTTP_1_1)
+                .code(206).message("Partial Content").header("Content-Range", "bytes $start-$last/${bytes.size}")
+                .body(bytes.copyOfRange(start,last+1).toResponseBody()).build()
+        }.build()
+        val file = File.createTempFile("youtube-chunks", ".part")
+        try {
+            YouTubeClient({ null }, solver, media).copyAudio(YouTubeAudio(YouTubeVideo(id,"fixture"),
+                "https://example.googlevideo.com/v", "audio/mp4", emptyMap()),file) { _, _ -> }
+            assertArrayEquals(bytes,file.readBytes())
+            assertEquals(listOf("bytes=0-1048575","bytes=1048576-2097151","bytes=2097152-2098651"),ranges.toList())
+        } finally { file.delete() }
+    }
+
+    @Test fun interruptedChunkRetriesFromItsBeginningAndKeepsCompletedChunks() = runBlocking {
+        val bytes = ByteArray(1024 * 1024 + 4096) { (it % 251).toByte() }
+        "ftyp".toByteArray().copyInto(bytes, 4)
+        val ranges = java.util.concurrent.ConcurrentLinkedQueue<String>()
+        var failedOnce = false
+        val media = okhttp3.OkHttpClient.Builder().addInterceptor { chain ->
+            val header = chain.request().header("Range")!!
+            ranges.add(header)
+            val (start,end) = header.removePrefix("bytes=").split('-').map { it.toInt() }
+            val last = minOf(end,bytes.lastIndex)
+            val content = bytes.copyOfRange(start,last+1)
+            val body = if (start > 0 && !failedOnce) {
+                failedOnce = true
+                val source = object : okio.Source {
+                    var read = false
+                    override fun timeout() = okio.Timeout.NONE
+                    override fun close() = Unit
+                    override fun read(sink: Buffer,byteCount: Long): Long {
+                        if (read) throw javax.net.ssl.SSLProtocolException("fixture interrupted")
+                        read = true; sink.write(content,0,512);return 512
+                    }
+                }.buffer()
+                object : okhttp3.ResponseBody() {
+                    override fun contentLength() = content.size.toLong()
+                    override fun contentType(): okhttp3.MediaType? = null
+                    override fun source() = source
+                }
+            } else content.toResponseBody()
+            okhttp3.Response.Builder().request(chain.request()).protocol(okhttp3.Protocol.HTTP_1_1)
+                .code(206).message("Partial Content").header("Content-Range","bytes $start-$last/${bytes.size}").body(body).build()
+        }.build()
+        val file = File.createTempFile("youtube-retry-chunk", ".part")
+        try {
+            YouTubeClient({ null },solver,media).copyAudio(YouTubeAudio(YouTubeVideo(id,"fixture"),
+                "https://example.googlevideo.com/v","audio/mp4",emptyMap()),file) { _, _ -> }
+            assertArrayEquals(bytes,file.readBytes())
+            assertEquals(listOf("bytes=0-1048575","bytes=1048576-1052671","bytes=1048576-1052671"),ranges.toList())
+        } finally { file.delete() }
+    }
+
+    @Test fun incorrectSegmentOffsetIsRejected() = runBlocking {
+        val media = okhttp3.OkHttpClient.Builder().addInterceptor { chain ->
+            okhttp3.Response.Builder().request(chain.request()).protocol(okhttp3.Protocol.HTTP_1_1)
+                .code(206).message("Partial Content").header("Content-Range","bytes 100-199/200")
+                .body(ByteArray(100).toResponseBody()).build()
+        }.build()
+        val file = File.createTempFile("youtube-wrong-range", ".part")
+        try {
+            try {
+                YouTubeClient({null},solver,media).copyAudio(YouTubeAudio(YouTubeVideo(id,"fixture"),
+                    "https://example.googlevideo.com/v","audio/mp4",emptyMap()),file) { _, _ -> };fail()
+            } catch (error: YouTubeException) { assertTrue(error.message!!.contains("分段不匹配")) }
+            assertFalse(file.exists())
         } finally { file.delete() }
     }
 

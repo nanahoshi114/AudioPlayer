@@ -69,6 +69,12 @@ fun RemotePlayable.toMediaItem(queueItemId: Long): MediaItem {
     if (remoteUrl.startsWith("/") && File(remoteUrl).isFile) {
         return localFileItem(queueItemId, title, artist, coverUri, remoteUrl)
     }
+    if (source == TrackSource.BILIBILI) {
+        val uri = Uri.Builder().scheme("bilibili").authority("audio")
+            .appendQueryParameter("bvid", workno).appendQueryParameter("cid", fileKey).build()
+        return mediaItem(queueItemId, uri, title, artist, coverUri).buildUpon()
+            .setMimeType(MimeTypes.APPLICATION_MPD).build()
+    }
     if (source == TrackSource.YOUTUBE) {
         val uri = Uri.Builder().scheme("youtube").authority("audio").appendQueryParameter("videoId", workno).build()
         return mediaItem(queueItemId, uri, title, artist, coverUri)

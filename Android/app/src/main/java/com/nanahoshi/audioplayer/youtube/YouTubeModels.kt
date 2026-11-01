@@ -6,7 +6,17 @@ import java.security.MessageDigest
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.io.File
 
-class YouTubeException(message: String) : java.io.IOException(message)
+class YouTubeException(message: String, cause: Throwable? = null) : java.io.IOException(message, cause)
+
+/** 仅记录阶段、错误类型和计数；不包含网址、请求头、凭证或异常原文。 */
+data class YouTubeDiagnostic(
+    val stage: String,
+    val errorTypes: String,
+    val responseCode: Int?,
+    val bytesRead: Long,
+    val bytesTotal: Long,
+    val elapsedMs: Long,
+)
 
 data class YouTubeVideo(
     val id: String,
@@ -139,3 +149,12 @@ internal fun mediaHostAllowed(host: String): Boolean = host == "googlevideo.com"
 fun youtubeAudioFile(filesDir: File, videoId: String): File? =
     videoId.takeIf { videoIdPattern.matches(it) }?.let { File(filesDir, "youtube/$it/audio.m4a") }
 fun readyYouTubeAudio(filesDir: File, videoId: String?): File? = videoId?.let { youtubeAudioFile(filesDir, it) }?.takeIf { it.isFile && it.length() > 0 }
+
+internal data class MediaByteRange(val start: Long, val end: Long, val total: Long)
+internal fun parseMediaRange(header: String?): MediaByteRange? {
+    val match = Regex("bytes (\\d+)-(\\d+)/(\\d+)", RegexOption.IGNORE_CASE).matchEntire(header?.trim().orEmpty()) ?: return null
+    val values = match.groupValues.drop(1).map { it.toLongOrNull() ?: return null }
+    val (start, end, total) = values
+    if (start < 0 || end < start || total <= end) return null
+    return MediaByteRange(start, end, total)
+}

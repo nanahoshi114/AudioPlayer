@@ -20,6 +20,7 @@ class YouTubeClient(
     private val cookie: () -> String?,
     private val solver: YouTubeSolver,
     mediaHttp: OkHttpClient? = null,
+    private val diagnostics: (YouTubeDiagnostic) -> Unit = {},
     private val transport: (suspend (Request) -> String)? = null,
 ) {
     companion object {
@@ -45,6 +46,19 @@ class YouTubeClient(
     private var script: Pair<String, String>? = null
 
     fun resetSession() { gate = null; script = null }
+
+    /** 只读标题和封面；导入预览不需要媒体地址、登录凭证或签名脚本。 */
+    suspend fun videoInfo(id: String): YouTubeVideo {
+        if (!videoIdPattern.matches(id)) throw YouTubeException("视频编号不正确")
+        val url = "https://www.youtube.com/oembed".toHttpUrlOrNull()!!.newBuilder()
+            .addQueryParameter("url", "https://www.youtube.com/watch?v=$id").addQueryParameter("format", "json").build()
+        val root = json(request(Request.Builder().url(url).header("User-Agent", WEB_AGENT).build()))
+        val title = root.text("title").takeIf { it.isNotBlank() } ?: throw YouTubeException("没有读到 YouTube 视频标题")
+        val cover = root.text("thumbnail_url").replace("http://", "https://").toHttpUrlOrNull()
+            ?.takeIf { it.isHttps && (it.host == "ytimg.com" || it.host.endsWith(".ytimg.com")) }?.toString()
+            ?: "https://i.ytimg.com/vi/$id/hqdefault.jpg"
+        return YouTubeVideo(id, title, root.text("author_name"), cover)
+    }
 
     suspend fun lookup(input: String): YouTubeResults {
         val parsed = inputOf(input)
@@ -210,51 +224,123 @@ class YouTubeClient(
         throw YouTubeException("YouTube 音轨下载失败")
     }
 
-    /** 完整读写都在 HTTP 回调里，协程取消会关闭请求，包含正在阻塞的媒体读取。 */
+    private fun reportFailure(stage: String, error: Throwable, started: Long, responseCode: Int? = null, bytesRead: Long = 0, bytesTotal: Long = -1) {
+        // 不使用异常 message 或堆栈，部分网络异常会把签名媒体地址放在里面。
+        val types = generateSequence(error) { it.cause }.take(6).map { it.javaClass.simpleName }.joinToString(" > ")
+        runCatching { diagnostics(YouTubeDiagnostic(stage, types, responseCode, bytesRead, bytesTotal, (System.nanoTime() - started) / 1_000_000)) }
+    }
+
+    /** 每次只请求 1 MiB；断流重试当前段，已完成的段保留。 */
     suspend fun copyAudio(audio: YouTubeAudio, partial: File, onProgress: (Long, Long) -> Unit) = suspendCancellableCoroutine<Unit> { continuation ->
-        val request = Request.Builder().url(audio.url).header("Range", "bytes=0-")
-            .apply { audio.headers.forEach { (key, value) -> header(key, value) } }.build()
-        val call = media.newCall(request)
-        continuation.invokeOnCancellation { call.cancel() }
-        call.enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {
-                if (continuation.isActive) continuation.resumeWithException(YouTubeException("YouTube 音轨下载失败"))
-            }
-            override fun onResponse(call: Call, response: Response) {
-                try {
-                    response.use {
-                        if (response.code in setOf(401, 403, 404)) throw MediaRejected(response.code)
-                        if (!response.isSuccessful) throw YouTubeException("YouTube 音轨下载失败")
-                        val body = response.body ?: throw YouTubeException("音频内容为空")
-                        val total = body.contentLength().coerceAtLeast(0)
-                        var done = 0L
-                        body.byteStream().use { input -> partial.outputStream().use { output ->
-                            val buffer = ByteArray(64 * 1024)
-                            var reported = 0L
-                            while (true) {
-                                if (!continuation.isActive) throw IOException("cancelled")
-                                val count = input.read(buffer)
-                                if (count < 0) break
-                                output.write(buffer, 0, count); done += count
-                                if (done - reported >= 256 * 1024) { onProgress(done, total); reported = done }
-                            }
-                        } }
-                        if (done < 1024 || (total > 0 && done != total)) throw YouTubeException("YouTube 音轨下载不完整")
-                        val signature = partial.inputStream().use { input ->
-                            val header = ByteArray(8)
-                            input.read(header)
-                            String(header, 4, 4, Charsets.US_ASCII)
-                        }
-                        if (signature != "ftyp") throw YouTubeException("YouTube 返回的内容不是 MP4 音轨")
-                        onProgress(done, total)
-                    }
-                    if (continuation.isActive) continuation.resume(Unit)
-                } catch (error: Exception) {
-                    partial.delete()
-                    if (continuation.isActive) continuation.resumeWithException(if (error is MediaRejected || error is YouTubeException) error else YouTubeException("YouTube 音轨下载失败"))
+        val started = System.nanoTime()
+        val currentCall = java.util.concurrent.atomic.AtomicReference<Call?>()
+        var position = 0L
+        var total = -1L
+        val chunkSize = 1024L * 1024L
+        continuation.invokeOnCancellation { currentCall.get()?.cancel(); partial.delete() }
+
+        fun fail(error: Exception) {
+            partial.delete()
+            if (continuation.isActive) continuation.resumeWithException(
+                if (error is MediaRejected || error is YouTubeException) error else YouTubeException("YouTube 音轨下载失败", error),
+            )
+        }
+        fun finish() {
+            try {
+                if (position < 1024 || partial.length() != position) throw YouTubeException("YouTube 音轨下载不完整")
+                val signature = partial.inputStream().use { input ->
+                    val header = ByteArray(8)
+                    input.read(header)
+                    String(header, 4, 4, Charsets.US_ASCII)
                 }
-            }
-        })
+                if (signature != "ftyp") throw YouTubeException("YouTube 返回的内容不是 MP4 音轨")
+                onProgress(position, total)
+                if (continuation.isActive) continuation.resume(Unit)
+            } catch (error: Exception) { fail(error) }
+        }
+        lateinit var enqueueChunk: (Int) -> Unit
+        fun failedAttempt(error: Exception, attempt: Int, stage: String, code: Int? = null, bytesRead: Long = position) {
+            if (!continuation.isActive) { partial.delete(); return }
+            reportFailure(stage, error, started, code, bytesRead, total)
+            if (error is IOException && error !is YouTubeException && error !is MediaRejected && attempt < 2) {
+                enqueueChunk(attempt + 1)
+            } else fail(error)
+        }
+        enqueueChunk = enqueue@{ attempt ->
+            if (!continuation.isActive) { partial.delete(); return@enqueue }
+            val start = position
+            val end = if (total > 0) minOf(start + chunkSize - 1, total - 1) else start + chunkSize - 1
+            val request = Request.Builder().url(audio.url)
+                .apply { audio.headers.forEach { (key, value) -> header(key, value) } }
+                .header("Range", "bytes=$start-$end").build()
+            val call = media.newCall(request)
+            currentCall.set(call)
+            if (!continuation.isActive) { call.cancel(); partial.delete(); return@enqueue }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    failedAttempt(e, attempt, "media_connect")
+                }
+                override fun onResponse(call: Call, response: Response) {
+                    var read = 0L
+                    var complete = false
+                    try {
+                        response.use {
+                            if (!continuation.isActive) throw IOException("cancelled")
+                            if (response.code in setOf(401, 403, 404)) throw MediaRejected(response.code)
+                            if (response.code != 200 && response.code != 206) throw YouTubeException("YouTube 音轨下载失败")
+                            val body = response.body ?: throw YouTubeException("音频内容为空")
+                            val length: Long
+                            if (response.code == 206) {
+                                val range = parseMediaRange(response.header("Content-Range"))
+                                    ?: throw YouTubeException("YouTube 返回的音轨分段信息无效")
+                                if (range.start != start || range.end > end || (total > 0 && range.total != total)) {
+                                    throw YouTubeException("YouTube 返回的音轨分段不匹配，请重试")
+                                }
+                                total = range.total
+                                length = range.end - range.start + 1
+                                if (body.contentLength() >= 0 && body.contentLength() != length) throw YouTubeException("YouTube 返回的音轨分段长度不匹配")
+                            } else {
+                                // 小文件即使忽略 Range 也可一次完成；大文件不能退回被限速的整段读取。
+                                if (start != 0L || body.contentLength() > chunkSize) throw YouTubeException("音轨服务器未按分段返回内容，请重试")
+                                length = body.contentLength()
+                                if (length >= 0) total = length
+                                complete = true
+                            }
+                            body.byteStream().use { input -> java.io.RandomAccessFile(partial, "rw").use { output ->
+                                output.setLength(start)
+                                output.seek(start)
+                                val buffer = ByteArray(64 * 1024)
+                                var reported = 0L
+                                while (length < 0 || read < length) {
+                                    if (!continuation.isActive) throw IOException("cancelled")
+                                    val remaining = if (length < 0) chunkSize + 1 - read else length - read
+                                    if (remaining <= 0) throw YouTubeException("音轨服务器未按分段返回内容，请重试")
+                                    val count = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
+                                    if (count < 0) {
+                                        if (length >= 0 && read != length) throw java.io.EOFException("incomplete media chunk")
+                                        break
+                                    }
+                                    output.write(buffer, 0, count)
+                                    read += count
+                                    if (length < 0 && read > chunkSize) throw YouTubeException("音轨服务器未按分段返回内容，请重试")
+                                    if (read - reported >= 256 * 1024) {
+                                        onProgress(start + read, total.coerceAtLeast(0)); reported = read
+                                    }
+                                }
+                            } }
+                        }
+                        if (!continuation.isActive) { partial.delete(); return }
+                        position = start + read
+                        if (total < 0 && complete) total = position
+                        onProgress(position, total.coerceAtLeast(0))
+                        if (complete || position == total) finish() else enqueueChunk(0)
+                    } catch (error: Exception) {
+                        failedAttempt(error, attempt, "media_read", response.code, start + read)
+                    }
+                }
+            })
+        }
+        enqueueChunk(0)
     }
     private fun json(value: String): JsonElement = try { Json.parseToJsonElement(value) } catch (_: Exception) { throw YouTubeException("YouTube 返回的数据无法读取") }
     private suspend fun request(request: Request): String {

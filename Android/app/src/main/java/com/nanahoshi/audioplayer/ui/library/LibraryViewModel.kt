@@ -8,7 +8,6 @@ import androidx.lifecycle.viewModelScope
 import com.nanahoshi.audioplayer.asmr.AsmrException
 import com.nanahoshi.audioplayer.asmr.AsmrPreview
 import com.nanahoshi.audioplayer.asmr.WorkFacts
-import com.nanahoshi.audioplayer.bilibili.BiliPart
 import com.nanahoshi.audioplayer.bilibili.BilibiliException
 import com.nanahoshi.audioplayer.data.CacheCandidate
 import com.nanahoshi.audioplayer.data.DeleteResult
@@ -70,12 +69,6 @@ sealed interface CachePrompt {
     data class Source(val folderId: Long) : CachePrompt
     data class Format(val conflict: FormatConflict) : CachePrompt
 }
-
-data class PendingBiliImport(
-    val parts: List<BiliPart>,
-    val selected: Set<Int>,
-    val play: Boolean,
-)
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class LibraryViewModel(app: Application) : AndroidViewModel(app) {
@@ -179,7 +172,6 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
     val busy = MutableStateFlow(false)
-    val pendingBili = MutableStateFlow<PendingBiliImport?>(null)
     val selectedTrackIds = MutableStateFlow<Set<Long>>(emptySet())
     val selectedFolderIds = MutableStateFlow<Set<Long>>(emptySet())
     private val metaRequested = mutableSetOf<Long>()
@@ -422,11 +414,6 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         graph.messages.value = graph.library.recognizeLocalTree(folderId, tree, workFileSource.value)
     }
 
-    fun importRj(input: String) = launch {
-        graph.library.importAsmr(input, currentFolderId.value)
-        graph.messages.value = "已导入作品"
-    }
-
     fun downloadTrack(track: TrackEntity) = launch {
         val count = graph.downloads.enqueue(listOf(track))
         val caching = track.source == TrackSource.BILIBILI
@@ -541,37 +528,6 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         graph.library.deleteFile(id)
     }
 
-    fun lookupBvid(input: String, play: Boolean) = launch {
-        val parts = graph.library.lookupBvid(input)
-        if (parts.size == 1) {
-            finishBili(parts, play)
-        } else {
-            pendingBili.value = PendingBiliImport(parts, parts.indices.toSet(), play)
-        }
-    }
-
-    fun togglePart(index: Int) {
-        val current = pendingBili.value ?: return
-        val selected = current.selected.toMutableSet()
-        if (!selected.add(index)) selected.remove(index)
-        pendingBili.value = current.copy(selected = selected)
-    }
-
-    fun confirmBili() {
-        val current = pendingBili.value ?: return
-        val chosen = current.parts.filterIndexed { index, _ -> index in current.selected }
-        pendingBili.value = null
-        if (chosen.isEmpty()) {
-            graph.messages.value = "请至少选择一段"
-            return
-        }
-        launch { finishBili(chosen, current.play) }
-    }
-
-    fun dismissBili() {
-        pendingBili.value = null
-    }
-
     fun deleteTrack(id: Long) {
         graph.player.deleteTrack(id)
     }
@@ -661,15 +617,6 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     fun append(track: TrackEntity) {
         graph.player.append(listOf(track))
-    }
-
-    private suspend fun finishBili(parts: List<BiliPart>, play: Boolean) {
-        val tracks = graph.library.importParts(parts, currentFolderId.value)
-        if (play) {
-            graph.player.playTracks(tracks)
-        } else {
-            graph.messages.value = "已导入 ${tracks.size} 首"
-        }
     }
 
     private suspend fun selectedTracks(): List<TrackEntity> =

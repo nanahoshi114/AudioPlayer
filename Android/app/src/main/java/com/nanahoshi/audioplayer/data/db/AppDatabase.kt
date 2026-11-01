@@ -48,7 +48,7 @@ class DownloadStatusConverter {
         WhisperJobEntity::class,
         TranslationJobEntity::class,
     ],
-    version = 13,
+    version = 14,
     exportSchema = false,
 )
 @TypeConverters(TrackSourceConverter::class, FileKindConverter::class, DownloadStatusConverter::class)
@@ -78,8 +78,15 @@ abstract class AppDatabase : RoomDatabase() {
                     MIGRATION_10_11,
                     MIGRATION_11_12,
                     MIGRATION_12_13,
+                    MIGRATION_13_14,
                 )
                 .build()
+
+        internal val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("ALTER TABLE downloads ADD COLUMN biliImportPart TEXT")
+            }
+        }
 
         internal val MIGRATION_12_13 = object : Migration(12, 13) {
             override fun migrate(connection: SQLiteConnection) {
