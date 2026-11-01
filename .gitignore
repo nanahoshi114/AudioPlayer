@@ -14,5 +14,11 @@
 .cxx
 local.properties
 /app/release
+
+# Windows desktop
+DesktopDemo/bin/
+DesktopDemo/obj/
+DesktopDemo/dist/
+DesktopDemo/.vs/
 /app/debug
 /.kotlin

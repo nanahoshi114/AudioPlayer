@@ -1,0 +1,130 @@
+<UserControl x:Class="PlayerDemo.CrawlPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="{DynamicResource PaperBrush}"
+             Foreground="{DynamicResource InkBrush}"
+             FontFamily="Microsoft YaHei UI"
+             FontSize="13">
+  <Grid Margin="48,28,48,24">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+    </Grid.RowDefinitions>
+    <TextBlock Text="爬取" FontSize="22" FontWeight="SemiBold" Margin="0,0,0,16"/>
+    <Grid Grid.Row="1">
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="*"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+      </Grid.RowDefinitions>
+      <StackPanel>
+        <WrapPanel x:Name="Sources" Margin="0,0,0,12"/>
+        <Grid>
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+          </Grid.ColumnDefinitions>
+          <TextBox x:Name="Query" Padding="14,10" VerticalContentAlignment="Center" KeyDown="Query_KeyDown"/>
+          <Button Content="查找" Grid.Column="1" Style="{StaticResource FillButton}" Margin="10,0,0,0" Click="Search_Click"/>
+        </Grid>
+        <WrapPanel Margin="0,10,0,0">
+          <Button x:Name="BiliFavButton" Content="我的收藏" Style="{StaticResource QuietButton}" Padding="14,6" Visibility="Collapsed" Click="BiliFav_Click"/>
+          <Button x:Name="YouTubeLikedButton" Content="喜欢的视频" Style="{StaticResource QuietButton}" Padding="14,6" Visibility="Collapsed" Click="YouTubeList_Click" Tag="LL"/>
+          <Button x:Name="YouTubeLaterButton" Content="稍后观看" Style="{StaticResource QuietButton}" Padding="14,6" Margin="8,0,0,0" Visibility="Collapsed" Click="YouTubeList_Click" Tag="WL"/>
+        </WrapPanel>
+      </StackPanel>
+      <Border Grid.Row="1" Margin="0,16,0,0" Background="{DynamicResource CardBrush}" CornerRadius="18" Padding="8">
+        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+          <ItemsControl x:Name="Hits">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate>
+                <Border x:Name="Row" CornerRadius="14" Padding="8,6" Margin="0,2" Cursor="Hand" MouseLeftButtonUp="Hit_Click">
+                  <Border.Style>
+                    <Style TargetType="Border">
+                      <Setter Property="Background" Value="Transparent"/>
+                      <Style.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                          <Setter Property="Background" Value="#F3EBE3"/>
+                        </Trigger>
+                        <DataTrigger Binding="{Binding IsPicked}" Value="True">
+                          <Setter Property="Background" Value="#E8DDD0"/>
+                        </DataTrigger>
+                      </Style.Triggers>
+                    </Style>
+                  </Border.Style>
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="112"/>
+                      <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid Width="104" Height="104" HorizontalAlignment="Left">
+                      <Border Background="#DDD0C2" CornerRadius="14"/>
+                      <Image Source="{Binding Cover}" Stretch="UniformToFill" Width="104" Height="104">
+                        <Image.Clip>
+                          <RectangleGeometry RadiusX="14" RadiusY="14" Rect="0,0,104,104"/>
+                        </Image.Clip>
+                      </Image>
+                      <Border Width="26" Height="26" CornerRadius="13" Background="#8A5A32" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="6">
+                        <Border.Style>
+                          <Style TargetType="Border">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                            <Style.Triggers>
+                              <DataTrigger Binding="{Binding IsPicked}" Value="True">
+                                <Setter Property="Visibility" Value="Visible"/>
+                              </DataTrigger>
+                            </Style.Triggers>
+                          </Style>
+                        </Border.Style>
+                        <TextBlock Text="✓" Foreground="#F6F1EA" FontSize="13" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                      </Border>
+                    </Grid>
+                    <StackPanel Grid.Column="1" Margin="14,4,8,4" VerticalAlignment="Center">
+                      <TextBlock Text="{Binding SourceId}" Foreground="{DynamicResource MutedBrush}" FontSize="12"/>
+                      <TextBlock Text="{Binding Title}" TextWrapping="Wrap" MaxHeight="44" LineHeight="22" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+                      <TextBlock Text="{Binding Circle}" Foreground="{DynamicResource MutedBrush}" FontSize="12" Margin="0,4,0,0" TextTrimming="CharacterEllipsis">
+                        <TextBlock.Style>
+                          <Style TargetType="TextBlock">
+                            <Style.Triggers>
+                              <DataTrigger Binding="{Binding Circle}" Value="">
+                                <Setter Property="Visibility" Value="Collapsed"/>
+                              </DataTrigger>
+                            </Style.Triggers>
+                          </Style>
+                        </TextBlock.Style>
+                      </TextBlock>
+                    </StackPanel>
+                  </Grid>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </ScrollViewer>
+      </Border>
+      <DockPanel Grid.Row="2" Margin="0,14,0,0" LastChildFill="True">
+        <Button x:Name="SelectAllButton" Content="全选" DockPanel.Dock="Right" Style="{StaticResource QuietButton}" Padding="14,6" Margin="8,0,0,0" Click="SelectAll_Click"/>
+        <WrapPanel x:Name="Formats" VerticalAlignment="Center"/>
+      </DockPanel>
+      <StackPanel Grid.Row="3" Margin="0,16,0,0">
+        <Grid x:Name="ProgressTrack" Height="6" Margin="0,0,0,10" Visibility="Collapsed" SizeChanged="ProgressTrack_SizeChanged">
+          <Border Background="#E3D5C6" CornerRadius="3"/>
+          <Border x:Name="ProgressFill" Height="6" Width="0" HorizontalAlignment="Left" VerticalAlignment="Center"
+                  Background="{DynamicResource AccentBrush}" CornerRadius="3"/>
+        </Grid>
+        <Grid>
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="Auto"/>
+          </Grid.ColumnDefinitions>
+          <TextBlock x:Name="Status" VerticalAlignment="Center" Foreground="{DynamicResource InkBrush}" FontSize="12"
+                     TextTrimming="CharacterEllipsis" Text="左键点选作品，可以多选，然后点右下角下载"/>
+          <Button x:Name="CancelButton" Grid.Column="1" Content="中止" Style="{StaticResource QuietButton}" Margin="12,0,8,0"
+                  Click="Cancel_Click" Visibility="Collapsed"/>
+          <Button x:Name="StartButton" Grid.Column="2" Content="下载所选" Style="{StaticResource FillButton}"
+                  Click="Start_Click" IsEnabled="False"/>
+        </Grid>
+      </StackPanel>
+    </Grid>
+  </Grid>
+</UserControl>

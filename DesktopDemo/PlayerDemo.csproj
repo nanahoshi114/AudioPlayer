@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>PlayerDemo</RootNamespace>
+    <AssemblyName>PlayerDemo</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationTitle>音频播放器</ApplicationTitle>
+  </PropertyGroup>
+  <ItemGroup>
+    <Content Include="Crawl\yt-solver.cjs" CopyToOutputDirectory="PreserveNewest" />
+    <EmbeddedResource Include="Crawl\yt-solver.cjs" LogicalName="PlayerDemo.yt-solver.cjs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="NAudio" Version="2.2.1" />
+    <PackageReference Include="QRCoder" Version="1.6.0" />
+    <PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0" />
+    <PackageReference Include="TagLibSharp" Version="2.3.0" />
+  </ItemGroup>
+</Project>

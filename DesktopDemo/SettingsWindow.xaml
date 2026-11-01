@@ -1,0 +1,96 @@
+<UserControl x:Class="PlayerDemo.SettingsPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="{DynamicResource PaperBrush}"
+             Foreground="{DynamicResource InkBrush}"
+             FontFamily="Microsoft YaHei UI"
+             FontSize="13"
+             Unloaded="Page_Unloaded">
+  <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="48,28,48,32">
+    <StackPanel MaxWidth="720" HorizontalAlignment="Left">
+      <TextBlock Text="设置" FontSize="22" FontWeight="SemiBold" Margin="0,0,0,18"/>
+      <Border x:Name="HelpCard" Visibility="Collapsed" Background="{DynamicResource CardBrush}" CornerRadius="18" Padding="18,16" Margin="0,0,0,18">
+        <StackPanel>
+          <Grid>
+            <TextBlock x:Name="HelpTitle" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center"/>
+            <Button Content="关闭" Style="{StaticResource QuietButton}" Padding="14,6" HorizontalAlignment="Right" Click="HideHelp_Click"/>
+          </Grid>
+          <TextBlock x:Name="HelpBody" Margin="0,12,0,0" TextWrapping="Wrap" LineHeight="24" Foreground="{DynamicResource InkBrush}"/>
+        </StackPanel>
+      </Border>
+      <Grid Margin="0,0,0,10">
+        <TextBlock Text="听写" FontSize="18" FontWeight="SemiBold" VerticalAlignment="Center"/>
+        <Button Content="说明" Style="{StaticResource QuietButton}" HorizontalAlignment="Right" Padding="14,6" Click="WhisperHelp_Click"/>
+      </Grid>
+      <Border Background="{DynamicResource CardBrush}" CornerRadius="18" Padding="18,16">
+        <StackPanel>
+          <TextBlock Text="模型" Foreground="{DynamicResource MutedBrush}" FontSize="12" Margin="2,0,0,6"/>
+          <ComboBox x:Name="WhisperModel" SelectionChanged="WhisperModel_SelectionChanged"/>
+          <TextBlock x:Name="WhisperAddressLabel" Text="地址" Foreground="{DynamicResource MutedBrush}" FontSize="12" Margin="2,14,0,6"/>
+          <TextBox x:Name="WhisperBase"/>
+          <TextBlock x:Name="WhisperTokenLabel" Text="口令" Foreground="{DynamicResource MutedBrush}" FontSize="12" Margin="2,14,0,6"/>
+          <PasswordBox x:Name="WhisperToken"/>
+          <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
+            <Button Content="保存" Style="{StaticResource FillButton}" Click="SaveWhisper_Click"/>
+            <Button Content="清除" Style="{StaticResource QuietButton}" Margin="8,0,0,0" Click="ClearWhisper_Click"/>
+          </StackPanel>
+          <TextBlock x:Name="WhisperSaved" Margin="2,10,0,0" Foreground="{DynamicResource MutedBrush}" FontSize="12"/>
+        </StackPanel>
+      </Border>
+
+      <Grid Margin="0,26,0,10">
+        <TextBlock Text="翻译" FontSize="18" FontWeight="SemiBold" VerticalAlignment="Center"/>
+        <Button Content="说明" Style="{StaticResource QuietButton}" HorizontalAlignment="Right" Padding="14,6" Click="TranslateHelp_Click"/>
+      </Grid>
+      <Border Background="{DynamicResource CardBrush}" CornerRadius="18" Padding="18,16">
+        <StackPanel>
+          <TextBlock Text="地址" Foreground="{DynamicResource MutedBrush}" FontSize="12" Margin="2,0,0,6"/>
+          <TextBox x:Name="TranslateBase"/>
+          <TextBlock Text="口令" Foreground="{DynamicResource MutedBrush}" FontSize="12" Margin="2,14,0,6"/>
+          <PasswordBox x:Name="TranslateToken"/>
+          <TextBlock Text="模型名" Foreground="{DynamicResource MutedBrush}" FontSize="12" Margin="2,14,0,6"/>
+          <TextBox x:Name="TranslateModel"/>
+          <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
+            <Button Content="保存" Style="{StaticResource FillButton}" Click="SaveTranslate_Click"/>
+            <Button Content="清除" Style="{StaticResource QuietButton}" Margin="8,0,0,0" Click="ClearTranslate_Click"/>
+          </StackPanel>
+          <TextBlock x:Name="TranslateSaved" Margin="2,10,0,0" Foreground="{DynamicResource MutedBrush}" FontSize="12"/>
+        </StackPanel>
+      </Border>
+
+      <Grid Margin="0,26,0,10">
+        <TextBlock Text="B站" FontSize="18" FontWeight="SemiBold" VerticalAlignment="Center"/>
+        <Button Content="说明" Style="{StaticResource QuietButton}" HorizontalAlignment="Right" Padding="14,6" Click="BiliHelp_Click"/>
+      </Grid>
+      <Border Background="{DynamicResource CardBrush}" CornerRadius="18" Padding="18,16">
+        <StackPanel>
+          <TextBlock Text="SESSDATA 或 Cookie" Foreground="{DynamicResource MutedBrush}" FontSize="12" Margin="2,0,0,6"/>
+          <PasswordBox x:Name="BiliCookie"/>
+          <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
+            <Button Content="保存" Style="{StaticResource FillButton}" Click="SaveBili_Click"/>
+            <Button Content="清除" Style="{StaticResource QuietButton}" Margin="8,0,0,0" Click="ClearBili_Click"/>
+            <Button x:Name="BiliQrButton" Content="扫码登录" Style="{StaticResource QuietButton}" Margin="8,0,0,0" Click="BiliQr_Click"/>
+          </StackPanel>
+          <Image x:Name="BiliQr" Width="180" Height="180" HorizontalAlignment="Left" Margin="0,16,0,0" Visibility="Collapsed"/>
+          <TextBlock x:Name="BiliSaved" Margin="2,10,0,0" Foreground="{DynamicResource MutedBrush}" FontSize="12" TextWrapping="Wrap"/>
+        </StackPanel>
+      </Border>
+
+      <Grid Margin="0,26,0,10">
+        <TextBlock Text="YouTube" FontSize="18" FontWeight="SemiBold" VerticalAlignment="Center"/>
+        <Button Content="说明" Style="{StaticResource QuietButton}" HorizontalAlignment="Right" Padding="14,6" Click="YouTubeHelp_Click"/>
+      </Grid>
+      <Border Background="{DynamicResource CardBrush}" CornerRadius="18" Padding="18,16">
+        <StackPanel>
+          <TextBlock Text="浏览器 Cookie" Foreground="{DynamicResource MutedBrush}" FontSize="12" Margin="2,0,0,6"/>
+          <PasswordBox x:Name="YouTubeCookie"/>
+          <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
+            <Button Content="保存" Style="{StaticResource FillButton}" Click="SaveYouTube_Click"/>
+            <Button Content="清除" Style="{StaticResource QuietButton}" Margin="8,0,0,0" Click="ClearYouTube_Click"/>
+          </StackPanel>
+          <TextBlock x:Name="YouTubeSaved" Margin="2,10,0,0" Foreground="{DynamicResource MutedBrush}" FontSize="12" TextWrapping="Wrap"/>
+        </StackPanel>
+      </Border>
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>
