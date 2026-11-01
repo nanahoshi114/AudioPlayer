@@ -1,5 +1,8 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.youtube.YouTubeVideo
+import com.nanahoshi.audioplayer.youtube.readyYouTubeAudio
+
 import android.content.Context
 import android.net.Uri
 import com.nanahoshi.audioplayer.asmr.AsmrClient
@@ -46,6 +49,41 @@ class LibraryRepository(
     private val asmr: AsmrClient,
     private val dlsite: DlsiteClient,
 ) {
+    private val youtubeLock = kotlinx.coroutines.sync.Mutex()
+
+    suspend fun saveYouTube(video: YouTubeVideo, localPath: String? = null, downloadId: Long? = null): TrackEntity =
+        withContext(Dispatchers.IO) {
+            youtubeLock.lock()
+            try {
+                db.withTransaction {
+                    if (downloadId != null && db.downloads().get(downloadId)?.status != com.nanahoshi.audioplayer.data.db.DownloadStatus.RUNNING) {
+                        throw CancellationException("已中止")
+                    }
+                    val old = db.tracks().findYouTube(video.id)
+                    val saved = if (old != null) {
+                        if (localPath != null) db.tracks().updateLocalUri(old.id, localPath)
+                        old.copy(localUri = localPath ?: old.localUri)
+                    } else {
+                        val stored = localPath ?: readyYouTubeAudio(context.filesDir, video.id)?.absolutePath
+                        val track = TrackEntity(
+                            source = TrackSource.YOUTUBE, title = video.title, artist = video.author,
+                            durationMs = video.durationMs, coverUri = video.coverUrl, localUri = stored,
+                            bvid = null, cid = null, page = null, addedAt = System.currentTimeMillis(),
+                            remoteUrl = video.watchUrl, youtubeVideoId = video.id,
+                        )
+                        track.copy(id = db.tracks().insert(track))
+                    }
+                    if (downloadId != null && localPath != null) {
+                        db.downloads().attachTrack(downloadId, saved.id)
+                        val size = java.io.File(localPath).length()
+                        db.downloads().setLocalPath(downloadId, localPath)
+                        db.downloads().finish(downloadId, size, size)
+                    }
+                    saved
+                }
+            } finally { youtubeLock.unlock() }
+        }
+
     fun observeTracks(): Flow<List<TrackEntity>> = db.tracks().observeAll()
 
     fun observeAllFolders(): Flow<List<FolderEntity>> = db.folders().observeAll()

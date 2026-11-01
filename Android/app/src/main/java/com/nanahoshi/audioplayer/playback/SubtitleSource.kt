@@ -72,7 +72,7 @@ class SubtitleSource(
             when (track.source) {
                 TrackSource.BILIBILI -> bilibiliCues(track)
                 TrackSource.ASMR -> TrackSubtitles(parseSubtitleDocument(asmrText(track).orEmpty()))
-                TrackSource.DLSITE -> TrackSubtitles(emptyList())
+                TrackSource.DLSITE, TrackSource.YOUTUBE -> TrackSubtitles(emptyList())
                 TrackSource.LOCAL -> TrackSubtitles(parseSubtitleDocument(localText(track).orEmpty()))
             }
         } catch (error: CancellationException) {

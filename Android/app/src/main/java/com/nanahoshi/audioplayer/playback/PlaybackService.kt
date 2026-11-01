@@ -31,7 +31,7 @@ class PlaybackService : MediaSessionService() {
         val exoPlayer = ExoPlayer.Builder(this)
             .setMediaSourceFactory(
                 DefaultMediaSourceFactory(
-                    BiliPlaybackDataSource.Factory(this, graph.bilibili, graph.asmr, graph.dlsite, graph.db),
+                    BiliPlaybackDataSource.Factory(this, graph.bilibili, graph.asmr, graph.dlsite, graph.db, graph.youtube),
                 ),
             )
             .setAudioAttributes(AudioAttributes.DEFAULT, true)

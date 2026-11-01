@@ -1,5 +1,8 @@
 package com.nanahoshi.audioplayer.ui.player
 
+import com.nanahoshi.audioplayer.youtube.YouTubeVideo
+import com.nanahoshi.audioplayer.youtube.readyYouTubeAudio
+
 import android.Manifest
 import android.app.Activity
 import android.app.Application
@@ -245,6 +248,18 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     fun cacheCurrent() {
         viewModelScope.launch {
             val row = currentRow() ?: return@launch
+            if (row.source == TrackSource.YOUTUBE) {
+                val id = row.youtubeVideoId ?: row.workno ?: return@launch
+                try {
+                    val count = graph.downloads.enqueueYouTube(listOf(YouTubeVideo(
+                        id, row.title, row.artist.orEmpty(), row.coverUri ?: "https://i.ytimg.com/vi/$id/hqdefault.jpg", row.durationMs,
+                    )))
+                    offerBiliCache = false
+                    graph.messages.value = if (count == 0) "已经在本地或正在缓存" else "已加入缓存"
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) { graph.messages.value = "YouTube 缓存失败" }
+                return@launch
+            }
             // 没入库的队列项把 bvid/cid 放在 workno/fileKey。
             val bvid = row.bvid ?: row.workno ?: return@launch
             val cid = row.cid ?: row.fileKey?.toLongOrNull() ?: return@launch
@@ -273,6 +288,9 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun biliNeedsCache(queueItemId: Long): Boolean {
         val row = graph.library.queueSnapshot().find { it.queueItemId == queueItemId } ?: return false
+        if (row.source == TrackSource.YOUTUBE) {
+            return readyYouTubeAudio(getApplication<Application>().filesDir, row.youtubeVideoId ?: row.workno) == null
+        }
         if (row.source != com.nanahoshi.audioplayer.data.TrackSource.BILIBILI) return false
         // 没入库的队列项没有 trackId，本地路径会放在 remoteUrl，bvid/cid 会放在 workno/fileKey。
         val path = row.localUri ?: row.remoteUrl
@@ -306,7 +324,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 report(graph.whisper.start(row, file, translate), translate)
                 return@launch
             }
-            val canDownload = row.source == TrackSource.ASMR || row.source == TrackSource.DLSITE
+            val canDownload = row.source == TrackSource.ASMR || row.source == TrackSource.DLSITE || row.source == TrackSource.YOUTUBE
             val hasTarget = (row.trackId != null && row.trackId > 0L) || !row.remoteUrl.isNullOrBlank()
             if (canDownload && hasTarget) {
                 whisperPrompt = WhisperPrompt.NeedDownload

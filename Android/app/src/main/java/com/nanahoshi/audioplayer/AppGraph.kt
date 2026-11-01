@@ -1,5 +1,8 @@
 package com.nanahoshi.audioplayer
 
+import com.nanahoshi.audioplayer.youtube.WebViewYouTubeSolver
+import com.nanahoshi.audioplayer.youtube.YouTubeClient
+
 import android.app.Application
 import coil.EventListener
 import coil.ImageLoader
@@ -34,13 +37,16 @@ class AppGraph(app: Application) {
     val db = AppDatabase.create(app)
     val credentials = CredentialStore(app)
     val bilibili = BilibiliClient(credentials)
+    val youtube = YouTubeClient(
+        { credentials.youtubeCookie() }, WebViewYouTubeSolver(app),
+    )
     val asmr = AsmrClient()
     val dlsite = DlsiteClient(credentials)
     val librarySort = LibraryPreferences(app)
     val appearance = AppearancePreferences(app)
     val cache = CacheStore(app) { app.imageLoader }
     val library = LibraryRepository(app, db, bilibili, asmr, dlsite)
-    val downloads = DownloadCenter(app, db, asmr, dlsite, bilibili)
+    val downloads = DownloadCenter(app, db, asmr, dlsite, bilibili, youtube, library)
     val subtitles = SubtitleSource(app, db, bilibili, asmr)
     val translator = TranslateCenter(app, db, credentials, subtitles)
     val senseVoice = SenseVoiceModelManager(app)
@@ -64,6 +70,9 @@ class AudioPlayerApplication : Application(), ImageLoaderFactory {
             val request = chain.request()
             val host = request.url.host
             val updated = when {
+                host == "i.ytimg.com" || host.endsWith(".ytimg.com") -> request.newBuilder()
+                    .header("User-Agent", YouTubeClient.WEB_AGENT)
+                    .header("Referer", "https://www.youtube.com/").build()
                 host.contains("hdslb") || host.contains("bilibili") ->
                     request.newBuilder().header("Referer", "https://www.bilibili.com").build()
                 host.contains("dlsite") -> {

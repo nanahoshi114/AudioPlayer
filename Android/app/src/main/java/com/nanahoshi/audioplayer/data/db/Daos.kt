@@ -90,6 +90,12 @@ interface TrackDao {
     @Query("SELECT * FROM tracks WHERE source = 'BILIBILI' AND localUri IS NOT NULL")
     suspend fun biliWithLocal(): List<TrackEntity>
 
+    @Query("SELECT * FROM tracks WHERE youtubeVideoId = :videoId LIMIT 1")
+    suspend fun findYouTube(videoId: String): TrackEntity?
+
+    @Query("SELECT * FROM tracks WHERE source = 'YOUTUBE' AND localUri IS NOT NULL")
+    suspend fun youtubeWithLocal(): List<TrackEntity>
+
     @Query("SELECT * FROM tracks WHERE bvid = :bvid AND cid = :cid LIMIT 1")
     suspend fun findByBvid(bvid: String, cid: Long): TrackEntity?
 
@@ -174,6 +180,21 @@ interface LibraryFileDao {
 
 @Dao
 interface DownloadDao {
+    @Query("UPDATE downloads SET status = 'RUNNING' WHERE id = :id AND status = 'QUEUED'")
+    suspend fun startQueued(id: Long): Int
+
+    @Query("SELECT * FROM downloads WHERE id = :id")
+    suspend fun get(id: Long): DownloadEntity?
+
+    @Query("UPDATE downloads SET status = 'FAILED', error = '已中止' WHERE id = :id AND source = 'YOUTUBE' AND status IN ('QUEUED', 'RUNNING')")
+    suspend fun cancelYouTube(id: Long): Int
+
+    @Query("UPDATE downloads SET trackId = :trackId WHERE id = :id")
+    suspend fun attachTrack(id: Long, trackId: Long)
+
+    @Query("UPDATE downloads SET bytesDone = :done, bytesTotal = :total WHERE id = :id AND status = 'RUNNING'")
+    suspend fun activeProgress(id: Long, done: Long, total: Long)
+
     @Query("SELECT * FROM downloads ORDER BY id DESC")
     fun observe(): Flow<List<DownloadEntity>>
 
@@ -475,7 +496,8 @@ interface PlaylistDao {
         SELECT playlist_items.id AS itemId, playlist_items.position AS position,
             tracks.id AS trackId, tracks.source AS source, tracks.title AS title,
             tracks.artist AS artist, tracks.durationMs AS durationMs, tracks.coverUri AS coverUri,
-            tracks.localUri AS localUri, tracks.bvid AS bvid, tracks.cid AS cid, tracks.page AS page
+            tracks.localUri AS localUri, tracks.bvid AS bvid, tracks.cid AS cid, tracks.page AS page,
+            tracks.youtubeVideoId AS youtubeVideoId
         FROM playlist_items
         INNER JOIN tracks ON tracks.id = playlist_items.trackId
         WHERE playlist_items.playlistId = :playlistId
@@ -489,7 +511,8 @@ interface PlaylistDao {
         SELECT playlist_items.id AS itemId, playlist_items.position AS position,
             tracks.id AS trackId, tracks.source AS source, tracks.title AS title,
             tracks.artist AS artist, tracks.durationMs AS durationMs, tracks.coverUri AS coverUri,
-            tracks.localUri AS localUri, tracks.bvid AS bvid, tracks.cid AS cid, tracks.page AS page
+            tracks.localUri AS localUri, tracks.bvid AS bvid, tracks.cid AS cid, tracks.page AS page,
+            tracks.youtubeVideoId AS youtubeVideoId
         FROM playlist_items
         INNER JOIN tracks ON tracks.id = playlist_items.trackId
         WHERE playlist_items.playlistId = :playlistId
@@ -530,7 +553,8 @@ interface QueueDao {
             COALESCE(tracks.coverUri, queue_items.coverUri) AS coverUri,
             tracks.localUri AS localUri, tracks.bvid AS bvid, tracks.cid AS cid, tracks.page AS page,
             queue_items.remoteUrl AS remoteUrl, queue_items.referer AS referer,
-            queue_items.workno AS workno, queue_items.fileKey AS fileKey
+            queue_items.workno AS workno, queue_items.fileKey AS fileKey,
+            COALESCE(tracks.youtubeVideoId, CASE WHEN queue_items.source = 'YOUTUBE' THEN queue_items.workno END) AS youtubeVideoId
         FROM queue_items
         LEFT JOIN tracks ON tracks.id = queue_items.trackId
         ORDER BY queue_items.position ASC
@@ -549,7 +573,8 @@ interface QueueDao {
             COALESCE(tracks.coverUri, queue_items.coverUri) AS coverUri,
             tracks.localUri AS localUri, tracks.bvid AS bvid, tracks.cid AS cid, tracks.page AS page,
             queue_items.remoteUrl AS remoteUrl, queue_items.referer AS referer,
-            queue_items.workno AS workno, queue_items.fileKey AS fileKey
+            queue_items.workno AS workno, queue_items.fileKey AS fileKey,
+            COALESCE(tracks.youtubeVideoId, CASE WHEN queue_items.source = 'YOUTUBE' THEN queue_items.workno END) AS youtubeVideoId
         FROM queue_items
         LEFT JOIN tracks ON tracks.id = queue_items.trackId
         ORDER BY queue_items.position ASC

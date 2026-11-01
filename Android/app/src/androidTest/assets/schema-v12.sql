@@ -1,0 +1,23 @@
+-- Frozen schema of database version 12 for migration regression testing.
+CREATE TABLE IF NOT EXISTS `folders` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `parentId` INTEGER, `name` TEXT NOT NULL, `position` INTEGER NOT NULL, `addedAt` INTEGER NOT NULL DEFAULT 0, `asmrWorkId` INTEGER, `asmrSourceId` TEXT, `coverUri` TEXT, `workMeta` TEXT, `contentSource` TEXT, FOREIGN KEY(`parentId`) REFERENCES `folders`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE );
+CREATE INDEX IF NOT EXISTS `index_folders_parentId` ON `folders` (`parentId`);
+CREATE UNIQUE INDEX IF NOT EXISTS `index_folders_asmrSourceId` ON `folders` (`asmrSourceId`);
+CREATE TABLE IF NOT EXISTS `tracks` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `source` TEXT NOT NULL, `title` TEXT NOT NULL, `artist` TEXT, `durationMs` INTEGER NOT NULL, `coverUri` TEXT, `localUri` TEXT, `bvid` TEXT, `cid` INTEGER, `page` INTEGER, `addedAt` INTEGER NOT NULL, `folderId` INTEGER, `remoteUrl` TEXT, `asmrWorkId` INTEGER, `fileHash` TEXT, FOREIGN KEY(`folderId`) REFERENCES `folders`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE );
+CREATE UNIQUE INDEX IF NOT EXISTS `index_tracks_localUri` ON `tracks` (`localUri`);
+CREATE UNIQUE INDEX IF NOT EXISTS `index_tracks_bvid_cid` ON `tracks` (`bvid`, `cid`);
+CREATE INDEX IF NOT EXISTS `index_tracks_folderId` ON `tracks` (`folderId`);
+CREATE UNIQUE INDEX IF NOT EXISTS `index_tracks_asmrWorkId_fileHash` ON `tracks` (`asmrWorkId`, `fileHash`);
+CREATE TABLE IF NOT EXISTS `playlists` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `name` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS `playlist_items` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `playlistId` INTEGER NOT NULL, `trackId` INTEGER NOT NULL, `position` INTEGER NOT NULL, FOREIGN KEY(`playlistId`) REFERENCES `playlists`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE , FOREIGN KEY(`trackId`) REFERENCES `tracks`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE );
+CREATE INDEX IF NOT EXISTS `index_playlist_items_playlistId` ON `playlist_items` (`playlistId`);
+CREATE INDEX IF NOT EXISTS `index_playlist_items_trackId` ON `playlist_items` (`trackId`);
+CREATE TABLE IF NOT EXISTS `queue_items` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `trackId` INTEGER, `position` INTEGER NOT NULL, `title` TEXT, `artist` TEXT, `coverUri` TEXT, `remoteUrl` TEXT, `source` TEXT, `referer` TEXT, `workno` TEXT, `fileKey` TEXT, FOREIGN KEY(`trackId`) REFERENCES `tracks`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE );
+CREATE INDEX IF NOT EXISTS `index_queue_items_trackId` ON `queue_items` (`trackId`);
+CREATE TABLE IF NOT EXISTS `playback_state` (`id` INTEGER NOT NULL, `queueItemId` INTEGER NOT NULL, `positionMs` INTEGER NOT NULL, PRIMARY KEY(`id`));
+CREATE TABLE IF NOT EXISTS `library_files` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `folderId` INTEGER, `name` TEXT NOT NULL, `kind` TEXT NOT NULL, `remoteUrl` TEXT NOT NULL, `addedAt` INTEGER NOT NULL, `asmrWorkId` INTEGER NOT NULL, `fileHash` TEXT NOT NULL, FOREIGN KEY(`folderId`) REFERENCES `folders`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE );
+CREATE INDEX IF NOT EXISTS `index_library_files_folderId` ON `library_files` (`folderId`);
+CREATE UNIQUE INDEX IF NOT EXISTS `index_library_files_asmrWorkId_fileHash` ON `library_files` (`asmrWorkId`, `fileHash`);
+CREATE TABLE IF NOT EXISTS `downloads` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `trackId` INTEGER NOT NULL, `title` TEXT NOT NULL, `bytesDone` INTEGER NOT NULL, `bytesTotal` INTEGER NOT NULL, `status` TEXT NOT NULL, `error` TEXT, `remoteUrl` TEXT, `referer` TEXT, `source` TEXT, `workKey` TEXT, `localPath` TEXT, `fileKey` TEXT);
+CREATE INDEX IF NOT EXISTS `index_downloads_trackId` ON `downloads` (`trackId`);
+CREATE TABLE IF NOT EXISTS `whisper_jobs` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `title` TEXT NOT NULL, `fingerprint` TEXT NOT NULL, `trackId` INTEGER, `localPath` TEXT, `remoteJobId` TEXT, `status` TEXT NOT NULL, `progress` REAL NOT NULL, `error` TEXT, `awaitRemoteUrl` TEXT, `endpoint` TEXT, `translatedAt` INTEGER, `translateStatus` TEXT, `skipTranslate` INTEGER, `model` TEXT);
+CREATE TABLE IF NOT EXISTS `translation_jobs` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `title` TEXT NOT NULL, `trackId` INTEGER, `remoteUrl` TEXT, `queueItemId` INTEGER, `status` TEXT NOT NULL, `error` TEXT);

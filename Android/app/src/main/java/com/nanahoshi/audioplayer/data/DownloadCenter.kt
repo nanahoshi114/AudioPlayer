@@ -1,5 +1,11 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.youtube.YouTubeClient
+import com.nanahoshi.audioplayer.youtube.YouTubeException
+import com.nanahoshi.audioplayer.youtube.YouTubeVideo
+import com.nanahoshi.audioplayer.youtube.readyYouTubeAudio
+import com.nanahoshi.audioplayer.youtube.youtubeAudioFile
+
 import android.content.Context
 import android.util.Log
 import com.nanahoshi.audioplayer.asmr.AsmrClient
@@ -19,6 +25,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.async
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -41,7 +50,12 @@ class DownloadCenter(
     private val asmr: AsmrClient,
     private val dlsite: DlsiteClient,
     private val bilibili: BilibiliClient,
+    private val youtube: YouTubeClient,
+    private val library: LibraryRepository,
 ) {
+    private val appContext = context.applicationContext
+    private val youtubeLock = Mutex()
+    private val youtubeRunners = java.util.concurrent.ConcurrentHashMap<Long, kotlinx.coroutines.Deferred<Unit>>()
     private val filesDir = context.filesDir
     private val root = File(filesDir, "asmr")
     private val dlsiteRoot = File(filesDir, "dlsite")
@@ -60,6 +74,7 @@ class DownloadCenter(
 
     init {
         scope.launch {
+            File(filesDir, "youtube").walkTopDown().filter { it.isFile && it.name.endsWith(".part") }.forEach { it.delete() }
             db.downloads().failActive("下载中断，请重试")
             for (ignored in kick) {
                 while (true) {
@@ -71,6 +86,12 @@ class DownloadCenter(
     }
 
     suspend fun enqueueRemote(item: RemotePlayable, workKey: String): Boolean = withContext(Dispatchers.IO) {
+        if (item.source == TrackSource.YOUTUBE) {
+            val videoId = item.workno ?: return@withContext false
+            return@withContext enqueueYouTube(listOf(YouTubeVideo(
+                videoId, item.title, item.artist.orEmpty(), item.coverUri ?: "https://i.ytimg.com/vi/$videoId/hqdefault.jpg", item.durationMs,
+            ))) > 0
+        }
         if (item.remoteUrl.isBlank()) return@withContext false
         val key = item.fileKey?.let(::rawFileKey)
         val storedKey = canonicalWorkKey(workKey)
@@ -103,13 +124,18 @@ class DownloadCenter(
         var deleted = 0
         var unlinked = 0
         for (track in tracks) {
-            if (track.source != TrackSource.ASMR && track.source != TrackSource.DLSITE && track.source != TrackSource.BILIBILI) {
+            if (track.source != TrackSource.ASMR && track.source != TrackSource.DLSITE && track.source != TrackSource.BILIBILI && track.source != TrackSource.YOUTUBE) {
                 continue
             }
             val path = track.localUri
             if (localFileReady(path)) {
                 val file = File(path!!)
                 if (file.exists() && !file.delete()) continue
+                if (track.source == TrackSource.YOUTUBE) {
+                    com.nanahoshi.audioplayer.playback.SubtitleSource(appContext, db, bilibili, asmr)
+                        .discardStored(track.id, path, track.remoteUrl)
+                    db.downloads().deleteFinishedForPath(path)
+                }
                 if (track.source == TrackSource.BILIBILI) {
                     deleteBiliSubtitle(filesDir, track.bvid, track.cid)
                 }
@@ -131,6 +157,13 @@ class DownloadCenter(
     suspend fun enqueue(tracks: List<TrackEntity>): Int = withContext(Dispatchers.IO) {
         var added = 0
         for (track in tracks) {
+            if (track.source == TrackSource.YOUTUBE) {
+                val id = track.youtubeVideoId ?: continue
+                added += enqueueYouTube(listOf(YouTubeVideo(
+                    id, track.title, track.artist.orEmpty(), track.coverUri ?: "https://i.ytimg.com/vi/$id/hqdefault.jpg", track.durationMs,
+                )))
+                continue
+            }
             if (track.source == TrackSource.BILIBILI) {
                 if (enqueueBiliTrack(track)) added += 1
                 continue
@@ -169,16 +202,88 @@ class DownloadCenter(
         added
     }
 
+    suspend fun enqueueYouTube(videos: List<YouTubeVideo>): Int = withContext(Dispatchers.IO) {
+        youtubeLock.withLock {
+            var count = 0
+            for (video in videos) {
+                val file = readyYouTubeAudio(filesDir, video.id)
+                if (file != null) { library.saveYouTube(video, file.absolutePath); continue }
+                if (youtubeAudioFile(filesDir, video.id) == null) continue
+                if (db.downloads().activeForFile(TrackSource.YOUTUBE.name, video.id, "audio") != null) continue
+                val track = db.tracks().findYouTube(video.id)
+                db.downloads().insert(DownloadEntity(
+                    trackId = track?.id ?: 0, title = video.title, bytesDone = 0, bytesTotal = 0,
+                    status = DownloadStatus.QUEUED, error = null, remoteUrl = video.watchUrl,
+                    source = TrackSource.YOUTUBE.name, workKey = video.id, fileKey = "audio",
+                ))
+                count++
+            }
+            if (count > 0) kick.trySend(Unit)
+            count
+        }
+    }
+
+    fun cancelYouTube(id: Long) {
+        scope.launch {
+            if (db.downloads().cancelYouTube(id) > 0) youtubeRunners[id]?.cancel()
+        }
+    }
+
+    private suspend fun downloadYouTube(job: DownloadEntity) {
+        val videoId = job.workKey ?: throw YouTubeException("没有视频编号")
+        val destination = youtubeAudioFile(filesDir, videoId)
+            ?: throw YouTubeException("视频编号不正确")
+        destination.parentFile?.mkdirs()
+        // 每次运行独立暂存，旧请求取消后的清理不会碰到新一次重试。
+        val partial = File(destination.path + ".${java.util.UUID.randomUUID()}.part")
+        var renamed = false
+        try {
+            val cached = readyYouTubeAudio(filesDir, videoId)
+            if (cached != null) {
+                val old = db.tracks().findYouTube(videoId)
+                library.saveYouTube(YouTubeVideo(videoId, old?.title ?: job.title,
+                    old?.artist.orEmpty(), old?.coverUri ?: "https://i.ytimg.com/vi/$videoId/hqdefault.jpg", old?.durationMs ?: 0), cached.path, job.id)
+                return
+            }
+            val runner = currentCoroutineContext()[kotlinx.coroutines.Job]!!
+            val audio = youtube.downloadAudio(videoId, partial) { done, total ->
+                scope.launch { if (runner.isActive) db.downloads().activeProgress(job.id, done, total) }
+            }
+            currentCoroutineContext().ensureActive()
+            if (!partial.renameTo(destination)) throw YouTubeException("无法保存 YouTube 音轨")
+            renamed = true
+            library.saveYouTube(audio.video, destination.absolutePath, job.id)
+        } finally {
+            partial.delete()
+            if (renamed) withContext(kotlinx.coroutines.NonCancellable) {
+                if (db.downloads().get(job.id)?.status != DownloadStatus.DONE && db.tracks().findYouTube(videoId)?.localUri != destination.absolutePath) destination.delete()
+            }
+        }
+    }
+
     fun retry(id: Long) {
         scope.launch {
+            if (youtubeRunners[id]?.isActive == true) return@launch
             db.downloads().requeue(id)
             kick.trySend(Unit)
         }
     }
 
     private suspend fun downloadOne(job: DownloadEntity) {
-        db.downloads().markRunning(job.id)
+        if (job.source == TrackSource.YOUTUBE.name) {
+            if (db.downloads().startQueued(job.id) == 0) return
+        } else db.downloads().markRunning(job.id)
         try {
+            if (job.source == TrackSource.YOUTUBE.name) {
+                kotlinx.coroutines.coroutineScope {
+                    val runner = async(start = kotlinx.coroutines.CoroutineStart.LAZY) { downloadYouTube(job) }
+                    youtubeRunners[job.id] = runner
+                    try {
+                        if (db.downloads().get(job.id)?.status == DownloadStatus.RUNNING) runner.await() else runner.cancel()
+                    } finally { youtubeRunners.remove(job.id, runner) }
+                }
+                return
+            }
             if (job.source == TrackSource.BILIBILI.name) {
                 downloadBili(job)
                 return
@@ -260,7 +365,9 @@ class DownloadCenter(
             val size = dest.length()
             db.downloads().finish(job.id, size, size)
         } catch (error: Exception) {
-            db.downloads().fail(job.id, error.message ?: "下载失败")
+            db.downloads().fail(job.id, if (job.source == TrackSource.YOUTUBE.name) {
+                if (error is CancellationException) "已中止" else if (error is YouTubeException) error.message ?: "YouTube 下载失败" else "YouTube 下载失败"
+            } else error.message ?: "下载失败")
         }
     }
 

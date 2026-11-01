@@ -163,7 +163,21 @@ class StoredCatalog(
                 )
             }
         }
-        val built = buildStoredItems(listedAudios, jobs, ::cueFile, looseSubtitles) { audio ->
+        val youtubeAudios = LinkedHashMap<String, ListedAudio>()
+        val youtubeRoot = File(filesDir, "youtube").canonicalFile
+        for (track in db.tracks().youtubeWithLocal()) {
+            val file = track.localUri?.let(::File) ?: continue
+            if (!file.isFile || !under(file, youtubeRoot)) continue
+            youtubeAudios[file.canonicalPath] = ListedAudio(file, file.path, track.id, track.remoteUrl,
+                track.artist, track.youtubeVideoId, null, sanitizeEntryName(track.title) + ".m4a")
+        }
+        for (job in db.downloads().finished().filter { it.source == TrackSource.YOUTUBE.name }) {
+            val file = job.localPath?.let(::File) ?: continue
+            if (!file.isFile || !under(file, youtubeRoot)) continue
+            youtubeAudios.putIfAbsent(file.canonicalPath, ListedAudio(file, file.path, job.trackId.takeIf { it > 0L },
+                job.remoteUrl, null, job.workKey, null, sanitizeEntryName(job.title) + ".m4a"))
+        }
+        val built = buildStoredItems(listedAudios + youtubeAudios.values, jobs, ::cueFile, looseSubtitles) { audio ->
             val folder = downloadWorkDirectory(audio.file, asmr, dlsite, bili)
             if (folder == null) {
                 audio.file.parentFile?.listFiles().orEmpty().filter { it.isFile && isSubtitleFile(it.name) }
@@ -312,6 +326,7 @@ class StoredCatalog(
     }
 
     private fun audioDisplayName(track: TrackEntity): String {
+        if (track.source == TrackSource.YOUTUBE) return sanitizeEntryName(track.title) + ".m4a"
         val uri = track.localUri
         if (!uri.isNullOrBlank()) {
             when {

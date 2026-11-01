@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.youtube.normalizeYouTubeCookie
+
 import android.content.Context
 import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
@@ -10,6 +12,19 @@ class CredentialStore(context: Context) {
         appContext.getSharedPreferences("player_prefs", Context.MODE_PRIVATE)
 
     private val secretPrefs: SharedPreferences by lazy { createSecretPrefs() }
+
+    val youtubeSession = kotlinx.coroutines.flow.MutableStateFlow(0L)
+
+    fun youtubeCookie(): String? = secretPrefs.getString("youtube_cookie", null)?.takeIf { it.isNotBlank() }
+
+    fun saveYouTubeCookie(raw: String) {
+        val value = normalizeYouTubeCookie(raw)
+        if (value == youtubeCookie().orEmpty()) return
+        secretPrefs.edit().apply {
+            if (value.isBlank()) remove("youtube_cookie") else putString("youtube_cookie", value)
+        }.apply()
+        youtubeSession.value += 1
+    }
 
     fun cookie(): String? = secretPrefs.getString(KEY_COOKIE, null)?.takeIf { it.isNotBlank() }
 

@@ -1,6 +1,6 @@
 # 交接
 
-Android 音频播放器，应用名「音频播放器」，包名 `com.nanahoshi.audioplayer`。听本机文件、B 站音轨、asmr.one，以及用户自己在 DLsite 买过的作品。界面是 Jetpack Compose。仓库 `https://github.com/nanahoshi114/AudioPlayer.git`。
+Android 音频播放器，应用名「音频播放器」，包名 `com.nanahoshi.audioplayer`。听本机文件、B 站音轨、YouTube 独立音轨、asmr.one，以及用户自己在 DLsite 买过的作品。界面是 Jetpack Compose。仓库 `https://github.com/nanahoshi114/AudioPlayer.git`。
 
 仓库根目录包含 `Android/`（Android 工程）和 `DesktopDemo/`（Windows 桌面播放器，WPF/.NET 8）。以下内容和路径均指 `Android/` 工程。
 
@@ -26,7 +26,7 @@ Kotlin 2.2.10，AGP 9.4.1，compileSdk / targetSdk 37，minSdk 24，Java 11。�
 
 - `Android/README.md`：给用户看的功能说明。
 - `Android/docs/asmr-one-api.md`、`Android/docs/dlsite-api.md`、`Android/docs/whisper-api.md`：接口和播放器的调用方式。
-- `Android/docs/youtube-api.md`：2026-10-27 的只读调查。播放器目前不请求 YouTube，代码里也没有 YouTube 相关实现。
+- `Android/docs/youtube-api.md`：Android / DesktopDemo 的 YouTube 调用方式、验证限制，以及 2026-10-27 的只读调查。
 
 ## 代码地图
 
@@ -44,11 +44,12 @@ Kotlin 2.2.10，AGP 9.4.1，compileSdk / targetSdk 37，minSdk 24，Java 11。�
 | `ui/download` | 进行中的下载、听写、翻译；已落盘文件的下载管理 |
 | `playback` | 播放服务、在线音频、字幕读取 |
 | `bilibili` | 播放地址、收藏夹、字幕、扫码登录 |
+| `youtube`、`ui/youtube` | 搜索、列表、独立音轨播放下载、签名脚本与 Cookie |
 | `asmr` | asmr.one 作品、搜索、音轨地址 |
 | `dlsite` | 商店、商品页、登录、已购 Play、试听 |
 | `data` | 库、下载、已落盘文件、凭证、听写、翻译 |
-| `data/db` | Room，当前第 12 版 |
-| `AppGraph.kt` | 在 `Application.onCreate` 里组装。顺序是 db、credentials、bilibili、asmr、dlsite、librarySort、appearance、cache、library、downloads、subtitles、translator、senseVoice、whisper、player |
+| `data/db` | Room，当前第 13 版 |
+| `AppGraph.kt` | 在 `Application.onCreate` 里组装。顺序是 db、credentials、bilibili、youtube、asmr、dlsite、librarySort、appearance、cache、library、downloads、subtitles、translator、senseVoice、whisper、player |
 
 底栏五页：音频库、播放列表、在线搜索、我的、设置。作品页和作品详情打开时底栏和播放条留着，顶部标题栏隐藏。已购买、收藏夹、正在播放、下载、下载管理、听写和翻译、清理缓存、文件预览是单独一页，顶栏和底栏都隐藏。
 
@@ -86,6 +87,14 @@ Kotlin 2.2.10，AGP 9.4.1，compileSdk / targetSdk 37，minSdk 24，Java 11。�
 
 
 
+## YouTube
+
+- 在线搜索切换「作品 / YouTube」；「我的」粘贴 Cookie、读取 LL/WL，不做网页登录和自动续期。账号变化取消旧列表请求并清空结果。
+- `TrackSource.YOUTUBE`，视频编号存 `tracks.youtubeVideoId`（可空唯一索引，12→13 无 DEFAULT）；未入库队列用 `workno` 存视频编号、`fileKey=audio`、`remoteUrl` 存稳定观看页地址。临时媒体地址不落库。
+- 下载只选独立 `audio/mp4`，不取带视频兜底、WebM/Opus。完成后在事务中自动入库并关联下载记录，同视频复用原曲目。音轨在 `filesDir/youtube/{videoId}/audio.m4a`，下载中止清本次 `.part`，不能删重试的暂存。
+- 签名组件复用桌面端 cjs，在隐藏 WebView 内适配输入输出；必须隔离 `globalThis.location`，禁止联网、文件访问和 Java 桥，不触碰 DLsite 的全局 Cookie。媒体 CDN 不带用户登录 Cookie。没有 PO Token，2026-11-01 匿名公开样例要求登录/验证，实际下载和设备行为尚未确认。
+- 队列、播放列表、下载管理、删除已下载文件和生成字幕都要保留 YouTube 视频身份。删除缓存只去本地副本和生成字幕，保留在线曲目；不请求 YouTube 原生字幕。
+
 ## B 站登录
 
 扫码登录把 Cookie 和 refresh token 存进加密偏好。大约每 20 小时检查一次，B 站要求更新时换新 Cookie，并确认旧 token 作废。粘贴 SESSDATA 或整段 Cookie 不会自动更新；若内容和已保存的不同，会清掉 refresh token。
@@ -94,7 +103,7 @@ Kotlin 2.2.10，AGP 9.4.1，compileSdk / targetSdk 37，minSdk 24，Java 11。�
 
 ## 数据库
 
-`AppDatabase` 版本是 12，`exportSchema = false`。新安装用实体建表，升级只走 `MIGRATION_*`。Room 不能降级：手机上已是 12 时，装回更低版本会在启动时崩溃。
+`AppDatabase` 版本是 13，`exportSchema = false`。新安装用实体建表，升级只走 `MIGRATION_*`。Room 不能降级：手机上已是 13 时，装回更低版本会在启动时崩溃。
 
 新增可空列：`ALTER TABLE ... ADD COLUMN` 不要写 `DEFAULT`，Kotlin 字段不要加 `@ColumnInfo(defaultValue)`。`endpoint`、`translatedAt`、`translateStatus`、`skipTranslate`、`model` 都是这样。`skipTranslate` 为 `null` 或 `false` 时，旧任务听写完成后仍翻译。`model` 为空的旧任务仍按地址匹配，不强迫重跑。
 

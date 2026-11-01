@@ -21,6 +21,8 @@ fun TrackEntity.toPlayableItem(queueItemId: Long): MediaItem {
         null
     }
     val uri = when (source) {
+        // 始终保留视频身份，数据源打开时决定读本地还是在线；删缓存后队列也能恢复在线。
+        TrackSource.YOUTUBE -> Uri.Builder().scheme("youtube").authority("audio").appendQueryParameter("videoId", youtubeVideoId).build()
         TrackSource.LOCAL -> localUri?.toUri() ?: Uri.EMPTY
         TrackSource.BILIBILI -> cached?.let(Uri::fromFile) ?: "bilibili://audio?bvid=$bvid&cid=$cid".toUri()
         TrackSource.ASMR -> "asmr://audio?trackId=$id".toUri()
@@ -66,6 +68,10 @@ fun QueuedTrack.toMediaItem(): MediaItem {
 fun RemotePlayable.toMediaItem(queueItemId: Long): MediaItem {
     if (remoteUrl.startsWith("/") && File(remoteUrl).isFile) {
         return localFileItem(queueItemId, title, artist, coverUri, remoteUrl)
+    }
+    if (source == TrackSource.YOUTUBE) {
+        val uri = Uri.Builder().scheme("youtube").authority("audio").appendQueryParameter("videoId", workno).build()
+        return mediaItem(queueItemId, uri, title, artist, coverUri)
     }
     val uri = Uri.Builder()
         .scheme("remote")

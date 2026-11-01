@@ -5,4 +5,5 @@ enum class TrackSource {
     BILIBILI,
     ASMR,
     DLSITE,
+    YOUTUBE,
 }

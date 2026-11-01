@@ -372,7 +372,7 @@ internal fun TrackRow(
 ) {
     var menu by remember { mutableStateOf(false) }
     val downloaded = when (track.source) {
-        TrackSource.BILIBILI -> track.localUri?.startsWith("/") == true &&
+        TrackSource.BILIBILI, TrackSource.YOUTUBE -> track.localUri?.startsWith("/") == true &&
             java.io.File(track.localUri).isFile
         TrackSource.ASMR, TrackSource.DLSITE ->
             com.nanahoshi.audioplayer.data.LocalAudio.hasStoredCopy(track.localUri)

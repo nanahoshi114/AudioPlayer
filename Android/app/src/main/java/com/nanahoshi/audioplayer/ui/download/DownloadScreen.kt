@@ -52,6 +52,8 @@ class DownloadViewModel(app: Application) : AndroidViewModel(app) {
     val whisperJobs = graph.whisper.observe()
     val translationJobs = graph.db.translations().observe()
 
+    fun cancelDownload(id: Long) { graph.downloads.cancelYouTube(id) }
+
     fun retry(id: Long) {
         graph.downloads.retry(id)
     }
@@ -87,17 +89,18 @@ class DownloadViewModel(app: Application) : AndroidViewModel(app) {
             // 没入库的 B 站缓存（例如从收藏夹直接缓存）借 workno/fileKey 带上 bvid/cid，
             // 播放队列里不新增列，字幕也能按这两个字段找回。
             val bili = job.source == TrackSource.BILIBILI.name
+            val youtube = job.source == TrackSource.YOUTUBE.name
             graph.player.replaceAndPlayRemote(
                 listOf(
                     RemotePlayable(
                         title = job.title,
                         artist = null,
                         coverUri = null,
-                        remoteUrl = path,
-                        source = if (bili) TrackSource.BILIBILI else TrackSource.LOCAL,
+                        remoteUrl = if (youtube) "https://www.youtube.com/watch?v=${job.workKey.orEmpty()}" else path,
+                        source = if (youtube) TrackSource.YOUTUBE else if (bili) TrackSource.BILIBILI else TrackSource.LOCAL,
                         referer = if (bili) "https://www.bilibili.com/video/${job.workKey.orEmpty()}" else "",
-                        workno = job.workKey.takeIf { bili },
-                        fileKey = job.fileKey.takeIf { bili },
+                        workno = job.workKey.takeIf { bili || youtube },
+                        fileKey = job.fileKey.takeIf { bili || youtube },
                     ),
                 ),
             )
@@ -131,6 +134,7 @@ fun DownloadScreen(
                         DownloadRow(
                             job,
                             onRetry = { viewModel.retry(job.id) },
+                            onCancel = { viewModel.cancelDownload(job.id) },
                             onPlay = if (job.status == DownloadStatus.DONE && !job.localPath.isNullOrBlank()) {
                                 { viewModel.play(job) }
                             } else {
@@ -162,12 +166,12 @@ fun DownloadScreen(
 }
 
 @Composable
-private fun DownloadRow(job: DownloadEntity, onRetry: () -> Unit, onPlay: (() -> Unit)?) {
+private fun DownloadRow(job: DownloadEntity, onRetry: () -> Unit, onCancel: () -> Unit, onPlay: (() -> Unit)?) {
     val status = when (job.status) {
         DownloadStatus.QUEUED -> "排队"
         DownloadStatus.RUNNING -> "下载中"
         DownloadStatus.DONE -> "完成"
-        DownloadStatus.FAILED -> "失败"
+        DownloadStatus.FAILED -> if (job.error == "已中止") "已中止" else "失败"
     }
     ListItem(
         modifier = if (onPlay != null) Modifier.clickable(onClick = onPlay) else Modifier,
@@ -187,7 +191,9 @@ private fun DownloadRow(job: DownloadEntity, onRetry: () -> Unit, onPlay: (() ->
             }
         },
         trailingContent = {
-            if (job.status == DownloadStatus.FAILED) {
+            if (job.source == TrackSource.YOUTUBE.name && job.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING)) {
+                TextButton(onClick = onCancel) { Text("中止") }
+            } else if (job.status == DownloadStatus.FAILED) {
                 FilledTonalButton(onClick = onRetry) { Text("重试") }
             }
         },

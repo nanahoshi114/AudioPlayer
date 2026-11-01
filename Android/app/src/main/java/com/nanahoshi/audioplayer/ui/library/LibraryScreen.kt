@@ -231,6 +231,7 @@ fun LibraryScreen(
                     listOf(
                         LibrarySourceFilter.ALL to "全部",
                         LibrarySourceFilter.BILIBILI to "B站",
+                        LibrarySourceFilter.YOUTUBE to "YouTube",
                         LibrarySourceFilter.ASMR to "asmr.one",
                         LibrarySourceFilter.LOCAL to "本地",
                     ).forEach { (filter, label) ->
@@ -351,7 +352,7 @@ fun LibraryScreen(
                                 onDownload = if (
                                     track.source == TrackSource.ASMR ||
                                     track.source == TrackSource.DLSITE ||
-                                    track.source == TrackSource.BILIBILI
+                                    (track.source == TrackSource.BILIBILI || track.source == TrackSource.YOUTUBE)
                                 ) {
                                     { viewModel.downloadTrack(track) }
                                 } else {
@@ -360,7 +361,7 @@ fun LibraryScreen(
                                 onDeleteDownloaded = if (
                                     track.source == TrackSource.ASMR ||
                                     track.source == TrackSource.DLSITE ||
-                                    track.source == TrackSource.BILIBILI
+                                    (track.source == TrackSource.BILIBILI || track.source == TrackSource.YOUTUBE)
                                 ) {
                                     { viewModel.deleteDownloadedTrack(track) }
                                 } else {

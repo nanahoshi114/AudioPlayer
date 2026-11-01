@@ -37,6 +37,7 @@ enum class StatusTone {
 fun SourceBadge(source: TrackSource, modifier: Modifier = Modifier) {
     val palette = LocalSourceColors.current
     val (label, color) = when (source) {
+        TrackSource.YOUTUBE -> "YouTube" to palette.youtube
         TrackSource.BILIBILI -> "B站" to palette.bilibili
         TrackSource.ASMR -> "asmr.one" to palette.asmr
         TrackSource.DLSITE -> "DLsite" to palette.dlsite

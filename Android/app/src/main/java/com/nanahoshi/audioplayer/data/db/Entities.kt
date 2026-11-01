@@ -67,6 +67,7 @@ data class FolderEntity(
     indices = [
         Index(value = ["localUri"], unique = true),
         Index(value = ["bvid", "cid"], unique = true),
+        Index(value = ["youtubeVideoId"], unique = true),
         Index("folderId"),
         Index(value = ["asmrWorkId", "fileHash"], unique = true),
     ],
@@ -87,6 +88,7 @@ data class TrackEntity(
     val remoteUrl: String? = null,
     val asmrWorkId: Long? = null,
     val fileHash: String? = null,
+    val youtubeVideoId: String? = null,
 )
 
 @Entity(
@@ -218,6 +220,7 @@ data class QueuedTrack(
     val referer: String?,
     val workno: String?,
     val fileKey: String?,
+    val youtubeVideoId: String? = null,
 ) {
     fun toTrack() = TrackEntity(
         id = trackId ?: 0L,
@@ -231,6 +234,7 @@ data class QueuedTrack(
         cid = cid,
         page = page,
         addedAt = 0,
+        youtubeVideoId = youtubeVideoId,
     )
 }
 
@@ -247,6 +251,7 @@ data class PlaylistTrack(
     val bvid: String?,
     val cid: Long?,
     val page: Int?,
+    val youtubeVideoId: String? = null,
 ) {
     fun toTrack() = TrackEntity(
         id = trackId,
@@ -260,6 +265,7 @@ data class PlaylistTrack(
         cid = cid,
         page = page,
         addedAt = 0,
+        youtubeVideoId = youtubeVideoId,
     )
 }
 

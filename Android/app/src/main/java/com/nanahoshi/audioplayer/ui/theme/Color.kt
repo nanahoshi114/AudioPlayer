@@ -40,6 +40,7 @@ val DayOnTertiaryContainer = Color(0xFF27084C)
 
 data class SourcePalette(
     val bilibili: Color,
+    val youtube: Color,
     val asmr: Color,
     val dlsite: Color,
     val local: Color,
@@ -47,6 +48,7 @@ data class SourcePalette(
 
 val LightSourcePalette = SourcePalette(
     bilibili = Color(0xFFC2185B),
+    youtube = Color(0xFFB3261E),
     asmr = Color(0xFF4E3BB5),
     dlsite = Color(0xFF0B63B6),
     local = Color(0xFF3E4C5A),
@@ -54,6 +56,7 @@ val LightSourcePalette = SourcePalette(
 
 val DarkSourcePalette = SourcePalette(
     bilibili = Color(0xFFFF9BB8),
+    youtube = Color(0xFFFFB4AB),
     asmr = Color(0xFFC9BEFF),
     dlsite = Color(0xFF8ECAFF),
     local = Color(0xFFC5D0DC),

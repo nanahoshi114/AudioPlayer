@@ -40,6 +40,7 @@ import kotlinx.coroutines.launch
 enum class LibrarySourceFilter {
     ALL,
     BILIBILI,
+    YOUTUBE,
     ASMR,
     LOCAL,
 }
@@ -120,7 +121,9 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         when {
             request.query.isNotEmpty() -> acrossLibrary { folders, tracks, files ->
                 val found = searchListing(request.query, request.sort, folders, tracks, files)
-                if (request.filter != LibrarySourceFilter.LOCAL) {
+                if (request.filter == LibrarySourceFilter.YOUTUBE) {
+                    found.copy(folders = emptyList(), entries = found.entries.filter { it is LibraryEntry.Audio && it.track.source == TrackSource.YOUTUBE })
+                } else if (request.filter != LibrarySourceFilter.LOCAL) {
                     found
                 } else {
                     found.copy(
@@ -789,9 +792,9 @@ private fun filteredListing(
     folders: List<FolderEntity>,
     tracks: List<TrackEntity>,
 ): LibraryListing = when (filter) {
-    LibrarySourceFilter.BILIBILI -> LibraryListing(
+    LibrarySourceFilter.BILIBILI, LibrarySourceFilter.YOUTUBE -> LibraryListing(
         folders = emptyList(),
-        entries = mixedEntries(tracks.filter { it.source == TrackSource.BILIBILI }, emptyList(), sort),
+        entries = mixedEntries(tracks.filter { it.source == if (filter == LibrarySourceFilter.YOUTUBE) TrackSource.YOUTUBE else TrackSource.BILIBILI }, emptyList(), sort),
         browsing = false,
     )
     LibrarySourceFilter.ASMR -> LibraryListing(

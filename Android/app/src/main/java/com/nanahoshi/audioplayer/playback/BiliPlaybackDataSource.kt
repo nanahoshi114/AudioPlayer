@@ -1,5 +1,8 @@
 package com.nanahoshi.audioplayer.playback
 
+import com.nanahoshi.audioplayer.youtube.YouTubeClient
+import com.nanahoshi.audioplayer.youtube.readyYouTubeAudio
+
 import android.content.Context
 import android.net.Uri
 import androidx.media3.common.C
@@ -41,6 +44,8 @@ class BiliPlaybackDataSource(
     private val asmr: AsmrClient,
     private val dlsite: DlsiteClient,
     private val db: AppDatabase,
+    private val youtube: YouTubeClient,
+    private val filesDir: File,
 ) : DataSource {
     private var current: DataSource = fallback
 
@@ -51,6 +56,7 @@ class BiliPlaybackDataSource(
 
     override fun open(dataSpec: DataSpec): Long {
         when (dataSpec.uri.scheme) {
+            "youtube" -> return openYouTube(dataSpec)
             "asmr" -> return openAsmr(dataSpec)
             "dlsite" -> return openDlsite(dataSpec)
             "remote" -> return openRemote(dataSpec)
@@ -79,6 +85,32 @@ class BiliPlaybackDataSource(
     override fun close() {
         current.close()
         current = fallback
+    }
+
+    private fun openYouTube(dataSpec: DataSpec): Long {
+        val id = dataSpec.uri.getQueryParameter("videoId") ?: throw IOException("没有 YouTube 视频编号")
+        readyYouTubeAudio(filesDir, id)?.let {
+            current = fallback
+            return fallback.open(dataSpec.buildUpon().setUri(Uri.fromFile(it)).build())
+        }
+        for (attempt in 0..1) {
+            val audio = runBlocking(Dispatchers.IO) { youtube.resolveAudio(id) }
+            val source = androidx.media3.datasource.DefaultHttpDataSource.Factory()
+                .setConnectTimeoutMs(20_000).setReadTimeoutMs(30_000)
+                .setDefaultRequestProperties(audio.headers).createDataSource()
+            current = source
+            try {
+                // DefaultHttpDataSource 正确处理 Range、206 和服务器忽略 Range 时的跳过。
+                return source.open(dataSpec.buildUpon().setUri(audio.url.toUri()).build())
+            } catch (error: HttpDataSource.InvalidResponseCodeException) {
+                source.close()
+                if (error.responseCode !in setOf(401, 403, 404) || attempt == 1) {
+                    throw IOException("YouTube 媒体地址被拒绝，请检查网络或登录信息")
+                }
+                youtube.resetSession()
+            }
+        }
+        throw IOException("无法读取 YouTube 音轨")
     }
 
     private fun manifestBytes(uri: Uri): ByteArray {
@@ -250,6 +282,7 @@ class BiliPlaybackDataSource(
         private val asmr: AsmrClient,
         private val dlsite: DlsiteClient,
         private val db: AppDatabase,
+        private val youtube: YouTubeClient,
     ) : DataSource.Factory {
         private val appContext = context.applicationContext
         private val client = OkHttpClient.Builder()
@@ -268,7 +301,7 @@ class BiliPlaybackDataSource(
                 referer = AsmrClient.REFERER,
                 userAgent = AsmrClient.USER_AGENT,
             )
-            return BiliPlaybackDataSource(fallback, asmrHttp, client, api, asmr, dlsite, db)
+            return BiliPlaybackDataSource(fallback, asmrHttp, client, api, asmr, dlsite, db, youtube, appContext.filesDir)
         }
     }
 }

@@ -92,6 +92,29 @@ class StoredFilesViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun play(item: StoredItem) {
+        if (item.kind != StoredKind.AUDIO) return
+        viewModelScope.launch {
+            val track = item.trackId?.let { graph.library.track(it) } ?: graph.db.tracks().findByLocalUri(item.path)
+            if (track != null) {
+                graph.player.replaceAndPlay(listOf(track))
+                return@launch
+            }
+            val app = getApplication<Application>()
+            val file = File(item.path).canonicalFile
+            val youtube = file.startsWith(File(app.filesDir, "youtube").canonicalFile)
+            val bili = file.startsWith(File(app.filesDir, "bilibili").canonicalFile)
+            val id = item.workCode.orEmpty()
+            graph.player.replaceAndPlayRemote(listOf(com.nanahoshi.audioplayer.dlsite.RemotePlayable(
+                title = item.name, artist = item.workTitle, coverUri = null,
+                remoteUrl = if (youtube) "https://www.youtube.com/watch?v=$id" else item.path,
+                source = when { youtube -> com.nanahoshi.audioplayer.data.TrackSource.YOUTUBE; bili -> com.nanahoshi.audioplayer.data.TrackSource.BILIBILI; else -> com.nanahoshi.audioplayer.data.TrackSource.LOCAL },
+                referer = "", workno = id.takeIf { youtube || bili },
+                fileKey = if (youtube) "audio" else if (bili) file.nameWithoutExtension else null,
+            )))
+        }
+    }
+
     fun delete(selected: List<StoredItem>, onDone: () -> Unit) {
         viewModelScope.launch {
             catalog.delete(selected)
@@ -237,7 +260,10 @@ fun StoredFilesScreen(
                         modifier = Modifier.semantics { this.selected = on }.combinedClickable(
                             onLongClickLabel = "选择文件",
                             onClick = {
-                                if (!selecting) return@combinedClickable
+                                if (!selecting) {
+                                    viewModel.play(item)
+                                    return@combinedClickable
+                                }
                                 selected = if (on) selected - item.path else selected + item.path
                                 if (selected.isEmpty()) selecting = false
                             },

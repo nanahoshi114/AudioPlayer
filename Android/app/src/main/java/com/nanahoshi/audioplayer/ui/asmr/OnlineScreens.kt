@@ -970,7 +970,7 @@ private data class LibraryBrowse(
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun OnlineSearchScreen(
+private fun WorkSearchScreen(
     onOpenWork: (String) -> Unit,
     viewModel: OnlineSearchViewModel = viewModel(),
 ) {
@@ -1090,6 +1090,24 @@ fun OnlineSearchScreen(
         }
     }
     }
+    }
+}
+
+@Composable
+fun OnlineSearchScreen(onOpenWork: (String) -> Unit) {
+    var source by rememberSaveable { mutableStateOf("works") }
+    val holder = androidx.compose.runtime.saveable.rememberSaveableStateHolder()
+    Column(Modifier.fillMaxSize()) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(selected = source == "works", onClick = { source = "works" }, label = { Text("作品") })
+            FilterChip(selected = source == "youtube", onClick = { source = "youtube" }, label = { Text("YouTube") })
+        }
+        Box(Modifier.weight(1f)) {
+            holder.SaveableStateProvider(source) {
+                if (source == "works") WorkSearchScreen(onOpenWork)
+                else com.nanahoshi.audioplayer.ui.youtube.YouTubeBrowser()
+            }
+        }
     }
 }
 
@@ -1733,12 +1751,14 @@ private fun OnlineRemoteFileRow(name: String, onClick: () -> Unit) {
 
 private fun trackSupporting(track: TrackEntity, hasSubtitle: Boolean): String {
     val artist = track.artist?.takeIf { it.isNotBlank() } ?: when (track.source) {
+        TrackSource.YOUTUBE -> "YouTube"
         TrackSource.BILIBILI -> "B站"
         TrackSource.ASMR -> "asmr.one"
         TrackSource.DLSITE -> "DLsite"
         TrackSource.LOCAL -> "本地"
     }
     val source = when (track.source) {
+        TrackSource.YOUTUBE -> "YouTube"
         TrackSource.BILIBILI -> "B站"
         TrackSource.ASMR -> "asmr.one"
         TrackSource.DLSITE -> "DLsite"
@@ -2016,6 +2036,7 @@ class PurchasesViewModel(app: Application) : AndroidViewModel(app) {
 fun MineScreen(
     onOpenPurchases: () -> Unit,
     onOpenFavorites: () -> Unit,
+    onOpenYouTubeList: (String) -> Unit,
     viewModel: MineViewModel = viewModel(),
 ) {
     var biliHelp by remember { mutableStateOf(false) }
@@ -2099,6 +2120,9 @@ fun MineScreen(
             item(key = "dlsite-error") {
                 Text(message, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 8.dp))
             }
+        }
+        item(key = "youtube") {
+            com.nanahoshi.audioplayer.ui.youtube.YouTubeAccountCard(onOpenYouTubeList)
         }
         item(key = "bilibili") {
             AccountCard(title = "B站", loggedIn = viewModel.biliReady) {

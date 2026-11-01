@@ -149,6 +149,7 @@ private object Routes {
     const val Online = "online"
     const val OnlineWork = "online/work/{sourceId}"
     fun onlineWork(sourceId: String) = "online/work/$sourceId"
+    const val YouTubeList = "youtube/list/{listId}"
     const val Mine = "mine"
     const val Settings = "settings"
     const val ModelSettings = "settings/models"
@@ -440,10 +441,15 @@ private fun PlayerApp() {
                     onOpenRemotePreview = { navController.navigate(Routes.RemotePreview) },
                 )
             }
+            composable(Routes.YouTubeList) { entry ->
+                val id = entry.arguments?.getString("listId")?.takeIf { it == "LL" || it == "WL" } ?: return@composable
+                com.nanahoshi.audioplayer.ui.youtube.YouTubeBrowser(playlistId = id, onBack = { navController.popBackStack() })
+            }
             composable(Routes.Mine) {
                 MineScreen(
                     onOpenPurchases = { navController.navigate(Routes.Purchases) },
                     onOpenFavorites = { navController.navigate(Routes.favorites(null)) },
+                    onOpenYouTubeList = { navController.navigate("youtube/list/$it") },
                 )
             }
             composable(Routes.Settings) {

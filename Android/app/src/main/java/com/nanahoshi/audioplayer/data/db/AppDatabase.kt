@@ -48,7 +48,7 @@ class DownloadStatusConverter {
         WhisperJobEntity::class,
         TranslationJobEntity::class,
     ],
-    version = 12,
+    version = 13,
     exportSchema = false,
 )
 @TypeConverters(TrackSourceConverter::class, FileKindConverter::class, DownloadStatusConverter::class)
@@ -77,8 +77,16 @@ abstract class AppDatabase : RoomDatabase() {
                     MIGRATION_9_10,
                     MIGRATION_10_11,
                     MIGRATION_11_12,
+                    MIGRATION_12_13,
                 )
                 .build()
+
+        internal val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("ALTER TABLE tracks ADD COLUMN youtubeVideoId TEXT")
+                connection.execSQL("CREATE UNIQUE INDEX index_tracks_youtubeVideoId ON tracks (youtubeVideoId)")
+            }
+        }
 
         private val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(connection: SQLiteConnection) {

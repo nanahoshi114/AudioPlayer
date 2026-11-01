@@ -286,7 +286,7 @@ fun LibraryWorkScreen(
                                             onDownload = if (
                                                 track.source == TrackSource.ASMR ||
                                                 track.source == TrackSource.DLSITE ||
-                                                track.source == TrackSource.BILIBILI
+                                                (track.source == TrackSource.BILIBILI || track.source == TrackSource.YOUTUBE)
                                             ) {
                                                 { viewModel.downloadTrack(track) }
                                             } else {
@@ -295,7 +295,7 @@ fun LibraryWorkScreen(
                                             onDeleteDownloaded = if (
                                                 track.source == TrackSource.ASMR ||
                                                 track.source == TrackSource.DLSITE ||
-                                                track.source == TrackSource.BILIBILI
+                                                (track.source == TrackSource.BILIBILI || track.source == TrackSource.YOUTUBE)
                                             ) {
                                                 { viewModel.deleteDownloadedTrack(track) }
                                             } else {
