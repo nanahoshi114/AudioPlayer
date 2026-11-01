@@ -1,0 +1,14 @@
+/build
+/captures
+/.gradle
+/.kotlin
+/local.properties
+/app/build
+/app/release
+/app/debug
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml

@@ -2,11 +2,14 @@
 
 Android 音频播放器，应用名「音频播放器」，包名 `com.nanahoshi.audioplayer`。听本机文件、B 站音轨、asmr.one，以及用户自己在 DLsite 买过的作品。界面是 Jetpack Compose。仓库 `https://github.com/nanahoshi114/AudioPlayer.git`。
 
-产品说明以当前代码为准。`README.md` 和 `docs/` 已按当前进度同步；以后改功能时，一并更新相关文档。
+仓库根目录包含 `Android/`（Android 工程）和 `DesktopDemo/`（Windows 桌面播放器，WPF/.NET 8）。以下内容和路径均指 `Android/` 工程。
+
+产品说明以当前代码为准。`Android/README.md` 和 `Android/docs/` 已按当前进度同步；以后改功能时，一并更新相关文档。
 
 ## 编译
 
 ```sh
+cd Android
 export GRADLE_USER_HOME="$HOME/.gradle"
 ./gradlew :app:compileDebugKotlin --no-configuration-cache
 ```
@@ -17,15 +20,17 @@ Kotlin 2.2.10，AGP 9.4.1，compileSdk / targetSdk 37，minSdk 24，Java 11。�
 
 真机是 Realme RMX5010。adb 在沙箱里看不到设备。用户没要求时不要安装。
 
-正式包由 Android Studio 签到 `app/release/app-release.apk`。`app/build` 和 `app/release` 都不要提交。
+正式包由 Android Studio 在 `Android/` 工程里签到 `Android/app/release/app-release.apk`。`Android/app/build` 和 `Android/app/release` 都不要提交。
 
 ## 文档
 
-- `README.md`：给用户看的功能说明。
-- `docs/asmr-one-api.md`、`docs/dlsite-api.md`、`docs/whisper-api.md`：接口和播放器的调用方式。
-- `docs/youtube-api.md`：2026-10-27 的只读调查。播放器目前不请求 YouTube，代码里也没有 YouTube 相关实现。
+- `Android/README.md`：给用户看的功能说明。
+- `Android/docs/asmr-one-api.md`、`Android/docs/dlsite-api.md`、`Android/docs/whisper-api.md`：接口和播放器的调用方式。
+- `Android/docs/youtube-api.md`：2026-10-27 的只读调查。播放器目前不请求 YouTube，代码里也没有 YouTube 相关实现。
 
 ## 代码地图
+
+下表位置相对 `Android/app/src/main/java/com/nanahoshi/audioplayer`。
 
 | 位置 | 做什么 |
 | --- | --- |
@@ -71,7 +76,7 @@ Kotlin 2.2.10，AGP 9.4.1，compileSdk / targetSdk 37，minSdk 24，Java 11。�
 - 音频库多选时，只要选中了作品（`asmrSourceId` 非空的文件夹），顶栏不显示下一个播放、加到末尾、下载、加入播放列表，只留删除已下载的文件和移除。播放列表详情页没有「加入音频」，只能从音频库多选加入。
 - 音频库搜索匹配文件夹名、作品标签（`workMeta` 里的 tags）、曲目名和文件名；纯数字还匹配作品编号。作品内部的子文件夹、曲目、文件都归到最近的作品根（`workRootOf`），一个作品只出现一次。
 - 中止只停手机上的这次 HTTP。自部署听写服务（Qwen3-ASR）没有取消接口；SenseVoiceSmall 只在片段之间响应取消，不与 JNI 解码并发调 release。听写还在等下载时，不要把音频下载一起取消。错误文案恰好是「已中止」时，下载列表不要显示「查看返回」。
-- 听写按保存的模型选接口，现有三个：`qwen-audio-3.1-asr`、`Qwen3-ASR`、`SenseVoiceSmall`。每个模型各自保存地址和密钥；切换下拉只显示该模型已保存的内容，保存和清除也只作用于当前模型。进行中的任务继续用它自己的模型密钥。`qwen-audio-3.1-asr` 是线上模型：界面不显示地址，只保存 API Key；请求固定走 `https://dashscope.aliyuncs.com`，不论时长都先临时上传再轮询，模型名 `qwen-audio-3.1-asr-flash-filetrans`，超过 1GB 不上传。`Qwen3-ASR` 地址不能空：先读取服务上的模型名，再请求 `/v1/audio/transcriptions`，日语；返回分段时间则按段写字幕，只有整段文字时写成覆盖整首时长的一条。`SenseVoiceSmall` 完全在本机运行（sherpa-onnx，vendored 的 `com.k2fsa.sherpa.onnx` Kotlin API 和 `app/src/main/jniLibs/arm64-v8a/` 的 .so，只带 arm64），没有地址和口令，任务 endpoint 存 null（双方 null 视为同一服务，去重成立）；模型文件在 `filesDir/sense-voice/`，由 `SenseVoiceModelManager` 从 GitHub Releases 下载（tar.bz2 边下边解，不落压缩包），只认 int8-2024-07-17 的多语种包（版本记在 `version.txt`，不符就在启动时删掉重下）；2025-09-09 的包实为 WSYue-ASR 粤语模型，日语只出汉字，不要换回去；VAD 模型 `silero_vad.onnx` 打包在 assets；`hasWhisper` 对它恒为 false，播放页旁路走 `SenseVoiceModelManager.isReady()`；长音频用 Silero VAD 按静音切 ≤28 秒分段（MediaExtractor + MediaCodec 流式解码 16kHz 单声道），token 时间戳加段偏移拼回整首。旧偏好里存着已删模型（whisper-1 / 本地部署 / 本机任务接口）时一次性迁移成 `qwen-audio-3.1-asr`，不伪造 API Key；队列里旧模型的任务直接失败并提示已移除。保存时地址为空仍保存所选模型。保存听写地址时不要自动补 `/v1`。
+- 听写按保存的模型选接口，现有三个：`qwen-audio-3.1-asr`、`Qwen3-ASR`、`SenseVoiceSmall`。每个模型各自保存地址和密钥；切换下拉只显示该模型已保存的内容，保存和清除也只作用于当前模型。进行中的任务继续用它自己的模型密钥。`qwen-audio-3.1-asr` 是线上模型：界面不显示地址，只保存 API Key；请求固定走 `https://dashscope.aliyuncs.com`，不论时长都先临时上传再轮询，模型名 `qwen-audio-3.1-asr-flash-filetrans`，超过 1GB 不上传。`Qwen3-ASR` 地址不能空：先读取服务上的模型名，再请求 `/v1/audio/transcriptions`，日语；返回分段时间则按段写字幕，只有整段文字时写成覆盖整首时长的一条。`SenseVoiceSmall` 完全在本机运行（sherpa-onnx，vendored 的 `com.k2fsa.sherpa.onnx` Kotlin API 和 `Android/app/src/main/jniLibs/arm64-v8a/` 的 .so，只带 arm64），没有地址和口令，任务 endpoint 存 null（双方 null 视为同一服务，去重成立）；模型文件在 `filesDir/sense-voice/`，由 `SenseVoiceModelManager` 从 GitHub Releases 下载（tar.bz2 边下边解，不落压缩包），只认 int8-2024-07-17 的多语种包（版本记在 `version.txt`，不符就在启动时删掉重下）；2025-09-09 的包实为 WSYue-ASR 粤语模型，日语只出汉字，不要换回去；VAD 模型 `silero_vad.onnx` 打包在 assets；`hasWhisper` 对它恒为 false，播放页旁路走 `SenseVoiceModelManager.isReady()`；长音频用 Silero VAD 按静音切 ≤28 秒分段（MediaExtractor + MediaCodec 流式解码 16kHz 单声道），token 时间戳加段偏移拼回整首。旧偏好里存着已删模型（whisper-1 / 本地部署 / 本机任务接口）时一次性迁移成 `qwen-audio-3.1-asr`，不伪造 API Key；队列里旧模型的任务直接失败并提示已移除。保存时地址为空仍保存所选模型。保存听写地址时不要自动补 `/v1`。
 - 翻译只用千问AI平台和 DeepSeek 两个预设平台，地址固定，不再让用户填写，也不再补 `/v1`。口令和模型名按平台分开保存。模型名没填时，千问用 `qwen3.8-flash`，DeepSeek 用 `deepseek-flash`。深度思考关闭时千问发 `enable_thinking: false`，DeepSeek 发 `thinking.type: disabled`。打开后千问只发 `enable_thinking` 和 `reasoning_effort`（低 `low`、中 `medium`、高 `xhigh`），不要同时发 `thinking_budget`。DeepSeek 的 `reasoning_effort` 放在请求顶层（高 `high`、最高 `max`），不要放进 `thinking`。思考过程在 `reasoning_content`，不要写进字幕。
 - 润色失败保留原译文，不把任务记成翻译失败。自动润色发生在译文已经写入之后。手动「润色」不进下载列表，跑在 `TranslateCenter` 自己的协程里；离开正在播放页只取消等待，不取消这次润色。
 - 本地复制进 `filesDir/whisper-src/` 的文件名没有后缀。上传时按文件头补 `mp3` / `flac` / `m4a` / `aac` / `wav` / `ogg`，不要改磁盘上的暂存文件名。只有 `content:` URI 和重试时缺文件才复制；任务进行中不要清掉这份暂存，任务结束、取消或重试后清掉没有被任务引用的暂存文件。重试优先用任务原来的文件，其次从曲目本地文件再复制。SenseVoiceSmall 直接读本地文件（MediaExtractor 走真实路径），不走上传，也不用这份暂存。
