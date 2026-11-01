@@ -1,6 +1,11 @@
 package com.nanahoshi.audioplayer.ui.settings
 
 import android.app.Application
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.layout.fillMaxSize
@@ -51,6 +56,7 @@ import com.nanahoshi.audioplayer.data.isCloudWhisperModel
 import com.nanahoshi.audioplayer.data.whisperModelLabel
 import com.nanahoshi.audioplayer.graph
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ModelSettingsScreen(
     onBack: () -> Unit,
@@ -66,7 +72,7 @@ fun ModelSettingsScreen(
     }
     Column(Modifier.fillMaxSize()) {
         AppTopBar(title = "听写和翻译", onBack = onBack)
-        LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+        LazyColumn(Modifier.fillMaxSize().imePadding().padding(horizontal = 16.dp), contentPadding = PaddingValues(bottom = 24.dp)) {
             item(key = "whisper") {
                 Row(
                     Modifier.padding(top = 8.dp),
@@ -99,14 +105,14 @@ fun ModelSettingsScreen(
                     visualTransformation = PasswordVisualTransformation(),
                     modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                 )
-                Button(
-                    onClick = viewModel::saveWhisper,
-                    modifier = Modifier.padding(top = 8.dp),
-                ) { Text("保存") }
-                TextButton(onClick = viewModel::clearWhisper) { Text("清除") }
-                if (viewModel.whisperSaved) {
-                    Text("已保存", modifier = Modifier.padding(top = 8.dp))
+                FlowRow(
+                    Modifier.fillMaxWidth().padding(top = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Button(onClick = viewModel::saveWhisper) { Text("保存") }
+                    TextButton(onClick = viewModel::clearWhisper) { Text("清除") }
                 }
+                SaveStatus(viewModel.whisperModified, viewModel.whisperSaved)
             }
             item(key = "translate") {
                 Row(
@@ -185,17 +191,31 @@ fun ModelSettingsScreen(
                         onCheckedChange = viewModel::setAutoPolish,
                     )
                 }
-                Button(
-                    onClick = viewModel::saveTranslate,
-                    modifier = Modifier.padding(top = 8.dp),
-                ) { Text("保存") }
-                TextButton(onClick = viewModel::clearTranslate) { Text("清除") }
-                if (viewModel.translateSaved) {
-                    Text("已保存", modifier = Modifier.padding(top = 8.dp))
+                FlowRow(
+                    Modifier.fillMaxWidth().padding(top = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Button(onClick = viewModel::saveTranslate) { Text("保存") }
+                    TextButton(onClick = viewModel::clearTranslate) { Text("清除") }
                 }
+                SaveStatus(viewModel.translateModified, viewModel.translateSaved)
             }
         }
     }
+}
+
+@Composable
+private fun SaveStatus(modified: Boolean, configured: Boolean) {
+    Text(
+        when {
+            modified -> "有未保存的修改"
+            configured -> "已保存"
+            else -> "未配置完成"
+        },
+        style = MaterialTheme.typography.bodySmall,
+        color = if (modified) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 8.dp),
+    )
 }
 
 class ModelSettingsViewModel(app: Application) : AndroidViewModel(app) {
@@ -217,11 +237,22 @@ class ModelSettingsViewModel(app: Application) : AndroidViewModel(app) {
     var translateAutoPolish by mutableStateOf(graph.credentials.translateAutoPolish())
         private set
 
+    private var whisperBaseline by mutableStateOf(currentWhisperInput())
+    private var translateBaseline by mutableStateOf(currentTranslateInput())
+    val whisperModified: Boolean
+        get() = whisperBaseline.isModified(whisperBase, whisperToken)
+    val translateModified: Boolean
+        get() = translateBaseline.isModified(translateToken, translateModel)
+
+    private fun currentWhisperInput() = SettingsInputBaseline(whisperBase, whisperToken)
+    private fun currentTranslateInput() = SettingsInputBaseline(translateToken, translateModel)
+
     fun selectWhisperModel(id: String) {
         whisperModel = id
         whisperBase = graph.credentials.whisperBaseUrl(id).orEmpty()
         whisperToken = graph.credentials.whisperToken(id).orEmpty()
         whisperSaved = graph.credentials.hasWhisper(id)
+        whisperBaseline = currentWhisperInput()
     }
 
     fun saveWhisper() {
@@ -230,6 +261,7 @@ class ModelSettingsViewModel(app: Application) : AndroidViewModel(app) {
         whisperToken = graph.credentials.whisperToken(whisperModel).orEmpty()
         whisperModel = graph.credentials.resolvedWhisperModel()
         whisperSaved = graph.credentials.hasWhisper(whisperModel)
+        whisperBaseline = currentWhisperInput()
     }
 
     fun clearWhisper() {
@@ -237,6 +269,7 @@ class ModelSettingsViewModel(app: Application) : AndroidViewModel(app) {
         whisperBase = ""
         whisperToken = ""
         whisperSaved = false
+        whisperBaseline = currentWhisperInput()
     }
 
     fun selectTranslatePlatform(platform: TranslatePlatform) {
@@ -245,6 +278,7 @@ class ModelSettingsViewModel(app: Application) : AndroidViewModel(app) {
         translateModel = graph.credentials.translateModelInput(platform)
         translateEffort = graph.credentials.translateEffort(platform)
         translateSaved = graph.credentials.translateToken(platform) != null
+        translateBaseline = currentTranslateInput()
     }
 
     fun saveTranslate() {
@@ -253,6 +287,7 @@ class ModelSettingsViewModel(app: Application) : AndroidViewModel(app) {
         translateToken = graph.credentials.translateToken(translatePlatform).orEmpty()
         translateModel = graph.credentials.translateModelInput(translatePlatform)
         translateSaved = graph.credentials.hasTranslate()
+        translateBaseline = currentTranslateInput()
     }
 
     fun clearTranslate() {
@@ -260,6 +295,7 @@ class ModelSettingsViewModel(app: Application) : AndroidViewModel(app) {
         translateToken = ""
         translateModel = ""
         translateSaved = false
+        translateBaseline = currentTranslateInput()
     }
 
     fun setThinking(enabled: Boolean) {

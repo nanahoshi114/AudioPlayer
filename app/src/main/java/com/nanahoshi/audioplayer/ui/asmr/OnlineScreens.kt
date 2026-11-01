@@ -19,6 +19,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -32,6 +33,7 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -45,6 +47,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -85,6 +88,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -93,6 +97,8 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.input.key.Key
@@ -139,6 +145,7 @@ import com.nanahoshi.audioplayer.ui.EmptyHint
 import com.nanahoshi.audioplayer.ui.components.AppTopBar
 import com.nanahoshi.audioplayer.ui.components.BadgeItem
 import com.nanahoshi.audioplayer.ui.components.BadgeLine
+import com.nanahoshi.audioplayer.ui.components.ErrorState
 import com.nanahoshi.audioplayer.ui.components.EmptyState
 import com.nanahoshi.audioplayer.ui.components.LabelBadge
 import com.nanahoshi.audioplayer.ui.components.LoadingState
@@ -226,6 +233,8 @@ data class OnlineHit(
 
 class OnlineSearchViewModel(app: Application) : AndroidViewModel(app) {
     private val graph = app.graph()
+    var draftText by mutableStateOf("")
+    var draftPieces by mutableStateOf<List<SearchPiece>>(emptyList())
     var text by mutableStateOf("")
     var pieces by mutableStateOf<List<SearchPiece>>(emptyList())
     var subtitleOnly by mutableStateOf(false)
@@ -268,6 +277,8 @@ class OnlineSearchViewModel(app: Application) : AndroidViewModel(app) {
     fun applyQuery(nextText: String, nextPieces: List<SearchPiece>) {
         text = nextText
         pieces = nextPieces
+        draftText = nextText
+        draftPieces = nextPieces
         reload()
     }
 
@@ -381,15 +392,13 @@ class OnlineSearchViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 works = markListed(merged.values.toList())
                 page = nextPage
-                if (works.isEmpty()) {
-                    error = asmrResult?.exceptionOrNull()?.message
-                        ?: dlsiteResult?.exceptionOrNull()?.message
-                        ?: "没有作品。"
-                }
+                error = listOfNotNull(
+                    asmrResult?.exceptionOrNull()?.let { "asmr.one：${it.message ?: "暂时无法连接"}" },
+                    dlsiteResult?.exceptionOrNull()?.let { "DLsite：${it.message ?: "暂时无法连接"}" },
+                ).takeIf { it.isNotEmpty() }?.joinToString("\n")
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                if (reset) works = emptyList()
                 error = failure.message ?: "暂时无法连接"
             } finally {
                 if (job === coroutineContext[Job]) loading = false
@@ -540,8 +549,8 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun load(sourceId: String, metered: Boolean) {
-        if (sourceKey == sourceId && facts != null) {
+    fun load(sourceId: String, metered: Boolean, force: Boolean = false) {
+        if (!force && sourceKey == sourceId && facts != null) {
             refreshDownloads(sourceId)
             return
         }
@@ -965,7 +974,7 @@ fun OnlineSearchScreen(
     onOpenWork: (String) -> Unit,
     viewModel: OnlineSearchViewModel = viewModel(),
 ) {
-    var composing by remember { mutableStateOf(false) }
+    var composing by rememberSaveable { mutableStateOf(false) }
     val reduceMotion = LocalReduceMotion.current
     AnimatedContent(
         targetState = composing,
@@ -984,8 +993,10 @@ fun OnlineSearchScreen(
     ) { open ->
     if (open) {
         SearchComposer(
-            initialText = viewModel.text,
-            initialPieces = viewModel.pieces,
+            text = viewModel.draftText,
+            pieces = viewModel.draftPieces,
+            onTextChange = { viewModel.draftText = it },
+            onPiecesChange = { viewModel.draftPieces = it },
             onBack = { composing = false },
             onSearch = { text, pieces ->
                 viewModel.applyQuery(text, pieces)
@@ -1023,7 +1034,7 @@ fun OnlineSearchScreen(
                 )
             }
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -1049,9 +1060,20 @@ fun OnlineSearchScreen(
         when {
             works.isEmpty() && viewModel.loading -> SkeletonWorkList(modifier = topInset)
             works.isEmpty() -> Box(topInset.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
-                EmptyState(title = viewModel.error ?: "没有作品")
+                if (viewModel.error != null) {
+                    ErrorState(viewModel.error!!, viewModel::reload)
+                } else {
+                    EmptyState(
+                        title = "没有找到作品",
+                        actionLabel = "修改搜索",
+                        onAction = { composing = true },
+                    )
+                }
             }
             else -> LazyColumn(state = listState, modifier = topInset.fillMaxSize()) {
+                if (viewModel.error != null && !viewModel.loading) {
+                    item(key = "error") { ErrorState(viewModel.error!!, viewModel::reload) }
+                }
                 items(works, key = { it.sourceId }) { item ->
                     OnlineResultCard(item) {
                         if (item.sourceId.isNotBlank()) onOpenWork(item.sourceId)
@@ -1142,23 +1164,35 @@ private fun SortMenu(
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun SearchComposer(
-    initialText: String,
-    initialPieces: List<SearchPiece>,
+    text: String,
+    pieces: List<SearchPiece>,
+    onTextChange: (String) -> Unit,
+    onPiecesChange: (List<SearchPiece>) -> Unit,
     onBack: () -> Unit,
     onSearch: (String, List<SearchPiece>) -> Unit,
 ) {
-    var text by remember { mutableStateOf(initialText) }
-    var pieces by remember { mutableStateOf(initialPieces) }
-    var pendingKind by remember { mutableStateOf<PieceKind?>(null) }
-    var pendingName by remember { mutableStateOf("") }
-    BackHandler(onBack = onBack)
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
+    var pendingKind by rememberSaveable { mutableStateOf<PieceKind?>(null) }
+    var pendingName by rememberSaveable { mutableStateOf("") }
+    val focus = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    fun submit() {
+        focus.clearFocus()
+        keyboard?.hide()
+        onSearch(text.trim(), pieces)
+    }
+    fun close() {
+        focus.clearFocus()
+        keyboard?.hide()
+        onBack()
+    }
+    BackHandler(onBack = ::close)
+    Column(Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) {
+            IconButton(onClick = ::close) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
             }
             Text("搜索", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-            TextButton(onClick = { onSearch(text.trim(), pieces) }) { Text("搜索") }
+            TextButton(onClick = ::submit) { Text("搜索") }
         }
         Surface(
             modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
@@ -1174,7 +1208,7 @@ private fun SearchComposer(
                     Surface(shape = MaterialTheme.shapes.small, color = MaterialTheme.colorScheme.secondaryContainer) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(piece.caption(), modifier = Modifier.padding(start = 10.dp))
-                            IconButton(onClick = { pieces = pieces.filterNot { it == piece } }) {
+                            IconButton(onClick = { onPiecesChange(pieces.filterNot { it == piece }) }) {
                                 Icon(Icons.Default.Close, contentDescription = "删除")
                             }
                         }
@@ -1182,11 +1216,11 @@ private fun SearchComposer(
                 }
                 BasicTextField(
                     value = text,
-                    onValueChange = { text = it.replace("$", "") },
+                    onValueChange = { onTextChange(it.replace("$", "")) },
                     modifier = Modifier.widthIn(min = 120.dp).padding(8.dp).onPreviewKeyEvent { event ->
                         val deleting = event.type == KeyEventType.KeyDown && event.key == Key.Backspace
                         if (deleting && text.isEmpty() && pieces.isNotEmpty()) {
-                            pieces = pieces.dropLast(1)
+                            onPiecesChange(pieces.dropLast(1))
                             true
                         } else {
                             false
@@ -1194,6 +1228,7 @@ private fun SearchComposer(
                     },
                     textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(onSearch = { submit() }),
                     decorationBox = { inner ->
                         if (text.isEmpty() && pieces.isEmpty()) {
                             Text("输入文字", color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1217,7 +1252,7 @@ private fun SearchComposer(
         TagPicker(
             taken = pieces.mapNotNull { it.genreId }.toSet(),
             onPick = { genre ->
-                pieces = pieces + SearchPiece(PieceKind.TAG, genre.name, genre.id)
+                onPiecesChange(pieces + SearchPiece(PieceKind.TAG, genre.name, genre.id))
                 pendingKind = null
             },
             onDismiss = { pendingKind = null },
@@ -1237,7 +1272,7 @@ private fun SearchComposer(
             confirmButton = {
                 TextButton(onClick = {
                     val name = pendingName.trim()
-                    if (name.isNotEmpty()) pieces = pieces + SearchPiece(kind, name)
+                    if (name.isNotEmpty()) onPiecesChange(pieces + SearchPiece(kind, name))
                     pendingKind = null
                 }) { Text("加入") }
             },
@@ -1390,9 +1425,11 @@ fun OnlineWorkScreen(
             facts == null && viewModel.busy -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator()
             }
-            facts == null -> Box(Modifier.fillMaxSize().padding(24.dp)) {
-                EmptyHint(viewModel.error ?: "没有读到作品。")
-            }
+            facts == null -> ErrorState(
+                viewModel.error ?: "没有读到作品。",
+                onRetry = { viewModel.load(sourceId, context.onMeteredNetwork(), force = true) },
+                modifier = Modifier.fillMaxSize(),
+            )
             else -> {
                 val foldersEmpty = when {
                     viewModel.showPlay -> viewModel.playFolders.isEmpty()
@@ -1410,6 +1447,13 @@ fun OnlineWorkScreen(
                     Modifier.weight(1f).fillMaxWidth(),
                     contentPadding = PaddingValues(bottom = if (canSave) 96.dp else 16.dp),
                 ) {
+                if (viewModel.error != null && !viewModel.busy) {
+                    item(key = "error") {
+                        ErrorState(viewModel.error!!, onRetry = {
+                            viewModel.load(sourceId, context.onMeteredNetwork(), force = true)
+                        })
+                    }
+                }
                 item(key = "facts") {
                     WorkHeader(facts, viewModel.coverUrl, purchased = viewModel.purchased)
                 }
@@ -1949,8 +1993,12 @@ class PurchasesViewModel(app: Application) : AndroidViewModel(app) {
     var error by mutableStateOf<String?>(null)
         private set
 
-    init {
+    init { reload() }
+
+    fun reload() {
         viewModelScope.launch {
+            loading = true
+            error = null
             try {
                 purchases = graph.dlsite.purchases()
             } catch (cancelled: CancellationException) {
@@ -2228,12 +2276,22 @@ fun PurchasesScreen(
     Column(Modifier.fillMaxSize()) {
         AppTopBar(title = "已购买作品", onBack = onBack)
         when {
-            viewModel.loading -> LoadingState("正在读取已购买作品", Modifier.fillMaxSize())
+            viewModel.loading && viewModel.purchases.isEmpty() -> LoadingState("正在读取已购买作品", Modifier.fillMaxSize())
+            viewModel.error != null && viewModel.purchases.isEmpty() -> ErrorState(
+                viewModel.error!!,
+                onRetry = viewModel::reload,
+                modifier = Modifier.fillMaxSize(),
+            )
             viewModel.purchases.isEmpty() -> EmptyState(
-                title = viewModel.error ?: "没有已购买作品",
+                title = "没有已购买作品",
                 modifier = Modifier.fillMaxSize(),
             )
             else -> LazyColumn(Modifier.fillMaxSize()) {
+                if (viewModel.loading) {
+                    item(key = "loading") { LoadingState("正在读取已购买作品") }
+                } else if (viewModel.error != null) {
+                    item(key = "error") { ErrorState(viewModel.error!!, viewModel::reload) }
+                }
                 items(viewModel.purchases, key = { it.workno }) { item ->
                     Surface(
                         onClick = { onOpenWork(item.workno) },

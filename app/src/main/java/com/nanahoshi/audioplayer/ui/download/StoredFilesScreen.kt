@@ -20,6 +20,7 @@ import androidx.compose.material.icons.filled.Album
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
@@ -30,6 +31,8 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.Icon
 import com.nanahoshi.audioplayer.ui.components.AppTopBar
 import com.nanahoshi.audioplayer.ui.components.EmptyState
+import com.nanahoshi.audioplayer.ui.components.ErrorState
+import com.nanahoshi.audioplayer.ui.components.LoadingState
 import com.nanahoshi.audioplayer.ui.components.SelectionAction
 import com.nanahoshi.audioplayer.ui.components.SelectionTopBar
 import androidx.compose.runtime.Composable
@@ -38,6 +41,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -63,6 +69,9 @@ class StoredFilesViewModel(app: Application) : AndroidViewModel(app) {
     var loading by mutableStateOf(true)
         private set
 
+    var error by mutableStateOf<String?>(null)
+        private set
+
     init {
         refresh()
     }
@@ -70,14 +79,16 @@ class StoredFilesViewModel(app: Application) : AndroidViewModel(app) {
     fun refresh() {
         viewModelScope.launch {
             loading = true
-            items = try {
-                catalog.list()
+            error = null
+            try {
+                items = catalog.list()
             } catch (cancelled: CancellationException) {
                 throw cancelled
-            } catch (_: Exception) {
-                emptyList()
+            } catch (failure: Exception) {
+                error = failure.message ?: "无法读取已下载的文件"
+            } finally {
+                loading = false
             }
-            loading = false
         }
     }
 
@@ -174,14 +185,37 @@ fun StoredFilesScreen(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
         )
         when {
-            viewModel.loading && viewModel.items.isEmpty() -> EmptyState(title = "正在读取已下载的文件", modifier = Modifier.fillMaxSize())
+            viewModel.loading && viewModel.items.isEmpty() -> LoadingState("正在读取已下载的文件", Modifier.fillMaxSize())
+            viewModel.error != null && viewModel.items.isEmpty() -> ErrorState(
+                message = viewModel.error!!,
+                onRetry = viewModel::refresh,
+                modifier = Modifier.fillMaxSize(),
+            )
             viewModel.items.isEmpty() -> EmptyState(title = "没有已下载的文件", modifier = Modifier.fillMaxSize())
             visible.isEmpty() -> EmptyState(title = "没有匹配的文件", modifier = Modifier.fillMaxSize())
             else -> LazyColumn(Modifier.fillMaxSize()) {
+                if (viewModel.loading) {
+                    item(key = "loading") { LoadingState("正在读取已下载的文件") }
+                } else if (viewModel.error != null) {
+                    item(key = "error") { ErrorState(viewModel.error!!, viewModel::refresh) }
+                }
+                if (!selecting) {
+                    item(key = "selection-hint") {
+                        Text(
+                            "长按文件可多选、导出或删除",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        )
+                    }
+                }
                 items(visible, key = { it.path }) { item ->
                     val on = item.path in selected
                     ListItem(
-                        headlineContent = { Text(item.name) },
+                        headlineContent = { Text(item.name, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+                        leadingContent = {
+                            if (selecting) Checkbox(checked = on, onCheckedChange = null)
+                        },
                         supportingContent = {
                             val bits = listOfNotNull(
                                 when (item.kind) {
@@ -200,7 +234,8 @@ fun StoredFilesScreen(
                         } else {
                             ListItemDefaults.colors()
                         },
-                        modifier = Modifier.combinedClickable(
+                        modifier = Modifier.semantics { this.selected = on }.combinedClickable(
+                            onLongClickLabel = "选择文件",
                             onClick = {
                                 if (!selecting) return@combinedClickable
                                 selected = if (on) selected - item.path else selected + item.path

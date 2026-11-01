@@ -100,6 +100,9 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     val workRoot = workRootId.flatMapLatest { id ->
         if (id == null) kotlinx.coroutines.flow.flowOf(null) else graph.library.observeFolder(id)
     }
+    private val listingSort = combine(sort, workRootId) { global, root ->
+        effectiveLibrarySort(global, root)
+    }
     val pendingAsmr = MutableStateFlow<AsmrPreview?>(null)
     private var rjLookup: Job? = null
     private var openJob: Job? = null
@@ -109,7 +112,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         currentFolderId,
         sourceFilter,
         searchQuery,
-        sort,
+        listingSort,
         workFileSource,
     ) { folderId, filter, query, sortMode, workSource ->
         LibraryRequest(folderId, filter, query.trim(), sortMode, workSource)
@@ -638,7 +641,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             val source = workFileSource.value
             val tracks = graph.library.tracksIn(folderId)
                 .filter { source == null || it.source == source }
-                .sortedForLibrary(graph.librarySort.sort.value)
+                .sortedForLibrary(effectiveLibrarySort(graph.librarySort.sort.value, workRootId.value))
             val index = tracks.indexOfFirst { it.id == track.id }
             if (index < 0) {
                 // 搜索结果里点到不在当前文件夹或不在当前来源的曲目时，只播放这一首。
@@ -671,7 +674,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             currentFolderId.value,
             selectedFolderIds.value,
             selectedTrackIds.value,
-            graph.librarySort.sort.value,
+            effectiveLibrarySort(graph.librarySort.sort.value, workRootId.value),
         )
 
     private fun acrossLibrary(
@@ -710,6 +713,9 @@ private data class LibraryRequest(
 )
 
 private val RJ_QUERY = Regex("\\d{1,7}")
+
+internal fun effectiveLibrarySort(global: LibrarySort, workRootId: Long?): LibrarySort =
+    if (workRootId != null) LibrarySort.NAME else global
 
 internal fun searchListing(
     query: String,

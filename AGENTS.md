@@ -52,6 +52,7 @@ Kotlin 2.2.10，AGP 9.4.1，compileSdk / targetSdk 37，minSdk 24，Java 11。�
 - 还没保存进库的队列项用 `PlayerClient.playQueueItem`。`playTrack` 只在 `track.id > 0` 时追加。
 - DLsite 试听行的 source 是 `DLSITE`，但 `fileKey` 为空。空 `fileKey` 不要带上 DLsite 登录。
 - DLsite 登录走 WebView（`login.dlsite.com` 会拦 OkHttp），登录后读取 Cookie，用 `mergeDlsiteCookies` 去掉 `cf_` / `__cf` / `_cfuvid` 再保存；退出时清 WebView Cookie。不要把账号密码表单恢复成主登录路径。
+- 作品页的滚动分两层：外层作品信息和文件框一起滚，文件框内的 `LazyColumn` 自己滚。`WorkPageScrollConnection` 保证向下翻先滚外层、外层到底才滚文件区，向上翻先滚文件区、文件区到顶才回外层；`文件`标题、来源切换、面包屑不能放进文件 LazyColumn。进入子文件夹只重建内层状态，外层不重置。作品页的列表、播放队列、多选顺序固定 `LibrarySort.NAME`。
 - 作品页是单独路由 `library/work/{folderId}`，用自己的 `LibraryViewModel` 实例，不和音频库列表共用。作品同时有 DLsite 和 asmr.one 两套文件时，作品页按 `workFileSource` 切换显示，点一首播放也只把该来源的曲目放进队列，「缓存到本地」也只缓存该来源。缓存时用缓存的购买信息：已购买（或已有 Play 文件）且 asmr.one 也有曲目，就弹窗选来源；选 DLsite 但还没有 Play 文件时先补读 Play 文件。没弹窗时取当前来源，在作品外面发起时按 Play 优先取一套。要下载的音频里，同一文件夹中前缀相同、只差扩展名的，按扩展名组合弹窗问保留哪种，其余不下载，没有冲突的照常下载（`findFormatConflicts`）；普通文件夹仍然是整个文件夹一起播放和下载。作品里已经有 Play 文件时，打开直接显示切换，不再查 DLsite 的购买状态；没有 Play 文件时才在后台确认购买状态，买过才显示切换，不能拖住打开。返回在子文件夹里先上一级，到作品根再退出，不能用 `up()` 越过作品根。
 - 队列弹层禁用 Material3 的滑动手势（`sheetGesturesEnabled = false`，不显示默认把手），关闭走标题栏按钮、遮罩或返回键；列表要保留拖动排序和滚动。
 - 字幕按钮只在字幕已就绪、当前没有句子、且不是「没有听出人声」时出现。句子之间的空隙不要把按钮露出来。

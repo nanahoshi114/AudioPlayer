@@ -1,6 +1,7 @@
 package com.nanahoshi.audioplayer.ui.playlist
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -68,7 +69,7 @@ fun PlaylistListScreen(
                 modifier = Modifier.fillMaxSize(),
             )
         } else {
-            LazyColumn(Modifier.fillMaxSize()) {
+            LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 96.dp)) {
                 items(playlists, key = { it.id }) { playlist ->
                     PlaylistSummaryRow(playlist, viewModel, onClick = { onOpen(playlist.id) })
                 }
@@ -105,6 +106,7 @@ fun PlaylistDetailScreen(
     val playlist by viewModel.playlist(playlistId).collectAsStateWithLifecycle(null)
     val rows by viewModel.playlistTracks(playlistId).collectAsStateWithLifecycle(emptyList())
     var renaming by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val reorderState = rememberReorderableLazyListState(listState) { from, to ->
@@ -126,8 +128,7 @@ fun PlaylistDetailScreen(
                     text = { Text("删除列表") },
                     onClick = {
                         menu = false
-                        viewModel.delete(playlistId)
-                        onDeleted()
+                        confirmDelete = true
                     },
                 )
             }
@@ -139,8 +140,8 @@ fun PlaylistDetailScreen(
             modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
         )
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { viewModel.playReplacing(playlistId) }, modifier = Modifier.weight(1f)) { Text("播放") }
-            OutlinedButton(onClick = { viewModel.appendToQueue(playlistId) }, modifier = Modifier.weight(1f)) { Text("加到末尾") }
+            Button(onClick = { viewModel.playReplacing(playlistId) }, enabled = rows.isNotEmpty(), modifier = Modifier.weight(1f)) { Text("播放") }
+            OutlinedButton(onClick = { viewModel.appendToQueue(playlistId) }, enabled = rows.isNotEmpty(), modifier = Modifier.weight(1f)) { Text("加到末尾") }
         }
         if (rows.isEmpty()) {
             EmptyState(title = "这个列表还是空的", message = "在音频库里多选曲目，再加入播放列表。", modifier = Modifier.fillMaxSize())
@@ -161,6 +162,21 @@ fun PlaylistDetailScreen(
     }
     }
 
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("删除播放列表") },
+            text = { Text("删除「${playlist?.name.orEmpty()}」？音频文件和音频库中的内容会保留。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDelete = false
+                    viewModel.delete(playlistId)
+                    onDeleted()
+                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("取消") } },
+        )
+    }
     if (renaming) {
         NameDialog(
             title = "改名",
@@ -211,7 +227,7 @@ private fun PlaylistTrackRow(
         supportingContent = { Text(row.artist?.ifBlank { null } ?: formatDuration(row.durationMs)) },
         modifier = Modifier.clickable(onClick = onClick),
         leadingContent = {
-            Icon(Icons.Default.DragHandle, contentDescription = "拖动排序", modifier = handleModifier)
+            Icon(Icons.Default.DragHandle, contentDescription = "拖动排序", modifier = Modifier.size(48.dp).then(handleModifier).padding(12.dp))
         },
         trailingContent = {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -238,7 +254,7 @@ private fun NameDialog(
         text = {
             OutlinedTextField(value = text, onValueChange = { text = it }, singleLine = true, modifier = Modifier.fillMaxWidth())
         },
-        confirmButton = { TextButton(onClick = { onConfirm(text) }) { Text("确定") } },
+        confirmButton = { TextButton(onClick = { onConfirm(text.trim()) }, enabled = text.isNotBlank()) { Text("确定") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }

@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.Palette
@@ -125,6 +126,7 @@ private fun SettingsRow(
         headlineContent = { Text(title, style = MaterialTheme.typography.titleMedium) },
         supportingContent = { Text(summary) },
         leadingContent = icon,
+        trailingContent = { Icon(Icons.Default.ChevronRight, contentDescription = null) },
         modifier = Modifier.clickable(onClick = onClick),
     )
 }

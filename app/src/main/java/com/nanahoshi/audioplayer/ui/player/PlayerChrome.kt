@@ -11,15 +11,14 @@ import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -77,19 +76,25 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.key
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -192,23 +197,10 @@ private fun MiniPlayerCard(
                     interactionSource = playInteraction,
                     modifier = Modifier.pressScale(playInteraction),
                 ) {
-                    AnimatedContent(
-                        targetState = state.isPlaying,
-                        transitionSpec = {
-                            if (reduce) {
-                                EnterTransition.None togetherWith ExitTransition.None
-                            } else {
-                                (scaleIn(tween(Motion.short, easing = Motion.enter), initialScale = 0.7f) + fadeIn(tween(Motion.short))) togetherWith
-                                    (scaleOut(tween(Motion.short, easing = Motion.exit), targetScale = 0.7f) + fadeOut(tween(Motion.short)))
-                            }
-                        },
-                        label = "playPause",
-                    ) { playing ->
-                        Icon(
-                            if (playing) Icons.Default.Pause else Icons.Default.PlayArrow,
-                            contentDescription = if (playing) "暂停" else "播放",
-                        )
-                    }
+                    Icon(
+                        if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        contentDescription = if (state.isPlaying) "暂停" else "播放",
+                    )
                 }
                 IconButton(onClick = viewModel.client::next) {
                     Icon(Icons.Default.SkipNext, contentDescription = "下一首")
@@ -223,7 +215,7 @@ private fun MiniPlayerCard(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun NowPlayingScreen(
     onBack: () -> Unit,
@@ -247,20 +239,34 @@ fun NowPlayingScreen(
     val reorderState = rememberReorderableLazyListState(listState) { from, to ->
         viewModel.client.move(from.index, to.index)
     }
-    val subtitleScroll = rememberScrollState()
     val cues = viewModel.subtitleCues
     val subtitle = cues.textAt(state.positionMs, viewModel.showChinese)
     var showSubtitles by remember { mutableStateOf(false) }
     var discardPrompt by remember { mutableStateOf(false) }
+    var fullTitle by remember { mutableStateOf(false) }
     val localNetwork = rememberLocalNetworkAccess { viewModel.reportLocalNetworkDenied() }
     val current = queue.find { it.queueItemId == state.queueItemId }
-    LaunchedEffect(subtitle) { subtitleScroll.scrollTo(0) }
     LaunchedEffect(queueExpanded, state.queueItemId) {
         if (!queueExpanded) return@LaunchedEffect
         val index = queue.indexOfFirst { it.queueItemId == state.queueItemId }
         if (index >= 0) listState.scrollToItem(index)
     }
     WhisperPromptDialog(viewModel)
+    if (fullTitle) {
+        AlertDialog(
+            onDismissRequest = { fullTitle = false },
+            title = { Text("音频信息") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Text(state.title, style = MaterialTheme.typography.titleMedium)
+                    if (state.artist.isNotBlank()) {
+                        Text(state.artist, modifier = Modifier.padding(top = 8.dp))
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { fullTitle = false }) { Text("关闭") } },
+        )
+    }
     if (discardPrompt) {
         AlertDialog(
             onDismissRequest = { discardPrompt = false },
@@ -313,9 +319,15 @@ fun NowPlayingScreen(
                     },
                 )
                 BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
-                    val cover = minOf(maxWidth * 0.72f, maxHeight * 0.46f)
+                    val viewportHeight = maxHeight
+                    val compact = maxHeight < 480.dp || LocalDensity.current.fontScale >= 1.3f
+                    val cover = minOf(maxWidth * 0.72f, maxHeight * 0.4f, if (compact) 144.dp else 280.dp)
+                        .coerceAtLeast(48.dp)
                     Column(
-                        Modifier.fillMaxSize().padding(horizontal = 20.dp),
+                        Modifier.fillMaxWidth()
+                            .verticalScroll(rememberScrollState())
+                            .heightIn(min = viewportHeight)
+                            .padding(horizontal = 20.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
                         CoverImage(
@@ -330,22 +342,29 @@ fun NowPlayingScreen(
                         Text(
                             state.title,
                             style = MaterialTheme.typography.headlineSmall,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
                             textAlign = TextAlign.Center,
-                            modifier = Modifier.padding(top = 16.dp),
+                            modifier = Modifier.padding(top = 16.dp)
+                                .clickable(onClickLabel = "查看完整标题") { fullTitle = true }
+                                .padding(vertical = 4.dp),
                         )
                         Text(
                             state.artist,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                             textAlign = TextAlign.Center,
                         )
                         Box(
                             modifier = Modifier
                                 .weight(1f)
                                 .fillMaxWidth()
-                                .verticalScroll(subtitleScroll)
+                                .heightIn(min = 96.dp)
+                                .padding(vertical = 12.dp)
                                 .then(
                                     if (cues.isNotEmpty()) {
-                                        Modifier.clickable { showSubtitles = true }
+                                        Modifier.clickable(onClickLabel = "查看字幕全文") { showSubtitles = true }
                                     } else {
                                         Modifier
                                     },
@@ -353,7 +372,7 @@ fun NowPlayingScreen(
                             contentAlignment = Alignment.Center,
                         ) {
                             when {
-                                subtitle.isNotEmpty() -> CueLine(subtitle) { showSubtitles = true }
+                                subtitle.isNotEmpty() -> CueLine(subtitle)
                                 cues.isNotEmpty() -> Unit
                                 viewModel.generatedEmpty -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                     Text(
@@ -373,9 +392,10 @@ fun NowPlayingScreen(
                                             modifier = Modifier.padding(bottom = 8.dp),
                                         )
                                     }
-                                    Row(
+                                    FlowRow(
                                         Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp),
                                     ) {
                                         FilledTonalButton(
                                             onClick = {
@@ -383,7 +403,6 @@ fun NowPlayingScreen(
                                                     viewModel.requestGenerate(translate = true)
                                                 }
                                             },
-                                            modifier = Modifier.weight(1f),
                                         ) {
                                             Text("生成字幕和翻译", textAlign = TextAlign.Center)
                                         }
@@ -393,7 +412,6 @@ fun NowPlayingScreen(
                                                     viewModel.requestGenerate(translate = false)
                                                 }
                                             },
-                                            modifier = Modifier.weight(1f),
                                         ) {
                                             Text("生成字幕", textAlign = TextAlign.Center)
                                         }
@@ -414,9 +432,10 @@ fun NowPlayingScreen(
                             Icon(Icons.Default.SkipNext, contentDescription = "下一首", modifier = Modifier.size(32.dp))
                         }
                     }
-                    Row(
+                    FlowRow(
                         Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 8.dp),
                         horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         SecondaryAction(
                             icon = { Icon(Icons.Outlined.Timer, contentDescription = null) },
@@ -455,6 +474,7 @@ fun NowPlayingScreen(
         ) {
             Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                 SubtitleReader(
+                    mediaId = state.queueItemId,
                     cues = cues,
                     positionMs = state.positionMs,
                     chinese = viewModel.showChinese,
@@ -517,7 +537,7 @@ fun NowPlayingScreen(
                                     Icon(
                                         Icons.Default.DragHandle,
                                         contentDescription = "拖动排序",
-                                        modifier = Modifier.draggableHandle(),
+                                        modifier = Modifier.size(48.dp).draggableHandle().padding(12.dp),
                                     )
                                 },
                                 trailingContent = {
@@ -542,7 +562,7 @@ fun NowPlayingScreen(
 }
 
 @Composable
-private fun CueLine(text: String, onOpen: () -> Unit) {
+private fun CueLine(text: String) {
     val reduce = LocalReduceMotion.current
     AnimatedContent(
         targetState = text,
@@ -550,8 +570,8 @@ private fun CueLine(text: String, onOpen: () -> Unit) {
             if (reduce) {
                 EnterTransition.None togetherWith ExitTransition.None
             } else {
-                (slideInVertically(tween(Motion.medium, easing = Motion.enter)) { it / 3 } + fadeIn(tween(Motion.medium))) togetherWith
-                    (slideOutVertically(tween(Motion.short, easing = Motion.exit)) { -it / 3 } + fadeOut(tween(Motion.short)))
+                fadeIn(tween(Motion.short, easing = Motion.enter)) togetherWith
+                    fadeOut(tween(100, easing = Motion.enter))
             }
         },
         label = "subtitleLine",
@@ -561,8 +581,7 @@ private fun CueLine(text: String, onOpen: () -> Unit) {
             style = SubtitleLarge,
             textAlign = TextAlign.Center,
             modifier = Modifier
-                .fillMaxWidth()
-                .pointerInput(onOpen) { detectTapGestures(onTap = { onOpen() }) },
+                .fillMaxWidth(),
         )
     }
 }
@@ -570,7 +589,6 @@ private fun CueLine(text: String, onOpen: () -> Unit) {
 @Composable
 private fun PlayButton(playing: Boolean, onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
-    val reduce = LocalReduceMotion.current
     Box(
         Modifier
             .padding(horizontal = 18.dp)
@@ -578,28 +596,15 @@ private fun PlayButton(playing: Boolean, onClick: () -> Unit) {
             .size(72.dp)
             .clip(CircleShape)
             .background(MaterialTheme.colorScheme.primary)
-            .clickable(interactionSource = interaction, indication = null, onClick = onClick),
+            .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        AnimatedContent(
-            targetState = playing,
-            transitionSpec = {
-                if (reduce) {
-                    EnterTransition.None togetherWith ExitTransition.None
-                } else {
-                    (scaleIn(tween(Motion.short), initialScale = 0.7f) + fadeIn(tween(Motion.short))) togetherWith
-                        (scaleOut(tween(Motion.short), targetScale = 0.7f) + fadeOut(tween(Motion.short)))
-                }
-            },
-            label = "mainPlay",
-        ) { isPlaying ->
-            Icon(
-                if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                contentDescription = if (isPlaying) "暂停" else "播放",
-                tint = MaterialTheme.colorScheme.onPrimary,
-                modifier = Modifier.size(36.dp),
-            )
-        }
+        Icon(
+            if (playing) Icons.Default.Pause else Icons.Default.PlayArrow,
+            contentDescription = if (playing) "暂停" else "播放",
+            tint = MaterialTheme.colorScheme.onPrimary,
+            modifier = Modifier.size(36.dp),
+        )
     }
 }
 
@@ -614,7 +619,8 @@ private fun SecondaryAction(
         Modifier
             .pressScale(interaction)
             .clip(MaterialTheme.shapes.medium)
-            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+            .heightIn(min = 48.dp)
+            .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick)
             .padding(horizontal = 8.dp, vertical = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
@@ -625,7 +631,8 @@ private fun SecondaryAction(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SubtitleReader(
+internal fun SubtitleReader(
+    mediaId: Long,
     cues: List<SubtitleCue>,
     positionMs: Long,
     chinese: Boolean,
@@ -643,19 +650,26 @@ private fun SubtitleReader(
     onBack: () -> Unit,
 ) {
     BackHandler(onBack = onBack)
-    val listState = rememberLazyListState()
+    val listState = key(mediaId) { rememberLazyListState() }
+    val follow = remember(mediaId) { SubtitleFollowState() }
     val active = cues.indexAt(positionMs)
+    val anchor = follow.anchorIndex(cues, positionMs)
     val blue = if (LocalDarkTheme.current) Color(0xFF90CAF9) else Color(0xFF1565C0)
-    var placed by remember { mutableStateOf(false) }
+    var placed by remember(mediaId) { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
     val reduce = LocalReduceMotion.current
-    LaunchedEffect(active, cues.size) {
-        if (active < 0 || cues.isEmpty()) return@LaunchedEffect
-        listState.centerOn(active, animated = placed && !reduce)
-        if (!placed) {
-            placed = true
-            listState.centerOn(active, animated = false)
+    val scrolling = remember(follow) {
+        object : NestedScrollConnection {
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                if (source == NestedScrollSource.UserInput && consumed.y != 0f) follow.onUserScroll()
+                return Offset.Zero
+            }
         }
+    }
+    LaunchedEffect(anchor, cues, follow.following, mediaId) {
+        if (!follow.following || anchor < 0) return@LaunchedEffect
+        listState.centerOn(anchor, animated = placed && !reduce)
+        placed = true
     }
     Column(Modifier.fillMaxSize()) {
         AppTopBar(
@@ -701,18 +715,18 @@ private fun SubtitleReader(
         if (cues.isEmpty()) {
             EmptyState(title = "这首没有字幕")
         } else {
-            LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth()) {
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize().nestedScroll(scrolling),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 72.dp),
+            ) {
                 itemsIndexed(cues, key = { index, cue -> "$index-${cue.startMs}" }) { index, cue ->
                     val current = index == active
                     val color by animateColorAsState(
                         targetValue = if (current) blue else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
                         animationSpec = if (reduce) snap() else tween(Motion.medium, easing = Motion.enter),
                         label = "cueColor",
-                    )
-                    val scale by animateFloatAsState(
-                        targetValue = if (current && !reduce) 1.05f else 1f,
-                        animationSpec = pressSpec(),
-                        label = "cueScale",
                     )
                     Text(
                         cue.line(chinese),
@@ -722,14 +736,17 @@ private fun SubtitleReader(
                         textAlign = TextAlign.Center,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .graphicsLayer {
-                                scaleX = scale
-                                scaleY = scale
-                            }
                             .clickable { onSeek(cue.startMs) }
                             .padding(horizontal = 24.dp, vertical = 12.dp),
                     )
                 }
+            }
+            if (!follow.following) {
+                FilledTonalButton(
+                    onClick = follow::resume,
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp),
+                ) { Text("回到当前句") }
+            }
             }
         }
     }

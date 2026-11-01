@@ -1,5 +1,6 @@
 package com.nanahoshi.audioplayer.ui.components
 
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -24,6 +25,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.nanahoshi.audioplayer.asmr.WorkFacts
@@ -40,41 +42,16 @@ fun WorkHeader(
     purchased: Boolean = false,
 ) {
     var tagsExpanded by rememberSaveable(facts.sourceId) { mutableStateOf(false) }
-    Column(modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
-        Row(verticalAlignment = Alignment.Top) {
-            CoverImage(
-                coverUrl,
-                size = 128.dp,
-                shape = MaterialTheme.shapes.medium,
-            )
-            Column(Modifier.padding(start = 16.dp).weight(1f)) {
-                Text(
-                    facts.title.ifBlank { facts.sourceId.ifBlank { "未命名作品" } },
-                    style = MaterialTheme.typography.titleLarge,
-                    maxLines = 4,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Row(
-                    Modifier.padding(top = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    if (facts.sourceId.isNotBlank()) {
-                        LabelBadge(facts.sourceId, MaterialTheme.colorScheme.primary)
-                    }
-                    if (purchased) {
-                        LabelBadge("已购买", MaterialTheme.colorScheme.tertiary)
-                    }
-                }
-                FactLine(Icons.Outlined.Groups, facts.circle.ifBlank { "社团未知" }, maxLines = 1)
-                FactLine(
-                    Icons.Outlined.Mic,
-                    facts.vas.joinToString("、").ifBlank { "声优未知" },
-                    maxLines = 2,
-                )
-                if (facts.release.isNotBlank()) {
-                    FactLine(Icons.Outlined.CalendarMonth, facts.release, maxLines = 1)
-                }
+    BoxWithConstraints(modifier.fillMaxWidth()) {
+    val stacked = maxWidth.value / LocalDensity.current.fontScale < 360f
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
+        if (stacked) {
+            CoverImage(coverUrl, size = 128.dp, shape = MaterialTheme.shapes.medium)
+            WorkHeading(facts, purchased, Modifier.padding(top = 12.dp))
+        } else {
+            Row(verticalAlignment = Alignment.Top) {
+                CoverImage(coverUrl, size = 128.dp, shape = MaterialTheme.shapes.medium)
+                WorkHeading(facts, purchased, Modifier.padding(start = 16.dp).weight(1f))
             }
         }
         if (facts.tags.isNotEmpty()) {
@@ -101,6 +78,31 @@ fun WorkHeader(
                 }
             }
         }
+    }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun WorkHeading(facts: WorkFacts, purchased: Boolean, modifier: Modifier = Modifier) {
+    Column(modifier) {
+        Text(
+            facts.title.ifBlank { facts.sourceId.ifBlank { "未命名作品" } },
+            style = MaterialTheme.typography.titleLarge,
+            maxLines = 4,
+            overflow = TextOverflow.Ellipsis,
+        )
+        FlowRow(
+            Modifier.padding(top = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            if (facts.sourceId.isNotBlank()) LabelBadge(facts.sourceId, MaterialTheme.colorScheme.primary)
+            if (purchased) LabelBadge("已购买", MaterialTheme.colorScheme.tertiary)
+        }
+        FactLine(Icons.Outlined.Groups, facts.circle.ifBlank { "社团未知" }, maxLines = 1)
+        FactLine(Icons.Outlined.Mic, facts.vas.joinToString("、").ifBlank { "声优未知" }, maxLines = 2)
+        if (facts.release.isNotBlank()) FactLine(Icons.Outlined.CalendarMonth, facts.release, maxLines = 1)
     }
 }
 

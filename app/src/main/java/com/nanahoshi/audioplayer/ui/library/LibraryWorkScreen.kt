@@ -2,13 +2,21 @@ package com.nanahoshi.audioplayer.ui.library
 
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
@@ -34,6 +42,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -48,7 +57,7 @@ import com.nanahoshi.audioplayer.ui.components.SelectionAction
 import com.nanahoshi.audioplayer.ui.components.SelectionTopBar
 import com.nanahoshi.audioplayer.ui.components.WorkHeader
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun LibraryWorkScreen(
     folderId: Long,
@@ -167,129 +176,143 @@ fun LibraryWorkScreen(
         if (headerFolder == null || facts == null) {
             LoadingState("正在读取作品…")
         } else {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(bottom = 24.dp),
-            ) {
-                item(key = "header") {
+            BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+                val pageHeight = maxHeight
+                val pageScroll = rememberScrollState()
+                val fileScrollConnection = remember(pageScroll, listState) {
+                    WorkPageScrollConnection(pageScroll, listState)
+                }
+                Column(
+                    Modifier
+                        .fillMaxSize()
+                        .verticalScroll(pageScroll),
+                ) {
                     WorkHeader(facts = facts, coverUrl = headerFolder.coverUri)
-                }
-                if (headerFolder.asmrWorkId != null) {
-                    item(key = "cache") {
-                        FilledTonalButton(
-                            onClick = { viewModel.cacheFolder(headerFolder.id) },
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                        ) { Text("缓存到本地") }
-                    }
-                    item(key = "recognize") {
-                        OutlinedButton(
-                            onClick = { openTree.launch(null) },
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                        ) { Text("识别本地文件夹") }
-                    }
-                }
-                item(key = "files-title") { SectionHeader("文件") }
-                if (workSources) {
-                    item(key = "source") {
-                        SingleChoiceSegmentedButtonRow(
+                    if (headerFolder.asmrWorkId != null) {
+                        FlowRow(
                             Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
-                            SegmentedButton(
-                                selected = workFileSource == TrackSource.DLSITE,
-                                onClick = { viewModel.useWorkSource(TrackSource.DLSITE) },
-                                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-                            ) { Text("DLSite Play") }
-                            SegmentedButton(
-                                selected = workFileSource == TrackSource.ASMR,
-                                onClick = { viewModel.useWorkSource(TrackSource.ASMR) },
-                                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-                            ) { Text("asmr.one") }
+                            FilledTonalButton(
+                                onClick = { viewModel.cacheFolder(headerFolder.id) },
+                            ) { Text("缓存到本地") }
+                            OutlinedButton(
+                                onClick = { openTree.launch(null) },
+                            ) { Text("识别本地文件夹") }
                         }
                     }
-                }
-                if (trail.size > 1) {
-                    item(key = "crumbs") {
-                        LibraryBreadcrumb(
-                            trail = trail,
-                            rootLabel = "文件",
-                            onRoot = { climb(trail.size) },
-                            onCrumb = { index -> climb(trail.lastIndex - index) },
-                        )
-                    }
-                }
-                if (folders.isEmpty() && entries.isEmpty()) {
-                    item(key = "empty") {
-                        if (busy) {
-                            LoadingState("正在读取文件…")
-                        } else {
-                            EmptyState(title = "这个文件夹是空的")
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .height(pageHeight)
+                            .nestedScroll(fileScrollConnection),
+                    ) {
+                        SectionHeader("文件")
+                        if (workSources) {
+                            SingleChoiceSegmentedButtonRow(
+                                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                            ) {
+                                SegmentedButton(
+                                    selected = workFileSource == TrackSource.DLSITE,
+                                    onClick = { viewModel.useWorkSource(TrackSource.DLSITE) },
+                                    shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                                ) { Text("DLSite Play") }
+                                SegmentedButton(
+                                    selected = workFileSource == TrackSource.ASMR,
+                                    onClick = { viewModel.useWorkSource(TrackSource.ASMR) },
+                                    shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                                ) { Text("asmr.one") }
+                            }
                         }
-                    }
-                }
-                items(folders, key = { "folder-${it.id}" }) { folder ->
-                    FolderRow(
-                        modifier = libraryMotionModifier(),
-                        folder = folder,
-                        selected = folder.id in selectedFolders,
-                        selecting = selecting,
-                        onClick = {
-                            if (selecting) viewModel.toggleFolder(folder.id) else viewModel.openFolder(folder)
-                        },
-                        onLongClick = { viewModel.beginSelection(folderId = folder.id) },
-                        onCache = null,
-                        onRecognize = null,
-                        onDelete = { confirmFolderDelete = folder.id },
-                    )
-                }
-                items(entries, key = { entry ->
-                    when (entry) {
-                        is LibraryEntry.Audio -> "track-${entry.track.id}"
-                        is LibraryEntry.File -> "file-${entry.file.id}"
-                    }
-                }) { entry ->
-                    when (entry) {
-                        is LibraryEntry.Audio -> {
-                            val track = entry.track
-                            TrackRow(
-                                modifier = libraryMotionModifier(),
-                                track = track,
-                                hasSubtitle = entry.hasSubtitle,
-                                selected = track.id in selectedTracks,
-                                selecting = selecting,
-                                onClick = {
-                                    if (selecting) viewModel.toggleTrack(track.id) else viewModel.play(track)
-                                },
-                                onLongClick = { viewModel.beginSelection(trackId = track.id) },
-                                onAppend = { viewModel.append(track) },
-                                onPlayNext = { viewModel.playNext(track) },
-                                onDownload = if (
-                                    track.source == TrackSource.ASMR ||
-                                    track.source == TrackSource.DLSITE ||
-                                    track.source == TrackSource.BILIBILI
-                                ) {
-                                    { viewModel.downloadTrack(track) }
-                                } else {
-                                    null
-                                },
-                                onDeleteDownloaded = if (
-                                    track.source == TrackSource.ASMR ||
-                                    track.source == TrackSource.DLSITE ||
-                                    track.source == TrackSource.BILIBILI
-                                ) {
-                                    { viewModel.deleteDownloadedTrack(track) }
-                                } else {
-                                    null
-                                },
-                                onDelete = { viewModel.deleteTrack(track.id) },
+                        if (trail.size > 1) {
+                            LibraryBreadcrumb(
+                                trail = trail,
+                                rootLabel = "文件",
+                                onRoot = { climb(trail.size) },
+                                onCrumb = { index -> climb(trail.lastIndex - index) },
                             )
                         }
-                        is LibraryEntry.File -> FileRow(
-                            modifier = libraryMotionModifier(),
-                            file = entry.file,
-                            onClick = { onOpenPreview(entry.file.id) },
-                            onDelete = { viewModel.deleteFile(entry.file.id) },
-                        )
+                        LazyColumn(
+                            state = listState,
+                            modifier = Modifier.fillMaxWidth().weight(1f),
+                            contentPadding = PaddingValues(bottom = 24.dp),
+                        ) {
+                            if (folders.isEmpty() && entries.isEmpty()) {
+                                item(key = "empty") {
+                                    if (busy) {
+                                        LoadingState("正在读取文件…")
+                                    } else {
+                                        EmptyState(title = "这个文件夹是空的")
+                                    }
+                                }
+                            }
+                            items(folders, key = { "folder-${it.id}" }) { folder ->
+                                FolderRow(
+                                    modifier = libraryMotionModifier(),
+                                    folder = folder,
+                                    selected = folder.id in selectedFolders,
+                                    selecting = selecting,
+                                    onClick = {
+                                        if (selecting) viewModel.toggleFolder(folder.id) else viewModel.openFolder(folder)
+                                    },
+                                    onLongClick = { viewModel.beginSelection(folderId = folder.id) },
+                                    onCache = null,
+                                    onRecognize = null,
+                                    onDelete = { confirmFolderDelete = folder.id },
+                                )
+                            }
+                            items(entries, key = { entry ->
+                                when (entry) {
+                                    is LibraryEntry.Audio -> "track-${entry.track.id}"
+                                    is LibraryEntry.File -> "file-${entry.file.id}"
+                                }
+                            }) { entry ->
+                                when (entry) {
+                                    is LibraryEntry.Audio -> {
+                                        val track = entry.track
+                                        TrackRow(
+                                            modifier = libraryMotionModifier(),
+                                            track = track,
+                                            hasSubtitle = entry.hasSubtitle,
+                                            selected = track.id in selectedTracks,
+                                            selecting = selecting,
+                                            onClick = {
+                                                if (selecting) viewModel.toggleTrack(track.id) else viewModel.play(track)
+                                            },
+                                            onLongClick = { viewModel.beginSelection(trackId = track.id) },
+                                            onAppend = { viewModel.append(track) },
+                                            onPlayNext = { viewModel.playNext(track) },
+                                            onDownload = if (
+                                                track.source == TrackSource.ASMR ||
+                                                track.source == TrackSource.DLSITE ||
+                                                track.source == TrackSource.BILIBILI
+                                            ) {
+                                                { viewModel.downloadTrack(track) }
+                                            } else {
+                                                null
+                                            },
+                                            onDeleteDownloaded = if (
+                                                track.source == TrackSource.ASMR ||
+                                                track.source == TrackSource.DLSITE ||
+                                                track.source == TrackSource.BILIBILI
+                                            ) {
+                                                { viewModel.deleteDownloadedTrack(track) }
+                                            } else {
+                                                null
+                                            },
+                                            onDelete = { viewModel.deleteTrack(track.id) },
+                                        )
+                                    }
+                                    is LibraryEntry.File -> FileRow(
+                                        modifier = libraryMotionModifier(),
+                                        file = entry.file,
+                                        onClick = { onOpenPreview(entry.file.id) },
+                                        onDelete = { viewModel.deleteFile(entry.file.id) },
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }

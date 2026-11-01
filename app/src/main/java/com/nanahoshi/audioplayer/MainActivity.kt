@@ -26,8 +26,6 @@ import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
@@ -198,7 +196,7 @@ private fun PlayerApp() {
     val activeTasks = downloads.count { it.status == DownloadStatus.QUEUED || it.status == DownloadStatus.RUNNING } +
         whisperJobs.count { it.status == DownloadStatus.QUEUED || it.status == DownloadStatus.RUNNING } +
         translations.count { it.status == DownloadStatus.QUEUED || it.status == DownloadStatus.RUNNING }
-    val fade = if (reduceMotion) snap<Float>() else tween<Float>(220, easing = Motion.enter)
+    val fade = if (reduceMotion) snap<Float>() else tween<Float>(180, easing = Motion.enter)
     val fadeAway = if (reduceMotion) snap<Float>() else tween<Float>(Motion.short, easing = Motion.exit)
     val slide = if (reduceMotion) snap<IntOffset>() else tween<IntOffset>(Motion.medium, easing = Motion.enter)
     val slideAway = if (reduceMotion) snap<IntOffset>() else tween<IntOffset>(Motion.medium, easing = Motion.exit)
@@ -382,7 +380,7 @@ private fun PlayerApp() {
                     val to = targetState.destination.route
                     when {
                         to == Routes.NowPlaying -> slideInVertically(slide) { it } + fadeIn(fade)
-                        isTab(from) && isTab(to) -> fadeIn(fade) + scaleIn(fade, initialScale = 0.96f)
+                        isTab(from) && isTab(to) -> fadeIn(fade)
                         else -> slideInHorizontally(slide) { it / 4 } + fadeIn(fade)
                     }
                 }
@@ -395,7 +393,7 @@ private fun PlayerApp() {
                     val to = targetState.destination.route
                     when {
                         to == Routes.NowPlaying -> fadeOut(fadeAway)
-                        isTab(from) && isTab(to) -> fadeOut(fadeAway) + scaleOut(fadeAway, targetScale = 0.98f)
+                        isTab(from) && isTab(to) -> fadeOut(fadeAway)
                         else -> slideOutHorizontally(slideAway) { -it / 8 } + fadeOut(fadeAway)
                     }
                 }

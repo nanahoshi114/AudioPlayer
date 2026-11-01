@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.MusicOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -92,6 +93,18 @@ fun LoadingState(message: String = "正在加载", modifier: Modifier = Modifier
             modifier = Modifier.padding(top = 12.dp),
         )
     }
+}
+
+@Composable
+fun ErrorState(message: String, onRetry: () -> Unit, modifier: Modifier = Modifier) {
+    EmptyState(
+        title = "暂时无法加载",
+        message = message,
+        icon = Icons.Outlined.ErrorOutline,
+        actionLabel = "重试",
+        onAction = onRetry,
+        modifier = modifier,
+    )
 }
 
 @Composable
