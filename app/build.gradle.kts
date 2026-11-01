@@ -18,6 +18,10 @@ android {
         versionCode = 3
         versionName = "1.2"
 
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
+
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -63,6 +67,7 @@ dependencies {
     implementation(libs.coil.compose)
     implementation(libs.reorderable)
     implementation(libs.zxing.core)
+    implementation(libs.commons.compress)
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)

@@ -8,51 +8,34 @@ import org.junit.Test
 
 class WhisperModelTest {
     @Test
-    fun oldAddressPicksWhisperOrJobs() {
-        assertEquals(WHISPER_MODEL_1, inferredWhisperModel("https://api.openai.com/v1"))
-        assertEquals(WHISPER_MODEL_LOCAL, inferredWhisperModel("http://192.168.1.20:8000/v1"))
-        assertEquals(WHISPER_MODEL_JOBS, inferredWhisperModel("http://192.168.1.20:8765"))
-        assertEquals(WHISPER_MODEL_JOBS, inferredWhisperModel(null))
-    }
-
-    @Test
-    fun oldDoneRowMatchesTheInferredModel() {
-        assertTrue(whisperModelsMatch(null, WHISPER_MODEL_1, "https://api.openai.com/v1"))
-        assertTrue(whisperModelsMatch(null, WHISPER_MODEL_LOCAL, "http://192.168.1.20:8000/v1"))
-        assertFalse(whisperModelsMatch(null, WHISPER_MODEL_1, "http://192.168.1.20:8000/v1"))
-        assertFalse(whisperModelsMatch(null, WHISPER_MODEL_QWEN, "https://api.openai.com/v1"))
-        assertTrue(whisperModelsMatch(null, WHISPER_MODEL_JOBS, "http://192.168.1.20:8765"))
-        assertFalse(whisperModelsMatch(WHISPER_MODEL_1, WHISPER_MODEL_QWEN, "https://api.openai.com/v1"))
-    }
-
-    @Test
-    fun openAiHostOver25MbAsksBeforeUpload() {
-        val big = ONLINE_WHISPER_BYTES + 1
-        assertTrue(needsOnlineSizeConfirm(WHISPER_MODEL_1, "https://API.OpenAI.com/v1", big))
-        assertTrue(needsOnlineSizeConfirm(null, "https://api.openai.com/v1", big))
-        assertFalse(needsOnlineSizeConfirm(WHISPER_MODEL_1, "https://api.openai.com/v1", ONLINE_WHISPER_BYTES))
-        assertFalse(needsOnlineSizeConfirm(WHISPER_MODEL_1, "http://example.com/api.openai.com/v1", big))
-        assertFalse(needsOnlineSizeConfirm(WHISPER_MODEL_1, "http://192.168.1.20:8000/v1", big))
-        assertFalse(needsOnlineSizeConfirm(WHISPER_MODEL_QWEN, "https://api.openai.com/v1", big))
-        assertFalse(needsOnlineSizeConfirm(WHISPER_MODEL_LOCAL, "https://api.openai.com/v1", big))
-        assertFalse(needsOnlineSizeConfirm(WHISPER_MODEL_JOBS, "https://api.openai.com/v1", big))
-    }
-
-    @Test
     fun emptyAddressUsesTheOfficialOnlineBase() {
-        assertEquals(OPENAI_WHISPER_BASE, effectiveWhisperBase(WHISPER_MODEL_1, null))
-        assertEquals(OPENAI_WHISPER_BASE, effectiveWhisperBase(WHISPER_MODEL_1, "  "))
-        assertEquals(OPENAI_WHISPER_BASE, effectiveWhisperBase(WHISPER_MODEL_1, "http://192.168.1.20:8000/"))
         assertEquals(QWEN_WHISPER_BASE, effectiveWhisperBase(WHISPER_MODEL_QWEN, null))
         assertEquals(QWEN_WHISPER_BASE, effectiveWhisperBase(WHISPER_MODEL_QWEN, "http://192.168.1.20:9000"))
-        assertEquals("http://192.168.1.20:8000", effectiveWhisperBase(WHISPER_MODEL_LOCAL, "http://192.168.1.20:8000/"))
-        assertNull(effectiveWhisperBase(WHISPER_MODEL_LOCAL, null))
-        assertNull(effectiveWhisperBase(WHISPER_MODEL_JOBS, null))
+        assertEquals("http://192.168.1.20:8000", effectiveWhisperBase(WHISPER_MODEL_QWEN3, "http://192.168.1.20:8000/"))
         assertNull(effectiveWhisperBase(WHISPER_MODEL_QWEN3, null))
+        assertNull(effectiveWhisperBase(SENSE_VOICE_MODEL, null))
+        assertNull(effectiveWhisperBase(SENSE_VOICE_MODEL, "http://192.168.1.20:8000"))
         assertNull(effectiveWhisperBase(null, null))
-        assertEquals("whisper（本地部署）", whisperModelLabel(WHISPER_MODEL_LOCAL))
+        assertEquals("SenseVoiceSmall", whisperModelLabel(SENSE_VOICE_MODEL))
         assertEquals("Qwen3-ASR", whisperModelLabel(WHISPER_MODEL_QWEN3))
         assertEquals(WHISPER_MODEL_QWEN3, knownWhisperModel(WHISPER_MODEL_QWEN3))
+        assertEquals(SENSE_VOICE_MODEL, knownWhisperModel(SENSE_VOICE_MODEL))
+        assertNull(knownWhisperModel("whisper-1"))
+        assertNull(knownWhisperModel("jobs"))
+        assertTrue(isOnDeviceWhisperModel(SENSE_VOICE_MODEL))
+        assertFalse(isOnDeviceWhisperModel(WHISPER_MODEL_QWEN))
+        assertTrue(isCloudWhisperModel(WHISPER_MODEL_QWEN))
+        assertFalse(isCloudWhisperModel(WHISPER_MODEL_QWEN3))
+        assertFalse(isCloudWhisperModel(SENSE_VOICE_MODEL))
+    }
+
+    @Test
+    fun oldDoneRowsOnlyMatchWhenTheStoredModelIsKnown() {
+        assertTrue(whisperModelsMatch(WHISPER_MODEL_QWEN3, WHISPER_MODEL_QWEN3))
+        assertTrue(whisperModelsMatch(SENSE_VOICE_MODEL, SENSE_VOICE_MODEL))
+        assertFalse(whisperModelsMatch(null, WHISPER_MODEL_QWEN))
+        assertFalse(whisperModelsMatch("whisper-1", WHISPER_MODEL_QWEN))
+        assertFalse(whisperModelsMatch(WHISPER_MODEL_QWEN, WHISPER_MODEL_QWEN3))
     }
 
     @Test
@@ -84,28 +67,24 @@ class WhisperModelTest {
 
     @Test
     fun whisperBaseGainsV1OnlyForTheRequest() {
-        assertEquals("https://api.openai.com/v1", whisperTranscriptionBase("https://api.openai.com"))
-        assertEquals("https://api.openai.com/v1", whisperTranscriptionBase("https://api.openai.com/v1/"))
+        assertEquals("https://example.com/v1", whisperTranscriptionBase("https://example.com"))
+        assertEquals("https://example.com/v1", whisperTranscriptionBase("https://example.com/v1/"))
         assertEquals("http://192.168.1.20:8000/v1", whisperTranscriptionBase("http://192.168.1.20:8000/v1"))
     }
 
     @Test
     fun oldEndpointWithV1MatchesTheSameService() {
         assertEquals(
-            "https://api.openai.com",
-            canonicalWhisperEndpoint(" https://api.openai.com/v1/ ", WHISPER_MODEL_1),
+            "https://example.com",
+            canonicalWhisperEndpoint(" https://example.com/v1/ ", WHISPER_MODEL_QWEN3),
         )
-        assertTrue(sameWhisperEndpoint("https://api.openai.com/v1", "https://api.openai.com", WHISPER_MODEL_1))
-        assertTrue(sameWhisperEndpoint("http://192.168.1.20:8000/v1", "http://192.168.1.20:8000", WHISPER_MODEL_LOCAL))
+        assertTrue(sameWhisperEndpoint("http://192.168.1.20:8000/v1", "http://192.168.1.20:8000", WHISPER_MODEL_QWEN3))
         assertTrue(sameWhisperEndpoint("http://192.168.1.20:8000/v1/", "http://192.168.1.20:8000", WHISPER_MODEL_QWEN3))
-        assertFalse(sameWhisperEndpoint("https://api.openai.com/v1", "https://api.openai.com.evil/v1", WHISPER_MODEL_1))
-        assertFalse(sameWhisperEndpoint(null, "https://api.openai.com", WHISPER_MODEL_1))
-    }
-
-    @Test
-    fun jobsEndpointKeepsTheV1RouteBoundary() {
-        assertFalse(sameWhisperEndpoint("http://192.168.1.20:8765/v1", "http://192.168.1.20:8765", WHISPER_MODEL_JOBS))
-        assertTrue(sameWhisperEndpoint("http://192.168.1.20:8765/", "http://192.168.1.20:8765", WHISPER_MODEL_JOBS))
+        assertFalse(sameWhisperEndpoint("https://example.com/v1", "https://example.com.evil/v1", WHISPER_MODEL_QWEN3))
+        assertFalse(sameWhisperEndpoint(null, "https://example.com", WHISPER_MODEL_QWEN3))
+        assertFalse(sameWhisperEndpoint("http://192.168.1.20:8000/v1", "http://192.168.1.20:8000", WHISPER_MODEL_QWEN))
+        // 本机模型没有地址，双方都是 null 视为同一个服务，去重仍然成立。
+        assertTrue(sameWhisperEndpoint(null, null, SENSE_VOICE_MODEL))
     }
 
     @Test

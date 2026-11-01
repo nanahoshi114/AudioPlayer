@@ -21,6 +21,7 @@ import com.nanahoshi.audioplayer.data.LibraryPreferences
 import com.nanahoshi.audioplayer.data.TranslateCenter
 import com.nanahoshi.audioplayer.data.WhisperCenter
 import com.nanahoshi.audioplayer.data.LibraryRepository
+import com.nanahoshi.audioplayer.data.SenseVoiceModelManager
 import com.nanahoshi.audioplayer.data.db.AppDatabase
 import com.nanahoshi.audioplayer.playback.PlayerClient
 import com.nanahoshi.audioplayer.playback.SubtitleSource
@@ -42,7 +43,8 @@ class AppGraph(app: Application) {
     val downloads = DownloadCenter(app, db, asmr, dlsite, bilibili)
     val subtitles = SubtitleSource(app, db, bilibili, asmr)
     val translator = TranslateCenter(app, db, credentials, subtitles)
-    val whisper = WhisperCenter(app, db, credentials, downloads, translator)
+    val senseVoice = SenseVoiceModelManager(app)
+    val whisper = WhisperCenter(app, db, credentials, downloads, translator, senseVoice)
     val player = PlayerClient(app, library)
 }
 

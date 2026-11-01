@@ -28,6 +28,7 @@ import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
@@ -35,6 +36,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -46,13 +48,13 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.nanahoshi.audioplayer.data.SENSE_VOICE_MODEL
+import com.nanahoshi.audioplayer.data.SenseVoiceModelState
 import com.nanahoshi.audioplayer.data.TranslatePlatform
-import com.nanahoshi.audioplayer.data.WHISPER_MODEL_1
-import com.nanahoshi.audioplayer.data.WHISPER_MODEL_JOBS
-import com.nanahoshi.audioplayer.data.WHISPER_MODEL_LOCAL
 import com.nanahoshi.audioplayer.data.WHISPER_MODEL_QWEN
 import com.nanahoshi.audioplayer.data.WHISPER_MODEL_QWEN3
 import com.nanahoshi.audioplayer.data.isCloudWhisperModel
+import com.nanahoshi.audioplayer.data.isOnDeviceWhisperModel
 import com.nanahoshi.audioplayer.data.whisperModelLabel
 import com.nanahoshi.audioplayer.graph
 
@@ -87,32 +89,46 @@ fun ModelSettingsScreen(
                     model = viewModel.whisperModel,
                     onModel = viewModel::selectWhisperModel,
                 )
-                if (!isCloudWhisperModel(viewModel.whisperModel)) {
-                    OutlinedTextField(
-                        value = viewModel.whisperBase,
-                        onValueChange = { viewModel.whisperBase = it },
-                        label = { Text("地址") },
-                        singleLine = true,
-                        supportingText = whisperAddressHint(viewModel.whisperModel),
-                        modifier = Modifier.fillMaxWidth(),
+                if (isOnDeviceWhisperModel(viewModel.whisperModel)) {
+                    val senseVoiceState by viewModel.senseVoice.state.collectAsState()
+                    SenseVoiceModelPanel(
+                        state = senseVoiceState,
+                        onDownload = viewModel::downloadSenseVoice,
+                        onCancel = viewModel::cancelSenseVoiceDownload,
+                        onDelete = viewModel::deleteSenseVoice,
                     )
+                    Button(
+                        onClick = viewModel::saveWhisper,
+                        modifier = Modifier.padding(top = 8.dp),
+                    ) { Text("保存") }
+                } else {
+                    if (!isCloudWhisperModel(viewModel.whisperModel)) {
+                        OutlinedTextField(
+                            value = viewModel.whisperBase,
+                            onValueChange = { viewModel.whisperBase = it },
+                            label = { Text("地址") },
+                            singleLine = true,
+                            supportingText = whisperAddressHint(viewModel.whisperModel),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                    OutlinedTextField(
+                        value = viewModel.whisperToken,
+                        onValueChange = { viewModel.whisperToken = it },
+                        label = { Text(if (isCloudWhisperModel(viewModel.whisperModel)) "API Key" else "口令") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    )
+                    FlowRow(
+                        Modifier.fillMaxWidth().padding(top = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Button(onClick = viewModel::saveWhisper) { Text("保存") }
+                        TextButton(onClick = viewModel::clearWhisper) { Text("清除") }
+                    }
+                    SaveStatus(viewModel.whisperModified, viewModel.whisperSaved)
                 }
-                OutlinedTextField(
-                    value = viewModel.whisperToken,
-                    onValueChange = { viewModel.whisperToken = it },
-                    label = { Text(if (isCloudWhisperModel(viewModel.whisperModel)) "API Key" else "口令") },
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                )
-                FlowRow(
-                    Modifier.fillMaxWidth().padding(top = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Button(onClick = viewModel::saveWhisper) { Text("保存") }
-                    TextButton(onClick = viewModel::clearWhisper) { Text("清除") }
-                }
-                SaveStatus(viewModel.whisperModified, viewModel.whisperSaved)
             }
             item(key = "translate") {
                 Row(
@@ -220,6 +236,7 @@ private fun SaveStatus(modified: Boolean, configured: Boolean) {
 
 class ModelSettingsViewModel(app: Application) : AndroidViewModel(app) {
     private val graph = app.graph()
+    val senseVoice = graph.senseVoice
     var whisperModel by mutableStateOf(graph.credentials.resolvedWhisperModel())
     var whisperBase by mutableStateOf(graph.credentials.whisperBaseUrl(whisperModel).orEmpty())
     var whisperToken by mutableStateOf(graph.credentials.whisperToken(whisperModel).orEmpty())
@@ -249,9 +266,15 @@ class ModelSettingsViewModel(app: Application) : AndroidViewModel(app) {
 
     fun selectWhisperModel(id: String) {
         whisperModel = id
-        whisperBase = graph.credentials.whisperBaseUrl(id).orEmpty()
-        whisperToken = graph.credentials.whisperToken(id).orEmpty()
-        whisperSaved = graph.credentials.hasWhisper(id)
+        if (isOnDeviceWhisperModel(id)) {
+            whisperBase = ""
+            whisperToken = ""
+            whisperSaved = graph.senseVoice.isReady()
+        } else {
+            whisperBase = graph.credentials.whisperBaseUrl(id).orEmpty()
+            whisperToken = graph.credentials.whisperToken(id).orEmpty()
+            whisperSaved = graph.credentials.hasWhisper(id)
+        }
         whisperBaseline = currentWhisperInput()
     }
 
@@ -260,9 +283,19 @@ class ModelSettingsViewModel(app: Application) : AndroidViewModel(app) {
         whisperBase = graph.credentials.whisperBaseUrl(whisperModel).orEmpty()
         whisperToken = graph.credentials.whisperToken(whisperModel).orEmpty()
         whisperModel = graph.credentials.resolvedWhisperModel()
-        whisperSaved = graph.credentials.hasWhisper(whisperModel)
+        whisperSaved = if (isOnDeviceWhisperModel(whisperModel)) {
+            graph.senseVoice.isReady()
+        } else {
+            graph.credentials.hasWhisper(whisperModel)
+        }
         whisperBaseline = currentWhisperInput()
     }
+
+    fun downloadSenseVoice() = graph.senseVoice.download()
+
+    fun cancelSenseVoiceDownload() = graph.senseVoice.cancelDownload()
+
+    fun deleteSenseVoice() = graph.senseVoice.deleteModel()
 
     fun clearWhisper() {
         graph.credentials.clearWhisper(whisperModel)
@@ -336,11 +369,9 @@ private fun WhisperModelField(model: String, onModel: (String) -> Unit) {
             onDismissRequest = { expanded = false },
         ) {
             listOf(
-                WHISPER_MODEL_1,
-                WHISPER_MODEL_LOCAL,
                 WHISPER_MODEL_QWEN,
                 WHISPER_MODEL_QWEN3,
-                WHISPER_MODEL_JOBS,
+                SENSE_VOICE_MODEL,
             ).forEach { id ->
                 DropdownMenuItem(
                     text = { Text(whisperModelLabel(id)) },
@@ -391,10 +422,73 @@ private fun TranslatePlatformField(platform: TranslatePlatform, onPlatform: (Tra
 }
 
 private fun whisperAddressHint(model: String): (@Composable () -> Unit)? = when (model) {
-    WHISPER_MODEL_LOCAL, WHISPER_MODEL_QWEN3 -> {
+    WHISPER_MODEL_QWEN3 -> {
         { Text("需要填写服务地址") }
     }
     else -> null
+}
+
+@Composable
+private fun SenseVoiceModelPanel(
+    state: SenseVoiceModelState,
+    onDownload: () -> Unit,
+    onCancel: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    when (state) {
+        SenseVoiceModelState.NotDownloaded -> Column {
+            Text(
+                "模型未下载。下载约 160MB，占用约 230MB，从 GitHub 下载到手机后完全离线运行。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Button(onClick = onDownload, modifier = Modifier.padding(top = 8.dp)) {
+                Text("下载模型")
+            }
+        }
+        is SenseVoiceModelState.Downloading -> Column {
+            val fraction = if (state.bytesTotal > 0L) {
+                (state.bytesDone.toFloat() / state.bytesTotal).coerceIn(0f, 1f)
+            } else {
+                0f
+            }
+            LinearProgressIndicator(
+                progress = { fraction },
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            )
+            Text(
+                "${(fraction * 100).toInt()}%　${state.bytesDone / 1024 / 1024}MB / ${state.bytesTotal / 1024 / 1024}MB",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            TextButton(onClick = onCancel, modifier = Modifier.padding(top = 4.dp)) {
+                Text("取消下载")
+            }
+        }
+        SenseVoiceModelState.Ready -> Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                "模型已下载，在本机运行，不需要填写地址和口令。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = onDelete) { Text("删除模型") }
+        }
+        is SenseVoiceModelState.Failed -> Column {
+            Text(
+                "下载失败：${state.message}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+            Button(onClick = onDownload, modifier = Modifier.padding(top = 8.dp)) {
+                Text("重试")
+            }
+        }
+    }
 }
 
 @Composable
@@ -404,25 +498,21 @@ private fun WhisperHelpDialog(onDismiss: () -> Unit) {
         title = { Text("听写") },
         text = {
             Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
-                Text("whisper-1 和 qwen-audio-3.1-asr 是线上模型，只填写 API Key，不显示地址。whisper-1 使用 https://api.openai.com，qwen-audio-3.1-asr 使用 https://dashscope.aliyuncs.com。whisper（本地部署）、Qwen3-ASR 和本机任务接口要填写地址和口令。连到局域网时，系统会询问是否允许访问本地网络，需要允许。")
+                Text("选一个听写模型，填写对应内容后点「保存」。")
                 Text(
-                    "whisper-1：模型名固定为 whisper-1，语言为日语，并要求返回每个分段的开始时间、结束时间和文本。单次请求最长等待 10 分钟。文件超过 25MB 时，会先询问是否仍要发送；确认后仍会上传。",
+                    "qwen-audio-3.1-asr：线上模型，只填 API Key，地址固定不用管。",
                     modifier = Modifier.padding(top = 8.dp),
                 )
                 Text(
-                    "whisper（本地部署）：地址填写本机服务基址，不能留空。基址若不以 /v1 结尾，请求时会补上。请求内容与 whisper-1 相同，模型名仍发送 whisper-1。文件超过 25MB 时直接发送。服务不检查口令时，填写任意非空内容即可。",
+                    "Qwen3-ASR：自己部署的服务，填地址和口令（服务不校验口令时随便填一个）。地址在局域网时，首次访问要允许本地网络。",
                     modifier = Modifier.padding(top = 8.dp),
                 )
                 Text(
-                    "qwen-audio-3.1-asr：不论时长，都先上传到临时存储，再转写。语言提示为日语。超过临时上传上限时不会上传。",
+                    "SenseVoiceSmall：完全在本机运行，不填地址和口令，先点「下载模型」（约 160MB），下载后可离线使用。",
                     modifier = Modifier.padding(top = 8.dp),
                 )
                 Text(
-                    "Qwen3-ASR：本地部署的开源模型，与 qwen-audio-3.1-asr 分开。地址填写本机服务基址，不能留空；基址若不以 /v1 结尾，请求时会补上。应用先读取服务上已加载的模型名，再把音频提交到音频转写接口，语言为日语。服务返回每个分段的开始和结束时间时，按段生成字幕。只返回整段文字时，整段文字作为一条字幕，覆盖整首的时长。没有读出时长、也没有分段时间时，记为「没有分段时间」。口令会放在请求里；服务不检查口令时，填写任意非空内容即可。",
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-                Text(
-                    "本机任务接口：按 docs/whisper-api.md。应用将音频提交到 POST /jobs，用 GET /jobs/{id} 查询进度，用 GET /jobs/{id}/cues 读取字幕。",
+                    "用法：播放时点「生成字幕」只生成日文字幕，「生成字幕和翻译」会接着翻成中文。同一首用同一模型不会重复生成；换模型或地址会重新生成。",
                     modifier = Modifier.padding(top = 8.dp),
                 )
             }
@@ -440,21 +530,13 @@ private fun TranslateHelpDialog(onDismiss: () -> Unit) {
         title = { Text("翻译") },
         text = {
             Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
-                Text("只支持通用大模型。在「千问AI平台」和「DeepSeek」里选一个，填写口令。模型名不填时，千问AI平台用 qwen3.8-flash，DeepSeek 用 deepseek-flash。")
+                Text("选一个平台，填入口令后点「保存」。模型名可以不填：千问AI平台默认 qwen3.8-flash，DeepSeek 默认 deepseek-flash。")
                 Text(
-                    "千问AI平台的请求发到 https://maas.qianwenaiapi.com/compatible-mode/v1/chat/completions。DeepSeek 发到 https://api.deepseek.com/chat/completions。",
+                    "深度思考一般不用打开；想要更细的译文时再打开，并选择思考强度。",
                     modifier = Modifier.padding(top = 8.dp),
                 )
                 Text(
-                    "深度思考默认关闭。打开后可以选择思考强度。千问AI平台有低、中、高；DeepSeek 有高、最高。关闭时单次最长等待 3 分钟，打开后最长等待 10 分钟。",
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-                Text(
-                    "打开「翻译后自动润色」后，每次翻译完成会再发给模型通顺一遍。字幕全文页里，已有译文时也可以手动「润色」。润色失败会保留原来的译文。",
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-                Text(
-                    "日文按每批最多 40 句发送。每一行必须是「编号|译文」，编号从 1 连续排到本批句数，不能缺行、空行或附加说明。任一批格式不符，整次翻译失败，已完成的批次不会保存。润色同样按批发送，任一批格式不符则整次润色失败。",
+                    "用法：在字幕全文里点「生成翻译」，已有译文时可以点「润色」。打开「翻译后自动润色」后，每次翻译完成会自动润色一遍。润色失败会保留原来的译文。",
                     modifier = Modifier.padding(top = 8.dp),
                 )
             }

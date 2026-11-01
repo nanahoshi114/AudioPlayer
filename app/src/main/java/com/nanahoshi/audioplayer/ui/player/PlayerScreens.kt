@@ -74,6 +74,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nanahoshi.audioplayer.data.TrackSource
 import com.nanahoshi.audioplayer.data.effectiveWhisperBase
 import com.nanahoshi.audioplayer.data.isLocalNetworkAddress
+import com.nanahoshi.audioplayer.data.isOnDeviceWhisperModel
 import com.nanahoshi.audioplayer.data.WhisperStart
 import com.nanahoshi.audioplayer.data.db.DownloadStatus
 import com.nanahoshi.audioplayer.graph
@@ -287,7 +288,14 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     fun requestGenerate(translate: Boolean) {
         viewModelScope.launch {
-            if (!graph.credentials.hasWhisper()) {
+            val model = graph.credentials.resolvedWhisperModel()
+            // SenseVoiceSmall 在本机运行，hasWhisper 一直为 false，按模型是否就绪判断。
+            if (isOnDeviceWhisperModel(model)) {
+                if (!graph.senseVoice.isReady()) {
+                    whisperPrompt = WhisperPrompt.NeedModelDownload
+                    return@launch
+                }
+            } else if (!graph.credentials.hasWhisper()) {
                 whisperPrompt = WhisperPrompt.NeedSettings
                 return@launch
             }
@@ -394,5 +402,6 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
 internal enum class WhisperPrompt {
     NeedSettings,
+    NeedModelDownload,
     NeedDownload,
 }

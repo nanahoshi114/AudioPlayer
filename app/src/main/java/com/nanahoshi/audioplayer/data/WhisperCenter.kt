@@ -18,12 +18,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -43,19 +38,18 @@ class WhisperCenter(
     private val credentials: CredentialStore,
     private val downloads: DownloadCenter,
     private val translator: TranslateCenter,
+    private val senseVoice: SenseVoiceModelManager,
 ) {
     private val appContext = context.applicationContext
     private val calls = InflightCalls()
     private val client = WhisperClient(credentials, calls)
     private val qwenFile = QwenFileTranscriber(calls)
+    private val transcriber = SenseVoiceTranscriber(appContext, senseVoice)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val kick = Channel<Unit>(Channel.CONFLATED)
     private val stagedRoot = File(appContext.filesDir, "whisper-src")
     private val staging = ConcurrentHashMap<String, Int>()
     private val runners = ConcurrentHashMap<Long, Job>()
-    private val sizeAnswers = ConcurrentHashMap<Long, CompletableDeferred<Boolean>>()
-    private val sizeConfirm = MutableStateFlow<Long?>(null)
-    val sizeConfirmJob: StateFlow<Long?> = sizeConfirm.asStateFlow()
 
     fun observe(): Flow<List<WhisperJobEntity>> = db.whisper().observe()
 
@@ -64,18 +58,6 @@ class WhisperCenter(
         val model = jobCredentialModel(job)
         val base = job.endpoint ?: effectiveWhisperBase(model, credentials.whisperBaseUrl(model))
         return isLocalNetworkAddress(base)
-    }
-
-    fun acceptSizeConfirm() {
-        val id = sizeConfirm.value ?: return
-        sizeAnswers[id]?.complete(true)
-        if (sizeConfirm.value == id) sizeConfirm.value = null
-    }
-
-    fun declineSizeConfirm() {
-        val id = sizeConfirm.value ?: return
-        sizeAnswers[id]?.complete(false)
-        if (sizeConfirm.value == id) sizeConfirm.value = null
     }
 
     init {
@@ -243,8 +225,6 @@ class WhisperCenter(
             if (translating) db.whisper().markTranslateFailed(id, "已中止")
             else db.whisper().fail(id, "已中止")
             calls.cancel("job-$id")
-            if (sizeConfirm.value == id) sizeConfirm.value = null
-            sizeAnswers[id]?.cancel()
             translator.stopForWhisper(id)
             runners[id]?.cancel()
             sweepStaged()
@@ -271,7 +251,7 @@ class WhisperCenter(
         if (
             latestDone != null &&
             sameWhisperEndpoint(latestDone.endpoint, endpoint, model) &&
-            whisperModelsMatch(latestDone.model, model, endpoint) &&
+            whisperModelsMatch(latestDone.model, model) &&
             cueFile(fingerprint).isFile
         ) {
             rememberDone(title, fingerprint, file, trackId, remoteUrl, listOf(latestDone), endpoint, model)
@@ -280,7 +260,7 @@ class WhisperCenter(
         val busy = prior.filter {
             (it.status == DownloadStatus.QUEUED || it.status == DownloadStatus.RUNNING) &&
                 sameWhisperEndpoint(it.endpoint, endpoint, model) &&
-                whisperModelsMatch(it.model, model, endpoint)
+                whisperModelsMatch(it.model, model)
         }
         if (busy.isNotEmpty()) {
             return if (rememberPending(title, fingerprint, file, trackId, remoteUrl, busy, endpoint, skipTranslate, model)) {
@@ -291,7 +271,7 @@ class WhisperCenter(
         }
         val failed = prior.lastOrNull {
             it.status == DownloadStatus.FAILED && sameWhisperEndpoint(it.endpoint, endpoint, model) &&
-                whisperModelsMatch(it.model, model, endpoint) &&
+                whisperModelsMatch(it.model, model) &&
                 (trackId == null || it.trackId == trackId)
         }
         if (failed != null) {
@@ -472,96 +452,29 @@ class WhisperCenter(
         }
         val modelId = jobCredentialModel(job)
         val saved = job.endpoint ?: credentials.whisperBaseUrl(modelId)
-        val route = when (job.model) {
-            WHISPER_MODEL_1 -> WHISPER_MODEL_1
-            WHISPER_MODEL_LOCAL -> WHISPER_MODEL_LOCAL
-            WHISPER_MODEL_QWEN -> WHISPER_MODEL_QWEN
-            WHISPER_MODEL_QWEN3 -> WHISPER_MODEL_QWEN3
-            WHISPER_MODEL_JOBS -> WHISPER_MODEL_JOBS
-            null -> inferredWhisperModel(saved)
-            else -> null
-        }
-        val base = if (isCloudWhisperModel(knownWhisperModel(job.model))) {
-            officialWhisperBase(job.model)
+        val base = if (isCloudWhisperModel(modelId)) {
+            officialWhisperBase(modelId)
         } else {
             saved?.trim()?.trimEnd('/')?.takeIf { it.isNotEmpty() }
         }
-        when (route) {
-            null -> {
-                db.whisper().fail(job.id, "生成失败")
-                return
-            }
-            WHISPER_MODEL_QWEN -> {
-                runQwen(job, file, base, ticket)
-                return
-            }
+        when (modelId) {
+            WHISPER_MODEL_QWEN -> runQwen(job, file, base, ticket)
             WHISPER_MODEL_QWEN3 -> {
                 if (base.isNullOrBlank()) {
                     db.whisper().fail(job.id, "没有听写地址")
                     return
                 }
                 runQwen3(job, file, whisperTranscriptionBase(base), ticket)
-                return
             }
-            WHISPER_MODEL_LOCAL -> {
-                if (base.isNullOrBlank()) {
-                    db.whisper().fail(job.id, "没有听写地址")
-                    return
-                }
-                runOnline(job, file, whisperTranscriptionBase(base), ticket)
-                return
-            }
-            WHISPER_MODEL_1 -> {
-                if (base.isNullOrBlank()) {
-                    db.whisper().fail(job.id, "没有听写地址")
-                    return
-                }
-                if (needsOnlineSizeConfirm(WHISPER_MODEL_1, base, file.length())) {
-                    val send = confirmOversized(job.id)
-                    if (!send || !stillActive(job.id)) {
-                        if (stillActive(job.id)) db.whisper().fail(job.id, "已中止")
-                        return
-                    }
-                }
-                runOnline(job, file, whisperTranscriptionBase(base), ticket)
-                return
-            }
-        }
-        try {
-            if (db.whisper().markRunningIfActive(job.id, job.progress.coerceIn(0f, 1f)) == 0) return
-            var remoteId = job.remoteJobId
-            if (remoteId.isNullOrBlank()) {
-                val created = client.create(file, job.fingerprint, job.trackId, base, ticket, modelId)
-                if (!stillActive(job.id)) return
-                remoteId = created.id
-                db.whisper().setRemoteId(job.id, remoteId)
-                when (created.status) {
-                    "done" -> {
-                        storeCues(job, remoteId, base, ticket)
-                        return
-                    }
-                    "failed" -> {
-                        db.whisper().fail(job.id, "生成失败")
-                        return
-                    }
-                }
-            }
-            poll(job, remoteId, base, ticket)
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (error: WhisperException) {
-            if (!stillActive(job.id)) return
-            db.whisper().fail(job.id, error.message ?: "生成失败")
-        } catch (error: Exception) {
-            if (!stillActive(job.id)) return
-            db.whisper().fail(job.id, error.message?.take(80)?.ifBlank { null } ?: "生成失败")
+            SENSE_VOICE_MODEL -> runSenseVoice(job, file)
+            else -> db.whisper().fail(job.id, "该听写模型已移除，请换用其他模型重新生成")
         }
     }
 
-    private suspend fun runOnline(job: WhisperJobEntity, file: File, base: String, ticket: InflightCalls.Ticket) {
+    private suspend fun runQwen3(job: WhisperJobEntity, file: File, base: String, ticket: InflightCalls.Ticket) {
         try {
             if (db.whisper().markRunningIfActive(job.id, 0f) == 0) return
-            val cues = client.transcribeOnline(file, base, ticket, jobCredentialModel(job))
+            val cues = client.transcribeQwen3(file, base, audioDurationMs(job, file), ticket, jobCredentialModel(job))
             if (!stillActive(job.id)) return
             writeCues(job.fingerprint, cues)
             finishWritten(job)
@@ -576,22 +489,12 @@ class WhisperCenter(
         }
     }
 
-    private suspend fun confirmOversized(jobId: Long): Boolean {
-        val deferred = CompletableDeferred<Boolean>()
-        sizeAnswers[jobId] = deferred
-        sizeConfirm.value = jobId
-        return try {
-            deferred.await()
-        } finally {
-            sizeAnswers.remove(jobId)
-            if (sizeConfirm.value == jobId) sizeConfirm.value = null
-        }
-    }
-
-    private suspend fun runQwen3(job: WhisperJobEntity, file: File, base: String, ticket: InflightCalls.Ticket) {
+    private suspend fun runSenseVoice(job: WhisperJobEntity, file: File) {
         try {
             if (db.whisper().markRunningIfActive(job.id, 0f) == 0) return
-            val cues = client.transcribeQwen3(file, base, audioDurationMs(job, file), ticket, jobCredentialModel(job))
+            val cues = transcriber.transcribe(file, audioDurationMs(job, file)) { progress ->
+                if (stillActive(job.id)) db.whisper().setProgress(job.id, progress.coerceIn(0f, 1f))
+            }
             if (!stillActive(job.id)) return
             writeCues(job.fingerprint, cues)
             finishWritten(job)
@@ -655,16 +558,15 @@ class WhisperCenter(
         }
     }
 
-    private fun jobCredentialModel(job: WhisperJobEntity): String =
-        knownWhisperModel(job.model) ?: inferredWhisperModel(job.endpoint)
+    private fun jobCredentialModel(job: WhisperJobEntity): String? = knownWhisperModel(job.model)
 
     private suspend fun finishFromExisting(job: WhisperJobEntity): Boolean {
-        val requested = knownWhisperModel(job.model) ?: inferredWhisperModel(job.endpoint)
+        val requested = knownWhisperModel(job.model) ?: return false
         val latestDone = db.whisper().forFingerprint(job.fingerprint).lastOrNull {
             it.id != job.id &&
                 it.status == DownloadStatus.DONE &&
                 sameWhisperEndpoint(it.endpoint, job.endpoint, requested) &&
-                whisperModelsMatch(it.model, requested, it.endpoint)
+                whisperModelsMatch(it.model, requested)
         }
         if (latestDone == null || !cueFile(job.fingerprint).isFile) return false
         return true
@@ -684,40 +586,7 @@ class WhisperCenter(
         }
     }
 
-    private suspend fun poll(job: WhisperJobEntity, remoteId: String, base: String?, ticket: InflightCalls.Ticket) {
-        while (true) {
-            if (!stillActive(job.id)) return
-            val state = client.job(remoteId, base, ticket, jobCredentialModel(job))
-            if (!stillActive(job.id)) return
-            when (state.status) {
-                "queued" -> db.whisper().setProgress(job.id, 0f)
-                "running" -> db.whisper().setProgress(job.id, state.progress.coerceIn(0f, 1f))
-                "done" -> if (storeCues(job, remoteId, base, ticket)) return
-                "failed" -> {
-                    db.whisper().fail(job.id, state.error ?: "生成失败")
-                    return
-                }
-                else -> {
-                    db.whisper().fail(job.id, state.error ?: "生成失败")
-                    return
-                }
-            }
-            delay(2_000)
-        }
-    }
-
-    private suspend fun storeCues(job: WhisperJobEntity, remoteId: String, base: String?, ticket: InflightCalls.Ticket): Boolean {
-        if (!stillActive(job.id)) return false
-        val fetched = client.cues(remoteId, base, ticket, jobCredentialModel(job))
-        if (!stillActive(job.id)) return false
-        if (fetched is WhisperCues.NotReady) return false
-        val cues = (fetched as WhisperCues.Ready).cues
-        writeCues(job.fingerprint, cues)
-        finishWritten(job)
-        return true
-    }
-
-    private fun writeCues(fingerprint: String, cues: List<WhisperCue>) {
+    private suspend fun writeCues(fingerprint: String, cues: List<WhisperCue>) {
         val file = cueFile(fingerprint)
         file.parentFile?.mkdirs()
         file.writeText(encodeGeneratedCues(cues.map { SubtitleCue(it.startMs, it.endMs, it.text) }))

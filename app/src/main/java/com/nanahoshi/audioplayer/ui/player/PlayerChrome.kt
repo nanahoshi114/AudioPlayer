@@ -801,7 +801,14 @@ private fun WhisperPromptDialog(viewModel: PlayerViewModel) {
     when (viewModel.whisperPrompt) {
         WhisperPrompt.NeedSettings -> AlertDialog(
             onDismissRequest = viewModel::dismissWhisperPrompt,
-            text = { Text("请先在「设置 → 听写和翻译」里保存听写设置。线上模型只需 API Key；本地部署的模型还要填写地址和口令") },
+            text = { Text("请先在「设置 → 听写和翻译」里保存听写设置。线上模型只需 API Key；自部署的模型还要填写地址和口令") },
+            confirmButton = {
+                TextButton(onClick = viewModel::dismissWhisperPrompt) { Text("知道了") }
+            },
+        )
+        WhisperPrompt.NeedModelDownload -> AlertDialog(
+            onDismissRequest = viewModel::dismissWhisperPrompt,
+            text = { Text("SenseVoiceSmall 模型还没有下载。请到「设置 → 听写和翻译」先下载模型") },
             confirmButton = {
                 TextButton(onClick = viewModel::dismissWhisperPrompt) { Text("知道了") }
             },

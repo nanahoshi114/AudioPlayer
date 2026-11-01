@@ -43,7 +43,7 @@ Kotlin 2.2.10，AGP 9.4.1，compileSdk / targetSdk 37，minSdk 24，Java 11。�
 | `dlsite` | 商店、商品页、登录、已购 Play、试听 |
 | `data` | 库、下载、已落盘文件、凭证、听写、翻译 |
 | `data/db` | Room，当前第 12 版 |
-| `AppGraph.kt` | 在 `Application.onCreate` 里组装。顺序是 db、credentials、bilibili、asmr、dlsite、librarySort、appearance、cache、library、downloads、subtitles、translator、whisper、player |
+| `AppGraph.kt` | 在 `Application.onCreate` 里组装。顺序是 db、credentials、bilibili、asmr、dlsite、librarySort、appearance、cache、library、downloads、subtitles、translator、senseVoice、whisper、player |
 
 底栏五页：音频库、播放列表、在线搜索、我的、设置。作品页和作品详情打开时底栏和播放条留着，顶部标题栏隐藏。已购买、收藏夹、正在播放、下载、下载管理、听写和翻译、清理缓存、文件预览是单独一页，顶栏和底栏都隐藏。
 
@@ -60,7 +60,7 @@ Kotlin 2.2.10，AGP 9.4.1，compileSdk / targetSdk 37，minSdk 24，Java 11。�
 - 音频库作品行和在线搜索卡片的标签用 `BadgeLine`：RJ 号固定显示，标签按宽度放，放不下的收进 `+N`；`LabelBadge` 保持单行，不要退回 `Row` + 可换行 `Text`，否则最后一个标签会被挤成竖排。
 - 字幕全文列表点一行跳到该句起始，列表留在原页。正在播放页上的当前句仍用来打开全文列表。当前句颜色：深色 `0xFF90CAF9`，浅色 `0xFF1565C0`。深浅按应用实际主题（`LocalDarkTheme`）判断，不要直接用 `isSystemInDarkTheme()`，否则「外观」里强制深色或浅色时会错。
 - 「外观」存在 `AppearancePreferences`（SharedPreferences `appearance`）：主题模式（跟随系统/浅色/深色）和主题色来源（系统取色/跟随封面/预设）。系统取色是默认；Android 12 以下退回默认靛蓝。封面取色只在选了「跟随封面」时才加载封面，取不出彩色时保持上一次的颜色。预设里的「靛蓝」用手调的默认配色，其余预设由 `seedColorScheme` 生成。状态栏和导航栏图标颜色跟着实际主题走，不跟系统。
-- 听写结果写在 `filesDir/subtitles/{sha256}.json`。同一文件内容、同一听写地址、同一模型、字幕文件还在时，不重新上传。换地址或换模型会再跑并覆盖。旧记录没有模型时，仍按地址对应的原接口匹配，不强迫重跑。
+- 听写结果写在 `filesDir/subtitles/{sha256}.json`。同一文件内容、同一听写地址、同一模型、字幕文件还在时，不重新上传。换地址或换模型会再跑并覆盖。旧记录没有模型或模型已删除时，不再按地址匹配，会重新生成。
 - 「生成字幕」设 `skipTranslate = true`，不请求翻译。「生成字幕和翻译」才在听写完成后翻译。重试沿用原来的 `skipTranslate`。
 - 手动「生成翻译」跑在 `TranslateCenter` 自己的协程里。离开正在播放页只取消等待，不取消这次翻译。
 - 删除生成字幕时，删生成文件、已完成的听写记录和翻译记录。不要删进行中的听写，不要删同目录里原有的 lrc/srt，也不要删远端字幕。
@@ -70,12 +70,12 @@ Kotlin 2.2.10，AGP 9.4.1，compileSdk / targetSdk 37，minSdk 24，Java 11。�
 - 「删除已下载的文件」不分来源（ASMR / DLSITE / B 站）。`localUri` 是 App 目录路径时删文件；是 `content:` / `file:`（识别挂上的）时只 `clearLocalUri`，不删磁盘文件、不改文件夹，曲目回到在线曲目。LOCAL 曲目不动。曲目行菜单对识别挂上的曲目显示「取消识别」。
 - 音频库多选时，只要选中了作品（`asmrSourceId` 非空的文件夹），顶栏不显示下一个播放、加到末尾、下载、加入播放列表，只留删除已下载的文件和移除。播放列表详情页没有「加入音频」，只能从音频库多选加入。
 - 音频库搜索匹配文件夹名、作品标签（`workMeta` 里的 tags）、曲目名和文件名；纯数字还匹配作品编号。作品内部的子文件夹、曲目、文件都归到最近的作品根（`workRootOf`），一个作品只出现一次。
-- 中止只停手机上的这次 HTTP。本机听写服务没有取消接口。听写还在等下载时，不要把音频下载一起取消。错误文案恰好是「已中止」时，下载列表不要显示「查看返回」。
-- 听写按保存的模型选接口。每个模型各自保存地址和密钥；切换下拉只显示该模型已保存的内容，保存和清除也只作用于当前模型。进行中的任务继续用它自己的模型密钥。`whisper-1` 和 `qwen-audio-3.1-asr` 是线上模型：界面不显示地址，只保存 API Key；请求分别固定走 `https://api.openai.com` 和 `https://dashscope.aliyuncs.com`，不使用地址栏里留下的内容。`whisper（本地部署）` 是另一项，必须填写地址和口令，请求与 `whisper-1` 相同（没有 `/v1` 时补上，模型名仍发送 `whisper-1`，日语，`verbose_json`，分段时间），超过 25MB 不询问。没保存过模型时，地址路径去掉末尾斜杠后以 `/v1` 结尾且域名是 `api.openai.com` 视为 `whisper-1`，其他以 `/v1` 结尾的地址视为 `whisper（本地部署）`，否则视为本机任务接口。`Qwen3-ASR` 地址不能空：先读取服务上的模型名，再请求 `/v1/audio/transcriptions`，日语。返回分段时间则按段写字幕；只有整段文字时写成覆盖整首时长的一条。本机任务接口地址也不能空。保存时地址为空仍保存所选模型。`whisper-1` 读超时 10 分钟，文件超过 25MB 时先询问，确认后仍上传，取消则记为「已中止」。`qwen-audio-3.1-asr` 不论时长都先临时上传再轮询，模型名 `qwen-audio-3.1-asr-flash-filetrans`，超过 1GB 不上传。本机任务接口仍是 `POST /jobs`。保存听写地址时不要自动补 `/v1`。
+- 中止只停手机上的这次 HTTP。自部署听写服务（Qwen3-ASR）没有取消接口；SenseVoiceSmall 只在片段之间响应取消，不与 JNI 解码并发调 release。听写还在等下载时，不要把音频下载一起取消。错误文案恰好是「已中止」时，下载列表不要显示「查看返回」。
+- 听写按保存的模型选接口，现有三个：`qwen-audio-3.1-asr`、`Qwen3-ASR`、`SenseVoiceSmall`。每个模型各自保存地址和密钥；切换下拉只显示该模型已保存的内容，保存和清除也只作用于当前模型。进行中的任务继续用它自己的模型密钥。`qwen-audio-3.1-asr` 是线上模型：界面不显示地址，只保存 API Key；请求固定走 `https://dashscope.aliyuncs.com`，不论时长都先临时上传再轮询，模型名 `qwen-audio-3.1-asr-flash-filetrans`，超过 1GB 不上传。`Qwen3-ASR` 地址不能空：先读取服务上的模型名，再请求 `/v1/audio/transcriptions`，日语；返回分段时间则按段写字幕，只有整段文字时写成覆盖整首时长的一条。`SenseVoiceSmall` 完全在本机运行（sherpa-onnx，vendored 的 `com.k2fsa.sherpa.onnx` Kotlin API 和 `app/src/main/jniLibs/arm64-v8a/` 的 .so，只带 arm64），没有地址和口令，任务 endpoint 存 null（双方 null 视为同一服务，去重成立）；模型文件在 `filesDir/sense-voice/`，由 `SenseVoiceModelManager` 从 GitHub Releases 下载（tar.bz2 边下边解，不落压缩包），只认 int8-2024-07-17 的多语种包（版本记在 `version.txt`，不符就在启动时删掉重下）；2025-09-09 的包实为 WSYue-ASR 粤语模型，日语只出汉字，不要换回去；VAD 模型 `silero_vad.onnx` 打包在 assets；`hasWhisper` 对它恒为 false，播放页旁路走 `SenseVoiceModelManager.isReady()`；长音频用 Silero VAD 按静音切 ≤28 秒分段（MediaExtractor + MediaCodec 流式解码 16kHz 单声道），token 时间戳加段偏移拼回整首。旧偏好里存着已删模型（whisper-1 / 本地部署 / 本机任务接口）时一次性迁移成 `qwen-audio-3.1-asr`，不伪造 API Key；队列里旧模型的任务直接失败并提示已移除。保存时地址为空仍保存所选模型。保存听写地址时不要自动补 `/v1`。
 - 翻译只用千问AI平台和 DeepSeek 两个预设平台，地址固定，不再让用户填写，也不再补 `/v1`。口令和模型名按平台分开保存。模型名没填时，千问用 `qwen3.8-flash`，DeepSeek 用 `deepseek-flash`。深度思考关闭时千问发 `enable_thinking: false`，DeepSeek 发 `thinking.type: disabled`。打开后千问只发 `enable_thinking` 和 `reasoning_effort`（低 `low`、中 `medium`、高 `xhigh`），不要同时发 `thinking_budget`。DeepSeek 的 `reasoning_effort` 放在请求顶层（高 `high`、最高 `max`），不要放进 `thinking`。思考过程在 `reasoning_content`，不要写进字幕。
 - 润色失败保留原译文，不把任务记成翻译失败。自动润色发生在译文已经写入之后。手动「润色」不进下载列表，跑在 `TranslateCenter` 自己的协程里；离开正在播放页只取消等待，不取消这次润色。
-- 本地复制进 `filesDir/whisper-src/` 的文件名没有后缀。上传时按文件头补 `mp3` / `flac` / `m4a` / `aac` / `wav` / `ogg`，不要改磁盘上的暂存文件名。只有 `content:` URI 和重试时缺文件才复制；任务进行中不要清掉这份暂存，任务结束、取消或重试后清掉没有被任务引用的暂存文件。重试优先用任务原来的文件，其次从曲目本地文件再复制。
-- targetSdk 37。听写地址是局域网、本机或 `.local` 时，Android 17 要在请求前申请 `ACCESS_LOCAL_NETWORK`。公网地址不申请。判断用 `isLocalNetworkAddress`，字面 IP 才解析，不要为了判断去做 DNS。翻译走两个公网平台，不申请本地网络。
+- 本地复制进 `filesDir/whisper-src/` 的文件名没有后缀。上传时按文件头补 `mp3` / `flac` / `m4a` / `aac` / `wav` / `ogg`，不要改磁盘上的暂存文件名。只有 `content:` URI 和重试时缺文件才复制；任务进行中不要清掉这份暂存，任务结束、取消或重试后清掉没有被任务引用的暂存文件。重试优先用任务原来的文件，其次从曲目本地文件再复制。SenseVoiceSmall 直接读本地文件（MediaExtractor 走真实路径），不走上传，也不用这份暂存。
+- targetSdk 37。听写地址是局域网、本机或 `.local` 时（只有 Qwen3-ASR 可能出现；SenseVoiceSmall 离线，公网和它都不申请），Android 17 要在请求前申请 `ACCESS_LOCAL_NETWORK`。判断用 `isLocalNetworkAddress`，字面 IP 才解析，不要为了判断去做 DNS。翻译走两个公网平台，不申请本地网络。
 - 文案不要用「家里电脑」。翻译说明只写通用大模型，不要点名某个专用翻译模型。
 - 不要把口令、Cookie、SESSDATA、refresh token 写进日志、提交说明或文档。
 

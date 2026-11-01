@@ -51,7 +51,6 @@ private fun addSentences(out: MutableList<WhisperCue>, array: JSONArray?) {
 
 private fun addSentence(out: MutableList<WhisperCue>, item: JSONObject?) {
     if (item == null) return
-    if (item.has("sentence_end") && !item.optBoolean("sentence_end")) return
     val line = item.optString("text").trim()
     if (line.isEmpty()) return
     val start = item.optLong("begin_time", -1L)

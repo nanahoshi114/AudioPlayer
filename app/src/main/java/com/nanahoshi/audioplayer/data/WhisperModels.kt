@@ -2,86 +2,54 @@ package com.nanahoshi.audioplayer.data
 
 import java.net.URI
 
-internal const val WHISPER_MODEL_1 = "whisper-1"
-internal const val WHISPER_MODEL_LOCAL = "whisper-local"
 internal const val WHISPER_MODEL_QWEN = "qwen-audio-3.1-asr"
 internal const val WHISPER_MODEL_QWEN3 = "qwen3-asr"
-internal const val WHISPER_MODEL_JOBS = "jobs"
+internal const val SENSE_VOICE_MODEL = "sense-voice-small"
 internal const val QWEN3_ASR_MODEL = "Qwen/Qwen3-ASR-1.7B"
 internal const val QWEN_FILE_MODEL = "qwen-audio-3.1-asr-flash-filetrans"
 
-internal const val ONLINE_WHISPER_BYTES = 25L * 1024L * 1024L
 internal const val QWEN_TEMP_BYTES = 1024L * 1024L * 1024L
 
-private const val OPENAI_HOST = "api.openai.com"
-
-internal const val OPENAI_WHISPER_BASE = "https://api.openai.com"
 internal const val QWEN_WHISPER_BASE = "https://dashscope.aliyuncs.com"
 
 internal fun whisperModelLabel(model: String): String = when (model) {
-    WHISPER_MODEL_1 -> WHISPER_MODEL_1
-    WHISPER_MODEL_LOCAL -> "whisper（本地部署）"
     WHISPER_MODEL_QWEN -> WHISPER_MODEL_QWEN
     WHISPER_MODEL_QWEN3 -> "Qwen3-ASR"
-    else -> "本机任务接口"
+    SENSE_VOICE_MODEL -> "SenseVoiceSmall"
+    else -> SENSE_VOICE_MODEL
 }
 
 internal fun knownWhisperModel(model: String?): String? =
     model?.takeIf {
-        it == WHISPER_MODEL_1 ||
-            it == WHISPER_MODEL_LOCAL ||
-            it == WHISPER_MODEL_QWEN ||
+        it == WHISPER_MODEL_QWEN ||
             it == WHISPER_MODEL_QWEN3 ||
-            it == WHISPER_MODEL_JOBS
+            it == SENSE_VOICE_MODEL
     }
 
-internal fun isCloudWhisperModel(model: String?): Boolean =
-    model == WHISPER_MODEL_1 || model == WHISPER_MODEL_QWEN
+internal fun isCloudWhisperModel(model: String?): Boolean = model == WHISPER_MODEL_QWEN
 
-internal fun inferredWhisperModel(base: String?): String = when {
-    isOnlineWhisper(base) && whisperHost(base) == OPENAI_HOST -> WHISPER_MODEL_1
-    isOnlineWhisper(base) -> WHISPER_MODEL_LOCAL
-    else -> WHISPER_MODEL_JOBS
-}
+/** 完全在本机运行的听写模型：没有地址和口令，模型文件下载到手机里。 */
+internal fun isOnDeviceWhisperModel(model: String?): Boolean = model == SENSE_VOICE_MODEL
 
-internal fun whisperModelsMatch(stored: String?, requested: String, endpoint: String?): Boolean {
-    val actual = knownWhisperModel(stored) ?: inferredWhisperModel(endpoint)
-    return actual == requested
-}
+internal fun whisperModelsMatch(stored: String?, requested: String): Boolean =
+    knownWhisperModel(stored) == requested
 
 /**
- * 比较两条件听写地址是否指向同一个服务。线上接口以前要填到 `/v1`，现在只存主机基址，
- * 所以按本次请求的模型去掉 `/v1` 再比；本机任务接口拿 `/v1` 区分路由，不能去掉。
+ * 比较两条听写地址是否指向同一个服务。线上接口以前要填到 `/v1`，现在只存主机基址，
+ * 所以按本次请求的模型去掉 `/v1` 再比。本机模型没有地址，双方都是 null 视为同一个。
  */
 internal fun sameWhisperEndpoint(a: String?, b: String?, model: String?): Boolean {
+    if (a == null && b == null) return true
     val left = canonicalWhisperEndpoint(a, model) ?: return false
     return left == canonicalWhisperEndpoint(b, model)
 }
 
 internal fun canonicalWhisperEndpoint(raw: String?, model: String?): String? {
     val base = raw?.trim()?.trimEnd('/')?.takeIf { it.isNotEmpty() } ?: return null
-    val route = knownWhisperModel(model) ?: inferredWhisperModel(base)
-    return if (route == WHISPER_MODEL_JOBS) base else base.removeSuffix("/v1")
-}
-
-internal fun whisperHost(base: String?): String? {
-    val raw = base?.trim()?.takeIf { it.isNotEmpty() } ?: return null
-    return try {
-        URI(raw).host?.lowercase()
-    } catch (_: Exception) {
-        null
-    }
-}
-
-internal fun needsOnlineSizeConfirm(model: String?, base: String?, bytes: Long): Boolean {
-    val route = knownWhisperModel(model) ?: if (isOnlineWhisper(base)) WHISPER_MODEL_1 else return false
-    if (route != WHISPER_MODEL_1) return false
-    if (bytes <= ONLINE_WHISPER_BYTES) return false
-    return whisperHost(base) == OPENAI_HOST
+    return if (knownWhisperModel(model) == WHISPER_MODEL_QWEN3) base.removeSuffix("/v1") else base
 }
 
 internal fun officialWhisperBase(model: String?): String? = when (model) {
-    WHISPER_MODEL_1 -> OPENAI_WHISPER_BASE
     WHISPER_MODEL_QWEN -> QWEN_WHISPER_BASE
     else -> null
 }
@@ -89,6 +57,7 @@ internal fun officialWhisperBase(model: String?): String? = when (model) {
 internal fun effectiveWhisperBase(model: String?, saved: String?): String? {
     val known = knownWhisperModel(model)
     if (isCloudWhisperModel(known)) return officialWhisperBase(known)
+    if (isOnDeviceWhisperModel(known)) return null
     return saved?.trim()?.trimEnd('/')?.takeIf { it.isNotEmpty() }
 }
 

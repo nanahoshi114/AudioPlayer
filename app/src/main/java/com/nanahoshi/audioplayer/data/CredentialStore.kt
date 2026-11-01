@@ -74,38 +74,40 @@ class CredentialStore(context: Context) {
     }
 
     fun whisperBaseUrl(model: String? = null): String? {
-        migrateLegacyWhisper()
+        migrateWhisper()
         val id = knownWhisperModel(model) ?: resolvedWhisperModel()
         return normalizeWhisperBase(plainPrefs.getString(whisperBaseKey(id), null))
     }
 
     fun whisperToken(model: String? = null): String? {
-        migrateLegacyWhisper()
+        migrateWhisper()
         val id = knownWhisperModel(model) ?: resolvedWhisperModel()
         return secretPrefs.getString(whisperTokenKey(id), null)?.trim()?.takeIf { it.isNotEmpty() }
     }
 
     fun hasWhisper(model: String? = null): Boolean {
-        migrateLegacyWhisper()
+        migrateWhisper()
         val id = knownWhisperModel(model) ?: resolvedWhisperModel()
         return whisperToken(id) != null && effectiveWhisperBase(id, whisperBaseUrl(id)) != null
     }
 
     fun whisperModel(): String? {
-        migrateLegacyWhisper()
+        migrateWhisper()
         return knownWhisperModel(plainPrefs.getString(KEY_WHISPER_MODEL, null))
     }
 
     fun resolvedWhisperModel(): String {
-        migrateLegacyWhisper()
-        return whisperModel() ?: WHISPER_MODEL_JOBS
+        migrateWhisper()
+        return whisperModel() ?: WHISPER_MODEL_QWEN
     }
 
     fun saveWhisper(baseUrl: String, token: String, model: String) {
-        migrateLegacyWhisper()
+        migrateWhisper()
         val known = knownWhisperModel(model) ?: return
+        plainPrefs.edit().putString(KEY_WHISPER_MODEL, known).apply()
+        if (isOnDeviceWhisperModel(known)) return
         val base = normalizeWhisperBase(baseUrl)
-        val edit = plainPrefs.edit().putString(KEY_WHISPER_MODEL, known)
+        val edit = plainPrefs.edit()
         if (base == null) edit.remove(whisperBaseKey(known)) else edit.putString(whisperBaseKey(known), base)
         edit.apply()
         val secret = token.trim()
@@ -117,26 +119,43 @@ class CredentialStore(context: Context) {
     }
 
     fun clearWhisper(model: String? = null) {
-        migrateLegacyWhisper()
+        migrateWhisper()
         val id = knownWhisperModel(model) ?: resolvedWhisperModel()
         plainPrefs.edit().remove(whisperBaseKey(id)).apply()
         secretPrefs.edit().remove(whisperTokenKey(id)).apply()
+    }
+
+    private fun migrateWhisper() {
+        migrateLegacyWhisper()
+        migrateRemovedWhisperModels()
+    }
+
+    private fun migrateRemovedWhisperModels() {
+        if (plainPrefs.getBoolean(KEY_WHISPER_MODEL_MIGRATED_V2, false)) return
+        if (knownWhisperModel(plainPrefs.getString(KEY_WHISPER_MODEL, null)) == null) {
+            plainPrefs.edit().putString(KEY_WHISPER_MODEL, WHISPER_MODEL_QWEN).apply()
+        }
+        plainPrefs.edit().putBoolean(KEY_WHISPER_MODEL_MIGRATED_V2, true).apply()
     }
 
     private fun migrateLegacyWhisper() {
         if (plainPrefs.getBoolean(KEY_WHISPER_MIGRATED, false)) return
         val legacyBase = normalizeWhisperBase(plainPrefs.getString(KEY_WHISPER_BASE, null))
         val legacyToken = secretPrefs.getString(KEY_WHISPER_TOKEN, null)?.trim()?.takeIf { it.isNotEmpty() }
-        val model = knownWhisperModel(plainPrefs.getString(KEY_WHISPER_MODEL, null))
-            ?: inferredWhisperModel(legacyBase)
-        if (legacyBase != null && plainPrefs.getString(whisperBaseKey(model), null).isNullOrBlank()) {
-            plainPrefs.edit().putString(whisperBaseKey(model), legacyBase).apply()
-        }
-        if (legacyToken != null && secretPrefs.getString(whisperTokenKey(model), null).isNullOrBlank()) {
-            secretPrefs.edit().putString(whisperTokenKey(model), legacyToken).apply()
-        }
-        if (knownWhisperModel(plainPrefs.getString(KEY_WHISPER_MODEL, null)) == null) {
-            plainPrefs.edit().putString(KEY_WHISPER_MODEL, model).apply()
+        val stored = knownWhisperModel(plainPrefs.getString(KEY_WHISPER_MODEL, null))
+        // 旧地址对应的三个模型已删除，只有 DashScope 的旧凭证还迁得动。
+        val dashscope = legacyBase != null && qwenHttpOrigin(legacyBase) == QWEN_WHISPER_BASE
+        val model = stored ?: if (dashscope) WHISPER_MODEL_QWEN else null
+        if (model != null) {
+            if (dashscope && plainPrefs.getString(whisperBaseKey(model), null).isNullOrBlank()) {
+                plainPrefs.edit().putString(whisperBaseKey(model), legacyBase).apply()
+            }
+            if (dashscope && legacyToken != null && secretPrefs.getString(whisperTokenKey(model), null).isNullOrBlank()) {
+                secretPrefs.edit().putString(whisperTokenKey(model), legacyToken).apply()
+            }
+            if (stored == null) {
+                plainPrefs.edit().putString(KEY_WHISPER_MODEL, model).apply()
+            }
         }
         plainPrefs.edit().remove(KEY_WHISPER_BASE).putBoolean(KEY_WHISPER_MIGRATED, true).apply()
         secretPrefs.edit().remove(KEY_WHISPER_TOKEN).apply()
@@ -329,6 +348,7 @@ class CredentialStore(context: Context) {
         const val KEY_WHISPER_TOKEN = "whisper_token"
         const val KEY_WHISPER_MODEL = "whisper_model"
         const val KEY_WHISPER_MIGRATED = "whisper_credentials_migrated"
+        const val KEY_WHISPER_MODEL_MIGRATED_V2 = "whisper_model_migrated_v2"
 
         fun whisperBaseKey(model: String) = "whisper_base_$model"
 

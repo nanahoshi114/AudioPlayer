@@ -186,7 +186,6 @@ private fun PlayerApp() {
     val message by messages.collectAsStateWithLifecycle()
     val sleepFinished by graph.player.sleepFinished
         .collectAsStateWithLifecycle()
-    val sizeConfirm by graph.whisper.sizeConfirmJob.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     val topBarOverride = remember { mutableStateOf<(@Composable () -> Unit)?>(null) }
     val reduceMotion = LocalReduceMotion.current
@@ -232,18 +231,6 @@ private fun PlayerApp() {
                 TextButton(onClick = {
                     graph.player.acknowledgeSleepFinished()
                 }) { Text("确定") }
-            },
-        )
-    }
-    if (sizeConfirm != null) {
-        AlertDialog(
-            onDismissRequest = { graph.whisper.declineSizeConfirm() },
-            text = { Text("检测到填入的可能是在线模型，当前文件大小超过25MB，可能会被拒绝，是否仍发送？") },
-            confirmButton = {
-                TextButton(onClick = { graph.whisper.acceptSizeConfirm() }) { Text("仍要发送") }
-            },
-            dismissButton = {
-                TextButton(onClick = { graph.whisper.declineSizeConfirm() }) { Text("取消") }
             },
         )
     }

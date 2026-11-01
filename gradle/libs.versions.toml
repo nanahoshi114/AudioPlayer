@@ -19,6 +19,7 @@ securityCrypto = "1.1.0"
 reorderable = "2.5.1"
 documentfile = "1.1.0"
 zxing = "3.5.3"
+commonsCompress = "1.27.1"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -52,6 +53,7 @@ kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 coil-compose = { group = "io.coil-kt", name = "coil-compose", version.ref = "coil" }
 reorderable = { group = "sh.calvin.reorderable", name = "reorderable", version.ref = "reorderable" }
 zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxing" }
+commons-compress = { group = "org.apache.commons", name = "commons-compress", version.ref = "commonsCompress" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
