@@ -1,5 +1,6 @@
 using System.IO;
 using System.Security.Cryptography;
+using System.Windows;
 using System.Windows.Media.Imaging;
 using NAudio.Wave;
 using PlayerDemo.Subtitles;
@@ -163,12 +164,26 @@ public static class TrackLoader
             image.StreamSource = stream;
             image.EndInit();
             image.Freeze();
-            return image;
+            return CenterSquare(image);
         }
         catch
         {
             return null;
         }
+    }
+
+    public static BitmapSource CenterSquare(BitmapSource source)
+    {
+        var width = source.PixelWidth;
+        var height = source.PixelHeight;
+        if (width < 2 || height < 2 || Math.Abs(width - height) <= 1)
+            return source;
+
+        var side = Math.Min(width, height);
+        var cropped = new CroppedBitmap(source, new Int32Rect((width - side) / 2, (height - side) / 2, side, side));
+        if (cropped.CanFreeze)
+            cropped.Freeze();
+        return cropped;
     }
 
     public static string? CoverFile(string audioPath)
@@ -215,7 +230,7 @@ public static class TrackLoader
             image.StreamSource = stream;
             image.EndInit();
             image.Freeze();
-            return image;
+            return CenterSquare(image);
         }
         catch
         {

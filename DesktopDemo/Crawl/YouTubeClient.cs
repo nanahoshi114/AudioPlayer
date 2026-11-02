@@ -9,8 +9,10 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using System.Xml.Linq;
 using PlayerDemo.Library;
 using PlayerDemo.Services;
+using PlayerDemo.Subtitles;
 
 namespace PlayerDemo.Crawl;
 
@@ -163,6 +165,7 @@ public static partial class YouTubeClient
         }
 
         await TryCoverAsync(resolved.CoverUrl, root, cancellationToken);
+        await TrySubtitleAsync(videoId, path, progress, resolved.Title, cancellationToken);
         return [path];
     }
 
@@ -986,33 +989,333 @@ public static partial class YouTubeClient
         return match.Success ? match.Groups[1].Value : "";
     }
 
+    private const int SegmentBytes = 1024 * 1024;
+    private const int SegmentParallel = 4;
+
     private static async Task SaveAsync(string url, string agent, string referer, string cookie, string path, Action<long, long> onBytes, CancellationToken cancellationToken)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, null);
+        var length = await ProbeLengthAsync(url, agent, referer, cookie, cancellationToken);
+        if (length <= 0)
+            throw new InvalidOperationException("音频下不来");
+        await using var output = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read, 64 * 1024, FileOptions.Asynchronous);
+        output.SetLength(length);
+        var slot = new SemaphoreSlim(SegmentParallel);
+        using var failed = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var received = 0L;
+        var workers = new List<Task>();
+        try
+        {
+            for (long start = 0; start < length; start += SegmentBytes)
+            {
+                await slot.WaitAsync(failed.Token);
+                var from = start;
+                var count = (int)Math.Min(SegmentBytes, length - from);
+                workers.Add(WriteSegmentAsync(output, url, agent, referer, cookie, from, count, () =>
+                {
+                    var done = Interlocked.Add(ref received, count);
+                    onBytes(done, length);
+                }, slot, failed));
+            }
+
+            await Task.WhenAll(workers);
+        }
+        catch
+        {
+            try
+            {
+                await failed.CancelAsync();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+
+            try
+            {
+                await Task.WhenAll(workers);
+            }
+            catch
+            {
+                // 失败的那段已经抛出，其余段取消即可。
+            }
+
+            throw;
+        }
+
+        await output.FlushAsync(cancellationToken);
+    }
+
+    private static async Task WriteSegmentAsync(
+        FileStream output,
+        string url,
+        string agent,
+        string referer,
+        string cookie,
+        long from,
+        int count,
+        Action report,
+        SemaphoreSlim slot,
+        CancellationTokenSource failed)
+    {
+        try
+        {
+            var data = await ReadSegmentAsync(url, agent, referer, cookie, from, count, failed.Token);
+            lock (output)
+            {
+                output.Position = from;
+                output.Write(data, 0, data.Length);
+            }
+
+            report();
+        }
+        catch
+        {
+            try
+            {
+                await failed.CancelAsync();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+
+            throw;
+        }
+        finally
+        {
+            slot.Release();
+        }
+    }
+
+    private static async Task<long> ProbeLengthAsync(string url, string agent, string referer, string cookie, CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                using var request = MediaRequest(url, agent, referer, cookie);
+                request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, 0);
+                using var response = await Media.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                if (response.StatusCode == HttpStatusCode.Forbidden)
+                    throw new InvalidOperationException("这个音频地址被 YouTube 拒绝了。当前没有稳定的公开音频接口，校验没通过时下不了。");
+                if (response.StatusCode != HttpStatusCode.PartialContent)
+                    throw new InvalidOperationException("音频下不来");
+                return response.Content.Headers.ContentRange?.Length ?? -1;
+            }
+            catch (Exception) when (attempt < 2 && !cancellationToken.IsCancellationRequested)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(200 * (attempt + 1)), cancellationToken);
+            }
+        }
+    }
+
+    private static async Task<byte[]> ReadSegmentAsync(string url, string agent, string referer, string cookie, long from, int count, CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                using var request = MediaRequest(url, agent, referer, cookie);
+                request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(from, from + count - 1);
+                using var response = await Media.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                if (response.StatusCode == HttpStatusCode.Forbidden)
+                    throw new InvalidOperationException("这个音频地址被 YouTube 拒绝了。当前没有稳定的公开音频接口，校验没通过时下不了。");
+                if (response.StatusCode != HttpStatusCode.PartialContent)
+                    throw new InvalidOperationException("音频下不来");
+                var data = new byte[count];
+                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                var offset = 0;
+                while (offset < count)
+                {
+                    var read = await stream.ReadAsync(data.AsMemory(offset, count - offset), cancellationToken);
+                    if (read == 0)
+                        throw new EndOfStreamException();
+                    offset += read;
+                }
+
+                return data;
+            }
+            catch (Exception) when (attempt < 2 && !cancellationToken.IsCancellationRequested)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(200 * (attempt + 1)), cancellationToken);
+            }
+        }
+    }
+
+    private static HttpRequestMessage MediaRequest(string url, string agent, string referer, string cookie)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.TryAddWithoutValidation("User-Agent", agent);
         request.Headers.TryAddWithoutValidation("Referer", referer);
         request.Headers.TryAddWithoutValidation("Origin", "https://www.youtube.com");
         StampCookie(request, cookie);
-        using var response = await Media.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        if (response.StatusCode == HttpStatusCode.Forbidden)
-            throw new InvalidOperationException("这个音频地址被 YouTube 拒绝了。当前没有稳定的公开音频接口，校验没通过时下不了。");
-        if (!response.IsSuccessStatusCode)
-            throw new InvalidOperationException("音频下不来");
-        await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
-        var total = response.Content.Headers.ContentLength ?? -1;
-        await using var output = File.Create(path);
-        var buffer = new byte[64 * 1024];
-        long received = 0;
-        while (true)
+        return request;
+    }
+
+    private static async Task TrySubtitleAsync(
+        string videoId,
+        string audioPath,
+        IProgress<CrawlProgress> progress,
+        string title,
+        CancellationToken cancellationToken)
+    {
+        var srt = Path.ChangeExtension(audioPath, ".srt");
+        if (File.Exists(srt) && new FileInfo(srt).Length > 0)
         {
-            var read = await input.ReadAsync(buffer, cancellationToken);
-            if (read == 0)
-                break;
-            await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
-            received += read;
-            onBytes(received, total);
+            Report(progress, title + "  字幕", -1, -1, true);
+            return;
         }
+
+        try
+        {
+            var address = await CaptionUrlAsync(videoId, cancellationToken);
+            if (address == null)
+                return;
+            using var request = new HttpRequestMessage(HttpMethod.Get, address);
+            request.Headers.TryAddWithoutValidation("User-Agent", AndroidAgent);
+            using var response = await Http.SendAsync(request, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+                return;
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            var cues = ReadTimedText(body);
+            if (cues.Count == 0)
+                return;
+            CueDocument.WriteSrt(srt, cues);
+            Report(progress, title + "  字幕", 1, 1, false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+        }
+    }
+
+    private static async Task<string?> CaptionUrlAsync(string videoId, CancellationToken cancellationToken)
+    {
+        var client = Players.First(item => item.Name == "ANDROID");
+        var gate = await EnsureVisitorAsync(cancellationToken);
+        var version = client.Version;
+        var body = JsonSerializer.Serialize(new
+        {
+            videoId,
+            context = new
+            {
+                client = new
+                {
+                    clientName = client.Name,
+                    clientVersion = version,
+                    hl = "ja",
+                    gl = "JP",
+                    osName = client.OsName,
+                    osVersion = client.OsVersion,
+                    androidSdkVersion = client.Sdk,
+                    visitorData = gate.Visitor.Length == 0 ? null : gate.Visitor,
+                },
+            },
+            playbackContext = gate.Timestamp > 0
+                ? new { contentPlaybackContext = new { signatureTimestamp = gate.Timestamp } }
+                : null,
+            contentCheckOk = true,
+            racyCheckOk = true,
+        }, Json);
+        using var request = new HttpRequestMessage(HttpMethod.Post, "https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
+        {
+            Content = new StringContent(body, Encoding.UTF8, "application/json"),
+        };
+        request.Headers.TryAddWithoutValidation("User-Agent", client.Agent);
+        request.Headers.TryAddWithoutValidation("X-YouTube-Client-Name", client.Number);
+        request.Headers.TryAddWithoutValidation("X-YouTube-Client-Version", version);
+        using var response = await Http.SendAsync(request, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+            return null;
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+        var tracks = Child(Child(Child(document.RootElement, "captions"), "playerCaptionsTracklistRenderer"), "captionTracks");
+        if (tracks.ValueKind != JsonValueKind.Array)
+            return null;
+        string? best = null;
+        var bestScore = int.MinValue;
+        foreach (var track in tracks.EnumerateArray())
+        {
+            var address = Text(track, "baseUrl");
+            if (address.Length == 0)
+                continue;
+            var score = string.Equals(Text(track, "kind"), "asr", StringComparison.OrdinalIgnoreCase) ? 0 : 100;
+            score += Text(track, "languageCode") switch
+            {
+                "ja" => 40,
+                "zh-Hans" or "zh-CN" => 30,
+                "zh-Hant" or "zh-TW" => 28,
+                "zh" => 26,
+                "en" => 10,
+                _ => 0,
+            };
+            if (score > bestScore)
+            {
+                bestScore = score;
+                best = address;
+            }
+        }
+
+        return best;
+    }
+
+    private static List<SubtitleCue> ReadTimedText(string xml)
+    {
+        var cues = new List<SubtitleCue>();
+        if (string.IsNullOrWhiteSpace(xml))
+            return cues;
+        var document = XDocument.Parse(xml);
+        foreach (var paragraph in document.Descendants().Where(item => item.Name.LocalName == "p"))
+        {
+            var text = CaptionText(paragraph);
+            if (text.Length == 0)
+                continue;
+            var start = CaptionTime(paragraph, "t");
+            var duration = CaptionTime(paragraph, "d");
+            cues.Add(new SubtitleCue(start, start + Math.Max(duration, 200), text));
+        }
+
+        if (cues.Count > 0)
+            return cues;
+        foreach (var line in document.Descendants().Where(item => item.Name.LocalName == "text"))
+        {
+            var text = CaptionText(line);
+            if (text.Length == 0)
+                continue;
+            var start = (long)Math.Round(CaptionSeconds(line, "start") * 1000);
+            var duration = (long)Math.Round(CaptionSeconds(line, "dur") * 1000);
+            cues.Add(new SubtitleCue(start, start + Math.Max(duration, 200), text));
+        }
+
+        return cues;
+    }
+
+    private static string CaptionText(XElement element)
+    {
+        var builder = new StringBuilder();
+        foreach (var node in element.Nodes())
+        {
+            if (node is XText text)
+                builder.Append(text.Value);
+            else if (node is XElement child && child.Name.LocalName == "br")
+                builder.Append('\n');
+            else if (node is XElement nested)
+                builder.Append(CaptionText(nested));
+        }
+
+        return string.Join("\n", builder.ToString().Split('\n').Select(line => line.Trim()).Where(line => line.Length > 0));
+    }
+
+    private static long CaptionTime(XElement element, string name)
+    {
+        var value = element.Attribute(name)?.Value;
+        return long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var time) ? time : 0;
+    }
+
+    private static double CaptionSeconds(XElement element, string name)
+    {
+        var value = element.Attribute(name)?.Value;
+        return double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var time) ? time : 0;
     }
 
     private static async Task TryCoverAsync(string? url, string root, CancellationToken cancellationToken)

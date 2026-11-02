@@ -41,6 +41,12 @@ public sealed class LyricLine : FrameworkElement
         typeof(LyricLine),
         new FrameworkPropertyMetadata(FontWeights.Bold, FrameworkPropertyMetadataOptions.AffectsMeasure | FrameworkPropertyMetadataOptions.AffectsRender));
 
+    public static readonly DependencyProperty MaxLinesProperty = DependencyProperty.Register(
+        nameof(MaxLines),
+        typeof(int),
+        typeof(LyricLine),
+        new FrameworkPropertyMetadata(2, FrameworkPropertyMetadataOptions.AffectsMeasure | FrameworkPropertyMetadataOptions.AffectsRender));
+
     public LyricLine()
     {
         IsHitTestVisible = false;
@@ -83,23 +89,29 @@ public sealed class LyricLine : FrameworkElement
         set => SetValue(FontWeightProperty, value);
     }
 
+    public int MaxLines
+    {
+        get => (int)GetValue(MaxLinesProperty);
+        set => SetValue(MaxLinesProperty, value);
+    }
+
     protected override Size MeasureOverride(Size available)
     {
-        var formatted = Format(WidthOf(available.Width), HeightOf(available.Height));
+        var formatted = Format(WidthOf(available.Width));
         if (formatted == null)
             return new Size(0, 0);
-        var inset = Inset * 2;
-        return new Size(formatted.Width + inset, formatted.Height + inset);
+        var pad = Pad * 2;
+        return new Size(formatted.Width + pad, formatted.Height + pad + Overhang(formatted));
     }
 
     protected override void OnRender(DrawingContext drawingContext)
     {
-        var formatted = Format(WidthOf(ActualWidth), HeightOf(ActualHeight));
+        var formatted = Format(WidthOf(ActualWidth));
         if (formatted == null)
             return;
 
-        var y = Inset + Math.Max(0, (ActualHeight - Inset * 2 - formatted.Height) / 2);
-        var geometry = formatted.BuildGeometry(new Point(Inset, y));
+        var y = Pad + Math.Max(0, (ActualHeight - Pad * 2 - formatted.Height - Overhang(formatted)) / 2);
+        var geometry = formatted.BuildGeometry(new Point(Pad, y));
         var pen = new Pen(Stroke, StrokeThickness)
         {
             LineJoin = PenLineJoin.Round,
@@ -110,9 +122,14 @@ public sealed class LyricLine : FrameworkElement
         drawingContext.DrawGeometry(Fill, null, geometry);
     }
 
-    private double Inset => Math.Max(1, StrokeThickness);
+    private double Pad => Math.Max(3, StrokeThickness + 2);
 
-    private FormattedText? Format(double width, double height)
+    private static double Overhang(FormattedText formatted) =>
+        Math.Max(0, formatted.OverhangAfter) + Math.Max(0, formatted.OverhangLeading);
+
+    private double Inset => Pad;
+
+    private FormattedText? Format(double width)
     {
         var text = Text?.Replace("\r", "") ?? "";
         if (text.Length == 0 || width <= 1 || FontSize <= 0)
@@ -122,22 +139,27 @@ public sealed class LyricLine : FrameworkElement
         if (PresentationSource.FromVisual(this) != null)
             pixels = VisualTreeHelper.GetDpi(this).PixelsPerDip;
 
+        var limit = Math.Max(1, MaxLines);
         var size = FontSize;
-        var formatted = Make(text, width, size, pixels, 0);
-        while (height > 1 && formatted.Height > height + 0.5 && size > 15)
+        var formatted = Make(text, width, size, pixels);
+        while (size > 12 && Lines(formatted, size) > limit)
         {
-            size -= Math.Max(1, size * 0.08);
-            formatted = Make(text, width, Math.Max(15, size), pixels, 0);
+            size = Math.Max(12, size * 0.92);
+            formatted = Make(text, width, size, pixels);
         }
 
-        if (height > 1 && formatted.Height > height + 0.5)
-            formatted = Make(text, width, Math.Max(15, size), pixels, height);
         return formatted;
     }
 
-    private FormattedText Make(string text, double width, double size, double pixels, double clipHeight)
+    private static int Lines(FormattedText formatted, double size)
     {
-        var formatted = new FormattedText(
+        var line = Math.Max(1, size * 1.28);
+        return Math.Max(1, (int)Math.Ceiling((formatted.Height - 0.5) / line));
+    }
+
+    private FormattedText Make(string text, double width, double size, double pixels)
+    {
+        return new FormattedText(
             text,
             CultureInfo.CurrentUICulture,
             FlowDirection.LeftToRight,
@@ -150,18 +172,9 @@ public sealed class LyricLine : FrameworkElement
             TextAlignment = TextAlignment.Center,
             LineHeight = size * 1.28,
         };
-        if (clipHeight > 1)
-        {
-            formatted.Trimming = TextTrimming.CharacterEllipsis;
-            formatted.MaxTextHeight = clipHeight;
-        }
-
-        return formatted;
     }
 
     private double WidthOf(double available) => double.IsInfinity(available) ? 0 : Math.Max(0, available - Inset * 2);
-
-    private static double HeightOf(double available) => double.IsInfinity(available) ? 0 : Math.Max(0, available);
 
     private static DependencyProperty TextElementFontSize() => DependencyProperty.Register(
         nameof(FontSize),

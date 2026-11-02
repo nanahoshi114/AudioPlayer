@@ -3,6 +3,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using PlayerDemo.Services;
+using PlayerDemo.Theme;
 
 namespace PlayerDemo;
 
@@ -10,10 +11,7 @@ public partial class SubtitleFloatWindow : Window
 {
     private const double Grip = 12;
 
-    private static readonly SolidColorBrush BrightFill = Freeze(Color.FromRgb(255, 255, 255));
-    private static readonly SolidColorBrush BrightStroke = Freeze(Color.FromArgb(0xE6, 0, 0, 0));
-    private static readonly SolidColorBrush DimFill = Freeze(Color.FromRgb(0xD0, 0xD0, 0xD0));
-    private static readonly SolidColorBrush DimStroke = Freeze(Color.FromArgb(0xE6, 0, 0, 0));
+    private Color _accent = Color.FromRgb(0x8A, 0x5A, 0x32);
     private static readonly SolidColorBrush HitFill = Freeze(Color.FromArgb(0x01, 0, 0, 0));
     private static readonly SolidColorBrush HoverFill = Freeze(Color.FromArgb(0x28, 0, 0, 0));
     private static readonly SolidColorBrush HoverStroke = Freeze(Color.FromArgb(0x80, 255, 255, 255));
@@ -27,15 +25,26 @@ public partial class SubtitleFloatWindow : Window
     private double _originWidth;
     private double _originHeight;
     private bool _bright = true;
+    private bool _fitting;
 
     public bool IsClosed { get; private set; }
+
+    public event EventHandler? OriginalRequested;
+
+    public event EventHandler? CloseRequested;
+
+    public event EventHandler? PreviousRequested;
+
+    public event EventHandler? NextRequested;
+
+    public event EventHandler? PlayRequested;
 
     public SubtitleFloatWindow(ServiceSettings settings)
     {
         _settings = settings;
         InitializeComponent();
-        Width = settings.FloatWidth is double width && width is >= 280 and <= 1400 ? width : 760;
-        Height = settings.FloatHeight is double height && height is >= 96 and <= 520 ? height : 168;
+        Width = settings.FloatWidth is double width && width is >= 420 and <= 1400 ? width : 860;
+        Height = settings.FloatHeight is double height && height is >= 180 and <= 520 ? height : 240;
         WindowStartupLocation = WindowStartupLocation.Manual;
         if (settings.FloatLeft is double left && settings.FloatTop is double top)
         {
@@ -53,6 +62,23 @@ public partial class SubtitleFloatWindow : Window
         UpdateScale();
     }
 
+    public void SetOriginalShown(bool shown) => OriginalButton.Content = shown ? "隐藏原文" : "显示原文";
+
+    public void SetPlaying(bool playing)
+    {
+        PlayMark.Visibility = playing ? Visibility.Collapsed : Visibility.Visible;
+        PauseMark.Visibility = playing ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    public void UseAccent(Color accent)
+    {
+        _accent = accent;
+        CurrentLine.Fill = Freeze(ArtColor.Lyric(accent));
+        CurrentLine.Stroke = Freeze(ArtColor.LyricEdge(accent));
+        NextLine.Fill = Freeze(ArtColor.LyricSoft(accent));
+        NextLine.Stroke = Freeze(ArtColor.LyricEdge(accent));
+    }
+
     public void ShowPair(string? current, string? next)
     {
         var currentText = Clean(current);
@@ -64,6 +90,7 @@ public partial class SubtitleFloatWindow : Window
             {
                 CurrentLine.Text = "";
                 NextLine.Text = "";
+                NextLine.Visibility = Visibility.Collapsed;
             }
 
             return;
@@ -79,13 +106,11 @@ public partial class SubtitleFloatWindow : Window
             return;
 
         _bright = bright;
-        CurrentLine.Fill = bright ? BrightFill : DimFill;
-        CurrentLine.Stroke = bright ? BrightStroke : DimStroke;
-        NextLine.Fill = DimFill;
-        NextLine.Stroke = DimStroke;
+        UseAccent(_accent);
         CurrentLine.Text = currentText;
         NextLine.Text = nextText;
-        Grid.SetRowSpan(CurrentLine, nextText.Length == 0 ? 2 : 1);
+        NextLine.Visibility = nextText.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+        UpdateScale();
         if (!IsVisible)
             Show();
     }
@@ -141,6 +166,8 @@ public partial class SubtitleFloatWindow : Window
     protected override void OnMouseLeftButtonDown(MouseButtonEventArgs e)
     {
         base.OnMouseLeftButtonDown(e);
+        if (InHoverBar(e.OriginalSource as DependencyObject))
+            return;
         _edge = Hit(e.GetPosition(this));
         if (_edge == Edge.None)
         {
@@ -255,20 +282,79 @@ public partial class SubtitleFloatWindow : Window
 
     private void UpdateScale()
     {
-        if (ActualHeight <= 0)
+        if (_fitting || ActualWidth <= 1)
             return;
-        var current = Math.Clamp(ActualHeight * 0.30, 20, 78);
-        CurrentLine.FontSize = current;
-        CurrentLine.StrokeThickness = Math.Max(1.5, current * 0.075);
-        var next = Math.Max(15, current * 0.58);
-        NextLine.FontSize = next;
-        NextLine.StrokeThickness = Math.Max(1.1, next * 0.07);
+        _fitting = true;
+        try
+        {
+            const double main = 36;
+            CurrentLine.FontSize = main;
+            CurrentLine.StrokeThickness = 2.2;
+            NextLine.FontSize = 22;
+            NextLine.StrokeThickness = 1.3;
+            var width = Math.Max(1, ActualWidth - Frame.Padding.Left - Frame.Padding.Right - LinesHost.Margin.Left - LinesHost.Margin.Right);
+            LinesHost.Measure(new Size(width, double.PositiveInfinity));
+            var bar = 0d;
+            if (HoverBar.Visibility == Visibility.Visible)
+            {
+                HoverBar.Measure(new Size(width, double.PositiveInfinity));
+                bar = HoverBar.DesiredSize.Height + 8;
+            }
+
+            var needed = LinesHost.DesiredSize.Height + bar + Frame.Padding.Top + Frame.Padding.Bottom + LinesHost.Margin.Top + LinesHost.Margin.Bottom + 12;
+            if (needed < MinHeight)
+                needed = MinHeight;
+            if (needed > MaxHeight)
+                needed = MaxHeight;
+            if (Math.Abs(Height - needed) > 1)
+            {
+                var grow = needed - Height;
+                var area = SystemParameters.WorkArea;
+                if (Top + needed > area.Bottom)
+                    Top = Math.Max(area.Top, Top - grow);
+                Height = needed;
+            }
+        }
+        finally
+        {
+            _fitting = false;
+        }
     }
 
     private void ShowChrome(bool visible)
     {
         Frame.Background = visible ? HoverFill : HitFill;
         Frame.BorderBrush = visible ? HoverStroke : Brushes.Transparent;
+        HoverBar.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        UpdateScale();
+    }
+
+    private void Original_Click(object sender, RoutedEventArgs e) => Raise(OriginalRequested, e);
+
+    private void Close_Click(object sender, RoutedEventArgs e) => Raise(CloseRequested, e);
+
+    private void Previous_Click(object sender, RoutedEventArgs e) => Raise(PreviousRequested, e);
+
+    private void Next_Click(object sender, RoutedEventArgs e) => Raise(NextRequested, e);
+
+    private void Play_Click(object sender, RoutedEventArgs e) => Raise(PlayRequested, e);
+
+    private static void Raise(EventHandler? handler, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        handler?.Invoke(null, EventArgs.Empty);
+    }
+
+    private bool InHoverBar(DependencyObject? node)
+    {
+        while (node != null)
+        {
+            if (ReferenceEquals(node, HoverBar))
+                return true;
+            node = VisualTreeHelper.GetParent(node);
+        }
+
+        return false;
     }
 
     private void Remember()

@@ -1,5 +1,6 @@
         using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
@@ -46,8 +47,10 @@ public partial class MainWindow : Window
     private bool _showDuplicates;
     private bool _listReady;
     private bool _outputReady;
+    private Color _accent = Color.FromRgb(0x8A, 0x5A, 0x32);
     private string? _appliedDeviceId;
     private bool _appliedExclusive;
+    private List<string>? _shuffleKeys;
     private OutputDeviceWatcher? _deviceWatcher;
     private readonly DispatcherTimer _deviceRefresh;
 
@@ -57,6 +60,9 @@ public partial class MainWindow : Window
         _showOriginal = _settings.ShowOriginal;
         LanguageButton.Content = _showOriginal ? "隐藏原文" : "显示原文";
         _floatSubtitles = new SubtitleFloatWindow(_settings);
+        BindFloat(_floatSubtitles);
+        _floatSubtitles.SetOriginalShown(_showOriginal);
+        PaintPlayMode();
         SettingsPage.Bind(_settings);
         CrawlPage.Bind(_settings);
         CrawlPage.Finished += paths => Dispatcher.Invoke(() => AddPaths(paths));
@@ -65,7 +71,7 @@ public partial class MainWindow : Window
         _listReady = true;
         _tracks.CollectionChanged += (_, _) => UpdateEmpty();
 
-        _player.Ended += (_, _) => PlayRelative(1);
+        _player.Ended += (_, _) => PlayRelative(1, fromEnd: true);
         _player.Failed += (_, message) => OutputText.Text = message;
 
         _clock = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
@@ -179,7 +185,10 @@ public partial class MainWindow : Window
 
     private void LoadDevice()
     {
-        ExclusiveBox.IsChecked = _settings.Exclusive;
+        if (_settings.Exclusive)
+            ExclusiveBox.IsChecked = true;
+        else
+            SharedBox.IsChecked = true;
         RefreshDevices();
     }
 
@@ -201,7 +210,7 @@ public partial class MainWindow : Window
         }
         catch
         {
-            DeviceText.Text = "没有播放设备";
+            SetDeviceNote("没有播放设备");
             return;
         }
 
@@ -221,7 +230,7 @@ public partial class MainWindow : Window
 
         if (DeviceBox.Items.Count == 0)
         {
-            DeviceText.Text = "没有播放设备";
+            SetDeviceNote("没有播放设备");
             _outputReady = true;
             if (_appliedDeviceId != null)
             {
@@ -264,10 +273,7 @@ public partial class MainWindow : Window
     private void RefreshDeviceStatus(string deviceId, bool exclusive)
     {
         if (_draggingVolume)
-        {
-            DeviceText.Text = exclusive ? "独占" : "共享";
             return;
-        }
 
         try
         {
@@ -275,18 +281,33 @@ public partial class MainWindow : Window
             _volumeScalar = ExclusivePlayer.ReadVolume(deviceId);
             PaintVolume();
             _volumeReady = true;
-            DeviceText.Text = exclusive ? "独占" : "共享";
+            SetDeviceNote(OutputModeText(exclusive));
         }
         catch
         {
             _volumeReady = true;
-            DeviceText.Text = "读不了这台设备";
+            SetDeviceNote("读不了这台设备");
         }
+    }
+
+    private static string OutputModeText(bool exclusive) =>
+        exclusive ? "这台声卡只给播放器" : "和其他程序一起出声";
+
+    private void SetDeviceNote(string text)
+    {
+        var error = text is "没有播放设备" or "读不了这台设备";
+        DeviceText.Text = error ? text : "";
+        DeviceText.Visibility = error ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void DeviceBox_SelectionChanged(object sender, SelectionChangedEventArgs e) => ApplyOutput(restart: true);
 
-    private void ExclusiveBox_Changed(object sender, RoutedEventArgs e) => ApplyOutput(restart: true);
+    private void OutputMode_Checked(object sender, RoutedEventArgs e)
+    {
+        if (!_outputReady || sender is not RadioButton { IsChecked: true })
+            return;
+        ApplyOutput(restart: true);
+    }
 
     private void ApplyOutput(bool restart)
     {
@@ -296,7 +317,7 @@ public partial class MainWindow : Window
         if (device == null)
         {
             if (DeviceBox.Items.Count == 0)
-                DeviceText.Text = "没有播放设备";
+                SetDeviceNote("没有播放设备");
             return;
         }
 
@@ -317,12 +338,12 @@ public partial class MainWindow : Window
             _volumeScalar = ExclusivePlayer.ReadVolume(device.Id);
             PaintVolume();
             _volumeReady = true;
-            DeviceText.Text = exclusive ? "独占" : "共享";
+            SetDeviceNote(OutputModeText(exclusive));
         }
         catch
         {
             _volumeReady = true;
-            DeviceText.Text = "读不了这台设备";
+            SetDeviceNote("读不了这台设备");
         }
 
         if ((playing || paused) && track != null)
@@ -335,7 +356,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        OutputText.Text = StatusLine(exclusive ? "独占" : "共享");
+        OutputText.Text = StatusLine(OutputModeText(exclusive));
     }
 
     private string StatusLine(string message)
@@ -418,14 +439,6 @@ public partial class MainWindow : Window
 
     private AlbumItem? AlbumOf(TrackItem track) =>
         _albums.FirstOrDefault(album => album.Tracks.Contains(track));
-
-    private IReadOnlyList<TrackItem> PlayOrder()
-    {
-        var album = _current != null ? AlbumOf(_current) : _openAlbum;
-        if (album != null)
-            return album.Tracks;
-        return _tracks.Where(track => _showDuplicates || !track.IsDuplicate).ToList();
-    }
 
     private void UpdateEmpty()
     {
@@ -583,7 +596,10 @@ public partial class MainWindow : Window
     {
         if (ItemAt(e.OriginalSource) is AlbumItem album)
         {
-            OpenAlbum(album);
+            if (album.Tracks.Count == 1)
+                PlayTrack(album.Tracks[0]);
+            else
+                OpenAlbum(album);
             e.Handled = true;
             return;
         }
@@ -598,6 +614,206 @@ public partial class MainWindow : Window
         while (node != null && node is not ListBoxItem)
             node = VisualTreeHelper.GetParent(node);
         return (node as ListBoxItem)?.DataContext;
+    }
+
+    private void Playlist_PreviewMouseRightButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        var target = TracksOf(ItemAt(e.OriginalSource));
+        if (target.Count == 0)
+            return;
+
+        _menuTracks = target;
+        _menuPath = target[0].FilePath;
+        DeleteButton.Content = target.Count > 1 ? "删除这张专辑" : "删除";
+        var pages = target.Select(SourcePage).Where(page => page != null).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        _menuPage = pages.Count == 1 ? pages[0] : null;
+        OpenSourceButton.Visibility = _menuPage == null ? Visibility.Collapsed : Visibility.Visible;
+        LibraryPopup.IsOpen = true;
+        e.Handled = true;
+    }
+
+    private List<TrackItem>? _menuTracks;
+    private string? _menuPath;
+    private string? _menuPage;
+
+    private void RevealFile_Click(object sender, RoutedEventArgs e)
+    {
+        LibraryPopup.IsOpen = false;
+        if (_menuPath != null)
+            Reveal(_menuPath);
+    }
+
+    private void OpenSource_Click(object sender, RoutedEventArgs e)
+    {
+        LibraryPopup.IsOpen = false;
+        if (_menuPage != null)
+            OpenPage(_menuPage);
+    }
+
+    private void DeleteMenu_Click(object sender, RoutedEventArgs e)
+    {
+        LibraryPopup.IsOpen = false;
+        var tracks = _menuTracks;
+        if (tracks == null || tracks.Count == 0)
+            return;
+        var prompt = tracks.Count == 1
+            ? $"删除「{tracks[0].Title}」？文件会从电脑上移除。"
+            : $"删除这 {tracks.Count} 首？文件会从电脑上移除。";
+        if (MessageBox.Show(this, prompt, "删除", MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK)
+            return;
+
+        var playing = _current;
+        if (playing != null && tracks.Any(track => track.FilePath.Equals(playing.FilePath, StringComparison.OrdinalIgnoreCase)))
+        {
+            _player.Stop();
+            playing.IsCurrent = false;
+            _current = null;
+            RefreshTransport();
+        }
+
+        var directories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var failed = false;
+        foreach (var track in tracks)
+        {
+            var directory = Path.GetDirectoryName(track.FilePath);
+            if (!string.IsNullOrEmpty(directory))
+                directories.Add(directory);
+            if (!DeleteTrackFiles(track))
+            {
+                failed = true;
+                continue;
+            }
+
+            _tracks.Remove(track);
+        }
+
+        var shownPath = _shownTrack?.FilePath;
+        if (shownPath != null && tracks.Any(track => track.FilePath.Equals(shownPath, StringComparison.OrdinalIgnoreCase)))
+        {
+            _shownTrack = null;
+            TitleText.Text = "没有正在播放";
+            ArtistText.Text = "";
+            AlbumText.Text = "";
+            ArtImage.Source = null;
+            PaintSeek(TimeSpan.Zero, TimeSpan.Zero);
+            PresentCue("", "");
+        }
+
+        foreach (var directory in directories)
+            RemoveEmptyWorkFolder(directory);
+        SubtitleFinder.ClearCache();
+        RebuildLibrary();
+        if (failed)
+            OutputText.Text = "有的文件正在使用，删不掉";
+    }
+
+    private static bool DeleteTrackFiles(TrackItem track)
+    {
+        var path = track.FilePath;
+        var directory = Path.GetDirectoryName(path);
+        if (!TryDeleteFile(path))
+            return false;
+        if (string.IsNullOrEmpty(directory) || !Directory.Exists(directory))
+            return true;
+        var name = Path.GetFileName(path);
+        var stem = Path.GetFileNameWithoutExtension(path);
+        foreach (var file in Directory.EnumerateFiles(directory))
+        {
+            var fileName = Path.GetFileName(file);
+            if (fileName.StartsWith(name + ".", StringComparison.OrdinalIgnoreCase) && !TryDeleteFile(file))
+                return false;
+        }
+
+        foreach (var extension in new[] { ".srt", ".lrc", ".vtt" })
+        {
+            if (!TryDeleteFile(Path.Combine(directory, stem + extension)))
+                return false;
+        }
+
+        return true;
+    }
+
+    private static void RemoveEmptyWorkFolder(string directory)
+    {
+        var root = Path.TrimEndingDirectorySeparator(TrackLoader.LibraryRoot());
+        var parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(directory));
+        if (parent == null || !parent.Equals(root, StringComparison.OrdinalIgnoreCase) || !Directory.Exists(directory))
+            return;
+        if (Directory.EnumerateFiles(directory).Any(TrackLoader.IsAudioFile))
+            return;
+        TryDeleteFile(Path.Combine(directory, "cover.jpg"));
+        TryDeleteFile(Path.Combine(directory, "work.json"));
+        try
+        {
+            if (!Directory.EnumerateFileSystemEntries(directory).Any())
+                Directory.Delete(directory);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
+
+    private static bool TryDeleteFile(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+            return true;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private static List<TrackItem> TracksOf(object? item) => item switch
+    {
+        TrackItem track => [track],
+        AlbumItem album => album.Tracks.ToList(),
+        _ => [],
+    };
+
+    private static string? SourcePage(TrackItem track)
+    {
+        var library = TrackLoader.LibraryRoot();
+        var prefix = library + Path.DirectorySeparatorChar;
+        if (!track.FilePath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            return null;
+        var rest = track.FilePath[prefix.Length..];
+        var split = rest.IndexOf(Path.DirectorySeparatorChar);
+        if (split <= 2)
+            return null;
+        var folder = rest[..split];
+        if (folder.StartsWith("YT", StringComparison.Ordinal))
+            return "https://www.youtube.com/watch?v=" + Uri.EscapeDataString(folder[2..]);
+        if (folder.StartsWith("BV", StringComparison.OrdinalIgnoreCase))
+            return "https://www.bilibili.com/video/" + folder;
+        return null;
+    }
+
+    private static void Reveal(string path)
+    {
+        if (!File.Exists(path))
+            return;
+        Process.Start(new ProcessStartInfo
+        {
+            FileName = "explorer.exe",
+            Arguments = "/select,\"" + path + "\"",
+            UseShellExecute = true,
+        });
+    }
+
+    private static void OpenPage(string url)
+    {
+        Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
     }
 
     private void Playlist_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -618,9 +834,37 @@ public partial class MainWindow : Window
 
     private void Play_Click(object sender, RoutedEventArgs e) => TogglePlay();
 
-    private void Prev_Click(object sender, RoutedEventArgs e) => PlayRelative(-1);
+    private void Prev_Click(object sender, RoutedEventArgs e) => PlayRelative(-1, fromEnd: false);
 
-    private void Next_Click(object sender, RoutedEventArgs e) => PlayRelative(1);
+    private void Next_Click(object sender, RoutedEventArgs e) => PlayRelative(1, fromEnd: false);
+
+    private void PlayModeButton_Click(object sender, RoutedEventArgs e)
+    {
+        var mode = _settings.PlayMode switch
+        {
+            "order" => "shuffle",
+            "shuffle" => "repeat",
+            _ => "order",
+        };
+        _settings.PlayMode = mode;
+        _settings.Save();
+        _shuffleKeys = mode == "shuffle" ? BuildShuffleKeys() : null;
+        PaintPlayMode();
+    }
+
+    private void PaintPlayMode()
+    {
+        var mode = _settings.PlayMode;
+        OrderGlyph.Visibility = mode == "shuffle" || mode == "repeat" ? Visibility.Collapsed : Visibility.Visible;
+        ShuffleGlyph.Visibility = mode == "shuffle" ? Visibility.Visible : Visibility.Collapsed;
+        RepeatGlyph.Visibility = mode == "repeat" ? Visibility.Visible : Visibility.Collapsed;
+        PlayModeButton.ToolTip = mode switch
+        {
+            "shuffle" => "乱序播放",
+            "repeat" => "单曲循环",
+            _ => "顺序播放",
+        };
+    }
 
     private void Stop_Click(object sender, RoutedEventArgs e)
     {
@@ -656,23 +900,114 @@ public partial class MainWindow : Window
             PlayTrack(first);
     }
 
-    private void PlayRelative(int delta)
+    private void PlayRelative(int delta, bool fromEnd)
     {
-        var order = PlayOrder();
-        if (order.Count == 0)
-            return;
-        var index = _current == null ? -1 : IndexOf(order, _current);
-        if (index < 0 && Playlist.SelectedItem is TrackItem selectedTrack)
-            index = IndexOf(order, selectedTrack);
-        var next = index + (delta > 0 ? 1 : -1);
-        if (next < 0 || next >= order.Count)
+        if (fromEnd && _settings.PlayMode == "repeat" && _current != null)
         {
-            if (delta > 0)
+            PlayTrack(_current);
+            return;
+        }
+
+        var next = AdjacentTrack(delta);
+        if (next == null)
+        {
+            if (delta > 0 && fromEnd)
                 Stop_Click(this, new RoutedEventArgs());
             return;
         }
 
-        PlayTrack(order[next]);
+        PlayTrack(next);
+    }
+
+    private TrackItem? AdjacentTrack(int delta)
+    {
+        if (delta == 0 || _albums.Count == 0)
+            return null;
+        var album = _current != null ? AlbumOf(_current) : _openAlbum;
+        if (album == null && Playlist.SelectedItem is AlbumItem selectedAlbum)
+            album = selectedAlbum;
+        if (album == null)
+            return delta > 0 ? _albums[0].Tracks.FirstOrDefault() : _albums[^1].Tracks.LastOrDefault();
+
+        var step = delta > 0 ? 1 : -1;
+        if (album.Tracks.Count > 1 && _current != null)
+        {
+            var index = IndexOf(album.Tracks, _current);
+            var inner = index + step;
+            if (index >= 0 && inner >= 0 && inner < album.Tracks.Count)
+                return album.Tracks[inner];
+        }
+        else if (_current == null && album.Tracks.Count > 0)
+        {
+            return step > 0 ? album.Tracks[0] : album.Tracks[^1];
+        }
+
+        var albums = AlbumOrder();
+        var albumIndex = -1;
+        for (var i = 0; i < albums.Count; i++)
+        {
+            if (albums[i].Key == album.Key)
+            {
+                albumIndex = i;
+                break;
+            }
+        }
+
+        var nextIndex = albumIndex + step;
+        if (albumIndex < 0 || nextIndex < 0 || nextIndex >= albums.Count)
+            return null;
+        var nextAlbum = albums[nextIndex];
+        if (nextAlbum.Tracks.Count == 0)
+            return null;
+        return step > 0 ? nextAlbum.Tracks[0] : nextAlbum.Tracks[^1];
+    }
+
+    private IReadOnlyList<AlbumItem> AlbumOrder()
+    {
+        if (_settings.PlayMode != "shuffle")
+            return _albums;
+        if (_shuffleKeys == null)
+            _shuffleKeys = BuildShuffleKeys();
+        var live = _albums.ToDictionary(album => album.Key, StringComparer.Ordinal);
+        var ordered = new List<AlbumItem>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var key in _shuffleKeys)
+        {
+            if (!live.TryGetValue(key, out var album) || !seen.Add(key))
+                continue;
+            ordered.Add(album);
+        }
+
+        var fresh = _albums.Where(album => seen.Add(album.Key)).ToList();
+        if (fresh.Count > 0)
+        {
+            Shuffle(fresh);
+            ordered.AddRange(fresh);
+            _shuffleKeys = ordered.Select(album => album.Key).ToList();
+        }
+
+        return ordered;
+    }
+
+    private List<string> BuildShuffleKeys()
+    {
+        var keys = _albums.Select(album => album.Key).ToList();
+        var currentKey = _current != null ? AlbumOf(_current)?.Key : null;
+        if (currentKey != null)
+            keys.Remove(currentKey);
+        Shuffle(keys);
+        if (currentKey != null)
+            keys.Insert(0, currentKey);
+        return keys;
+    }
+
+    private static void Shuffle<T>(List<T> items)
+    {
+        for (var i = items.Count - 1; i > 0; i--)
+        {
+            var swap = Random.Shared.Next(i + 1);
+            (items[i], items[swap]) = (items[swap], items[i]);
+        }
     }
 
     private static int IndexOf(IReadOnlyList<TrackItem> tracks, TrackItem track)
@@ -792,9 +1127,12 @@ public partial class MainWindow : Window
     private void ApplyAccent(ImageSource? art)
     {
         var color = art is BitmapSource bitmap ? ArtColor.FromArt(bitmap) : Color.FromRgb(0x8A, 0x5A, 0x32);
+        _accent = color;
         Resources["AccentBrush"] = new SolidColorBrush(color);
         Resources["PaperBrush"] = new SolidColorBrush(ArtColor.Paper(color));
         Resources["PlayFillBrush"] = new SolidColorBrush(ArtColor.PlayFill(color));
+        if (!_floatSubtitles.IsClosed)
+            _floatSubtitles.UseAccent(color);
     }
 
     private void RefreshClock()
@@ -817,6 +1155,8 @@ public partial class MainWindow : Window
         var playing = _player.IsPlaying;
         PlayGlyph.Visibility = playing ? Visibility.Collapsed : Visibility.Visible;
         PauseGlyph.Visibility = playing ? Visibility.Visible : Visibility.Collapsed;
+        if (!_floatSubtitles.IsClosed)
+            _floatSubtitles.SetPlaying(playing);
     }
 
     private void SeekBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
@@ -982,7 +1322,7 @@ public partial class MainWindow : Window
         var index = -1;
         for (var i = _cues.Count - 1; i >= 0; i--)
         {
-            if (positionMs >= _cues[i].StartMs && positionMs < _cues[i].EndMs)
+            if (positionMs >= _cues[i].StartMs)
             {
                 index = i;
                 break;
@@ -992,8 +1332,8 @@ public partial class MainWindow : Window
         if (index < 0)
         {
             PresentCue("", "");
-            if (_floatSubtitles.IsVisible)
-                _floatSubtitles.Hide();
+            if (!_floatSubtitles.IsClosed && !_floatSubtitles.IsVisible)
+                _floatSubtitles.Show();
             return;
         }
 
@@ -1006,14 +1346,53 @@ public partial class MainWindow : Window
             return;
         }
 
-        PresentCue(chinese, _showOriginal ? japanese : "");
+        if (!_showOriginal)
+        {
+            PresentCue(chinese, "");
+            return;
+        }
+
+        PresentCue(japanese, chinese);
     }
 
     private void PresentCue(string? current, string? next = null)
     {
         if (_floatSubtitles.IsClosed)
+        {
             _floatSubtitles = new SubtitleFloatWindow(_settings);
+            BindFloat(_floatSubtitles);
+        }
+
+        _floatSubtitles.SetOriginalShown(_showOriginal);
         _floatSubtitles.ShowPair(current, next);
+    }
+
+    private void BindFloat(SubtitleFloatWindow window)
+    {
+        window.UseAccent(_accent);
+        window.SetPlaying(_player.IsPlaying);
+        window.OriginalRequested += (_, _) => Language_Click(this, new RoutedEventArgs());
+        window.CloseRequested += (_, _) => CloseSubtitles();
+        window.PreviousRequested += (_, _) => PlayRelative(-1, fromEnd: false);
+        window.NextRequested += (_, _) => PlayRelative(1, fromEnd: false);
+        window.PlayRequested += (_, _) => TogglePlay();
+    }
+
+    private void CloseSubtitles()
+    {
+        var track = _shownTrack ?? _current;
+        if (track == null)
+        {
+            if (_floatSubtitles.IsVisible)
+                _floatSubtitles.Hide();
+            return;
+        }
+
+        track.SubtitleIndex = -1;
+        var position = ReferenceEquals(track, _current) && (_player.IsPlaying || _player.IsPaused)
+            ? _player.Position
+            : TimeSpan.Zero;
+        LoadCues(track, position);
     }
 
     private void Settings_Click(object sender, RoutedEventArgs e) => ShowPage("settings");
@@ -1024,6 +1403,8 @@ public partial class MainWindow : Window
         _settings.ShowOriginal = _showOriginal;
         _settings.Save();
         LanguageButton.Content = _showOriginal ? "隐藏原文" : "显示原文";
+        if (!_floatSubtitles.IsClosed)
+            _floatSubtitles.SetOriginalShown(_showOriginal);
         var position = ReferenceEquals(_shownTrack, _current) && (_player.IsPlaying || _player.IsPaused)
             ? _player.Position
             : _paintedPosition;

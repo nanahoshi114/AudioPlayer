@@ -81,7 +81,8 @@
                     </Grid>
                     <StackPanel Grid.Column="1" Margin="14,4,8,4" VerticalAlignment="Center">
                       <TextBlock Text="{Binding SourceId}" Foreground="{DynamicResource MutedBrush}" FontSize="12"/>
-                      <TextBlock Text="{Binding Title}" TextWrapping="Wrap" MaxHeight="44" LineHeight="22" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+                      <TextBlock Text="{Binding Title}" TextWrapping="Wrap" MaxHeight="56" LineHeight="26"
+                                 LineStackingStrategy="MaxHeight" TextTrimming="CharacterEllipsis" Margin="0,2,0,0" Padding="0,2"/>
                       <TextBlock Text="{Binding Circle}" Foreground="{DynamicResource MutedBrush}" FontSize="12" Margin="0,4,0,0" TextTrimming="CharacterEllipsis">
                         <TextBlock.Style>
                           <Style TargetType="TextBlock">

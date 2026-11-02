@@ -158,6 +158,21 @@ public sealed class ExclusivePlayer : IDisposable
             return PlayResult.Fail("这个文件没有读出音频");
         }
 
+        // Media Foundation 的读取器绑在第一次 Read 的线程上。
+        // 上面在界面线程确认过有采样，这里重新打开，交给播放线程第一次读。
+        if (HoldsMediaFoundation(raw))
+        {
+            raw.Dispose();
+            try
+            {
+                raw = CleanHeader(TrackLoader.OpenPcm(path));
+            }
+            catch (Exception ex)
+            {
+                return PlayResult.Fail("打不开这个文件：" + ex.Message);
+            }
+        }
+
         if (_output != null && _swap != null && CanFeed(raw))
         {
             try
@@ -418,6 +433,13 @@ public sealed class ExclusivePlayer : IDisposable
         }
 
         _devices = null;
+    }
+
+    private static bool HoldsMediaFoundation(WaveStream stream)
+    {
+        while (stream is CleanFormatStream clean)
+            stream = clean.Source;
+        return stream is MediaFoundationReader;
     }
 
     private static bool HasSamples(WaveStream raw)
@@ -757,6 +779,8 @@ enum OutputAdjust
 sealed class CleanFormatStream : WaveStream
 {
     private readonly WaveStream _source;
+
+    public WaveStream Source => _source;
 
     public CleanFormatStream(WaveStream source, WaveFormat format)
     {

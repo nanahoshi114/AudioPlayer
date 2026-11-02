@@ -58,6 +58,14 @@ public static class ArtColor
     public static Color Paper(Color accent) =>
         Mix(Color.FromRgb(0xF6, 0xF1, 0xEA), accent, 0.18);
 
+    public static Color Lyric(Color accent) => accent;
+
+    public static Color LyricSoft(Color accent) =>
+        Mix(Color.FromRgb(0xF6, 0xF1, 0xEA), accent, 0.72);
+
+    public static Color LyricEdge(Color accent) =>
+        Mix(Color.FromRgb(0x14, 0x10, 0x0C), PlayFill(accent), 0.42);
+
     public static Color PlayFill(Color accent)
     {
         var luminance = (0.2126 * accent.R) + (0.7152 * accent.G) + (0.0722 * accent.B);

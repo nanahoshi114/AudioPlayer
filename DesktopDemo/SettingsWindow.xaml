@@ -15,7 +15,7 @@
             <TextBlock x:Name="HelpTitle" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center"/>
             <Button Content="关闭" Style="{StaticResource QuietButton}" Padding="14,6" HorizontalAlignment="Right" Click="HideHelp_Click"/>
           </Grid>
-          <TextBlock x:Name="HelpBody" Margin="0,12,0,0" TextWrapping="Wrap" LineHeight="24" Foreground="{DynamicResource InkBrush}"/>
+          <TextBlock x:Name="HelpBody" Margin="0,12,0,0" TextWrapping="Wrap" LineHeight="24" LineStackingStrategy="MaxHeight" Foreground="{DynamicResource InkBrush}"/>
         </StackPanel>
       </Border>
       <Grid Margin="0,0,0,10">

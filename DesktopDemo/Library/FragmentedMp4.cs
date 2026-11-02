@@ -12,6 +12,16 @@ static class FragmentedMp4
 {
     public static void EnsureProgressive(string path)
     {
+        try
+        {
+            if (IsOurRemux(path))
+                RepairSampleTimes(path);
+        }
+        catch
+        {
+            // 时间表修不好就按原来的文件继续。
+        }
+
         var temp = path + ".progressive";
         try
         {
@@ -30,6 +40,134 @@ static class FragmentedMp4
         {
             TryDelete(temp);
         }
+    }
+
+    private static bool IsOurRemux(string path)
+    {
+        using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        var header = new byte[Ftyp.Length];
+        return stream.Read(header, 0, header.Length) == header.Length && header.AsSpan().SequenceEqual(Ftyp);
+    }
+
+    /// <summary>
+    /// 早期重写把 stts 的 sample_count 和 sample_delta 写反了。
+    /// 两条数字对调后帧数能对上时，就地改回来。
+    /// </summary>
+    private static void RepairSampleTimes(string path)
+    {
+        using var stream = File.Open(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
+        foreach (var moov in Boxes(stream, 0, stream.Length, "moov"))
+        {
+            foreach (var trak in Boxes(stream, moov.Payload, moov.End, "trak"))
+            {
+                foreach (var mdia in Boxes(stream, trak.Payload, trak.End, "mdia"))
+                {
+                    foreach (var minf in Boxes(stream, mdia.Payload, mdia.End, "minf"))
+                    {
+                        foreach (var stbl in Boxes(stream, minf.Payload, minf.End, "stbl"))
+                        {
+                            BoxAt? times = null;
+                            BoxAt? sizes = null;
+                            foreach (var child in Boxes(stream, stbl.Payload, stbl.End, null))
+                            {
+                                if (child.Type == "stts")
+                                    times = child;
+                                else if (child.Type == "stsz")
+                                    sizes = child;
+                            }
+
+                            if (times is BoxAt stts && sizes is BoxAt stsz)
+                                SwapReversedTimes(stream, stts, stsz);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static void SwapReversedTimes(Stream stream, BoxAt stts, BoxAt stsz)
+    {
+        stream.Position = stsz.Payload + 4;
+        _ = ReadBe32(stream);
+        var samples = ReadBe32(stream);
+        if (samples == 0)
+            return;
+
+        stream.Position = stts.Payload + 4;
+        var entries = ReadBe32(stream);
+        if (entries == 0 || entries > 1_000_000)
+            return;
+
+        var entryAt = stream.Position;
+        long declared = 0;
+        long swapped = 0;
+        for (var i = 0u; i < entries; i++)
+        {
+            declared += ReadBe32(stream);
+            swapped += ReadBe32(stream);
+        }
+
+        if (declared == samples || swapped != samples)
+            return;
+
+        stream.Position = entryAt;
+        for (var i = 0u; i < entries; i++)
+        {
+            var at = stream.Position;
+            var count = ReadBe32(stream);
+            var delta = ReadBe32(stream);
+            stream.Position = at;
+            WriteU32(stream, delta);
+            WriteU32(stream, count);
+        }
+    }
+
+    private readonly record struct BoxAt(long Start, long End, int Header, string Type)
+    {
+        public long Payload => Start + Header;
+    }
+
+    private static IEnumerable<BoxAt> Boxes(Stream stream, long start, long end, string? type)
+    {
+        var header = new byte[8];
+        var cursor = start;
+        while (cursor + 8 <= end)
+        {
+            stream.Position = cursor;
+            if (stream.Read(header, 0, 8) < 8)
+                yield break;
+
+            var size = ((long)header[0] << 24) | ((long)header[1] << 16) | ((long)header[2] << 8) | header[3];
+            var name = Encoding.ASCII.GetString(header, 4, 4);
+            var headerSize = 8;
+            if (size == 1)
+            {
+                if (stream.Read(header, 0, 8) < 8)
+                    yield break;
+                size = 0;
+                foreach (var part in header)
+                    size = (size << 8) | part;
+                headerSize = 16;
+            }
+            else if (size == 0)
+            {
+                size = end - cursor;
+            }
+
+            if (size < headerSize || cursor + size > end)
+                yield break;
+            if (type == null || name == type)
+                yield return new BoxAt(cursor, cursor + size, headerSize, name);
+            cursor += size;
+        }
+    }
+
+    private static uint ReadBe32(Stream stream)
+    {
+        var bytes = new byte[4];
+        if (stream.Read(bytes, 0, 4) < 4)
+            throw new EndOfStreamException();
+        return ((uint)bytes[0] << 24) | ((uint)bytes[1] << 16) | ((uint)bytes[2] << 8) | bytes[3];
     }
 
     private static bool IsFragmented(string path)
@@ -241,8 +379,9 @@ static class FragmentedMp4
         var cursor = 8;
         foreach (var run in runs)
         {
-            WriteBe32(stts, cursor, run.Duration);
-            WriteBe32(stts, cursor + 4, run.Count);
+            // 每条是 sample_count，然后才是 sample_delta。
+            WriteBe32(stts, cursor, run.Count);
+            WriteBe32(stts, cursor + 4, run.Duration);
             cursor += 8;
         }
 

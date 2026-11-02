@@ -73,6 +73,39 @@
         </Setter.Value>
       </Setter>
     </Style>
+    <Style x:Key="ModeChoice" TargetType="RadioButton">
+      <Setter Property="Foreground" Value="{DynamicResource MutedBrush}"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Padding" Value="16,7"/>
+      <Setter Property="FontSize" Value="13"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Focusable" Value="False"/>
+      <Setter Property="HorizontalContentAlignment" Value="Center"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="RadioButton">
+            <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="999" Padding="{TemplateBinding Padding}" MinWidth="72">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource AccentBrush}"/>
+                <Setter Property="Foreground" Value="#F6F1EA"/>
+              </Trigger>
+              <MultiTrigger>
+                <MultiTrigger.Conditions>
+                  <Condition Property="IsMouseOver" Value="True"/>
+                  <Condition Property="IsChecked" Value="False"/>
+                </MultiTrigger.Conditions>
+                <Setter Property="Foreground" Value="{DynamicResource InkBrush}"/>
+              </MultiTrigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
     <Style x:Key="TextButton" TargetType="Button">
       <Setter Property="shell:WindowChrome.IsHitTestVisibleInChrome" Value="True"/>
       <Setter Property="Background" Value="Transparent"/>
@@ -114,6 +147,54 @@
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
                 <Setter Property="Foreground" Value="{DynamicResource InkBrush}"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="LibraryMenuDanger" TargetType="Button">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Foreground" Value="#6E3030"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="HorizontalContentAlignment" Value="Left"/>
+      <Setter Property="Padding" Value="12,8"/>
+      <Setter Property="FontSize" Value="13"/>
+      <Setter Property="Focusable" Value="False"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Bd" Background="Transparent" CornerRadius="8" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Left" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="#F0D8D4"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="LibraryMenuButton" TargetType="Button">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Foreground" Value="{DynamicResource InkBrush}"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="HorizontalContentAlignment" Value="Left"/>
+      <Setter Property="Padding" Value="12,8"/>
+      <Setter Property="FontSize" Value="13"/>
+      <Setter Property="Focusable" Value="False"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="8" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Left" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="#F3EBE3"/>
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -441,6 +522,7 @@
                      ScrollViewer.CanContentScroll="False"
                      VirtualizingPanel.IsVirtualizing="True"
                      PreviewMouseLeftButtonUp="Playlist_PreviewMouseLeftButtonUp"
+                     PreviewMouseRightButtonUp="Playlist_PreviewMouseRightButtonUp"
                      MouseDoubleClick="Playlist_MouseDoubleClick"
                      SelectionChanged="Playlist_SelectionChanged"/>
             <TextBlock x:Name="EmptyHint" Grid.Row="1" Text="把音频拖到窗口里" TextWrapping="Wrap" TextAlignment="Center"
@@ -464,11 +546,16 @@
               <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
             <ComboBox x:Name="DeviceBox" Width="220" VerticalAlignment="Center" SelectionChanged="DeviceBox_SelectionChanged"/>
-            <ToggleButton x:Name="ExclusiveBox" Grid.Column="1" Content="独占" Margin="12,0" VerticalAlignment="Center"
-                          Style="{StaticResource PaperChip}" IsChecked="False"
-                          Checked="ExclusiveBox_Changed" Unchecked="ExclusiveBox_Changed"/>
-            <TextBlock x:Name="DeviceText" Grid.Column="2" Text="" Foreground="{DynamicResource MutedBrush}" FontSize="12" VerticalAlignment="Center"
-                       TextTrimming="CharacterEllipsis" Margin="8,0"/>
+            <Border Grid.Column="1" Margin="12,0" VerticalAlignment="Center" Background="#F3EBE3" CornerRadius="999" Padding="3">
+              <StackPanel Orientation="Horizontal">
+                <RadioButton x:Name="SharedBox" Content="共享" GroupName="OutputMode" Style="{StaticResource ModeChoice}"
+                             IsChecked="True" ToolTip="和其他程序一起出声" Checked="OutputMode_Checked"/>
+                <RadioButton x:Name="ExclusiveBox" Content="独占" GroupName="OutputMode" Style="{StaticResource ModeChoice}"
+                             ToolTip="这台声卡只给播放器，其他声音会停" Checked="OutputMode_Checked"/>
+              </StackPanel>
+            </Border>
+            <TextBlock x:Name="DeviceText" Grid.Column="2" Text="" Visibility="Collapsed" Foreground="{DynamicResource MutedBrush}" FontSize="12" VerticalAlignment="Center"
+                       TextTrimming="CharacterEllipsis" Margin="4,0,0,0"/>
           </Grid>
           <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
             <Button Style="{StaticResource TransportButton}" ToolTip="上一首" Click="Prev_Click">
@@ -497,6 +584,21 @@
             <Button Style="{StaticResource TransportButton}" ToolTip="停止并放开设备" Click="Stop_Click" Margin="4,0,0,0">
               <Path Width="12" Height="12" Stretch="Fill" Fill="{DynamicResource InkBrush}" Data="M0,0 H12 V12 H0 Z"/>
             </Button>
+            <Button x:Name="PlayModeButton" Style="{StaticResource TransportButton}" Margin="4,0,0,0"
+                    ToolTip="顺序播放" Click="PlayModeButton_Click">
+              <Grid Width="18" Height="18">
+                <Path x:Name="OrderGlyph" Stretch="Fill" Fill="{DynamicResource InkBrush}"
+                      Data="M1,2.2 H15 V3.8 H1 Z M1,7.2 H9 V8.8 H1 Z M1,12.2 H15 V13.8 H1 Z M10.7,6.4 L14.8,8 L10.7,9.6 Z"/>
+                <Path x:Name="ShuffleGlyph" Stretch="Fill" Fill="{DynamicResource InkBrush}" Visibility="Collapsed"
+                      Data="M10.6,9.2 L5.4,4 L4,5.4 L9.2,10.6 Z M14.5,4 L16.5,6 L4,18.6 L5.4,20 L18,7.5 L20,9.5 V4 Z M13.4,14.8 L16.6,18 L14.5,20 H20 V14.5 L18,16.5 Z"/>
+                <Grid x:Name="RepeatGlyph" Visibility="Collapsed">
+                  <Path Stretch="Fill" Fill="{DynamicResource InkBrush}"
+                        Data="M7,7 H17 V10 L21,6 L17,2 V5 H5 V11 H7 Z M17,17 H7 V14 L3,18 L7,22 V19 H19 V13 H17 Z"/>
+                  <TextBlock Text="1" FontSize="8" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"
+                             Foreground="{DynamicResource InkBrush}" Margin="0,1,0,0"/>
+                </Grid>
+              </Grid>
+            </Button>
           </StackPanel>
           <DockPanel Grid.Column="2" LastChildFill="True" VerticalAlignment="Center" HorizontalAlignment="Right" Width="160">
             <TextBlock Text="音量" Foreground="{DynamicResource MutedBrush}" FontSize="12" VerticalAlignment="Center" Margin="0,0,8,0"/>
@@ -517,6 +619,18 @@
       <local:SettingsPage x:Name="SettingsPage" Grid.Row="1" Visibility="Collapsed"/>
       <local:CrawlPage x:Name="CrawlPage" Grid.Row="1" Visibility="Collapsed"/>
 
+      <Popup x:Name="LibraryPopup" Placement="Mouse" StaysOpen="False" AllowsTransparency="True" PopupAnimation="Fade">
+        <Border Background="{DynamicResource CardBrush}" BorderBrush="{DynamicResource LineBrush}" BorderThickness="1" CornerRadius="12" Padding="6" MinWidth="220">
+          <Border.Effect>
+            <DropShadowEffect BlurRadius="18" ShadowDepth="0" Opacity="0.14" Color="#6A5344"/>
+          </Border.Effect>
+          <StackPanel>
+            <Button x:Name="RevealFileButton" Content="在文件管理器中查看该文件" Click="RevealFile_Click" Style="{StaticResource LibraryMenuButton}"/>
+            <Button x:Name="OpenSourceButton" Content="跳转至原视频" Click="OpenSource_Click" Style="{StaticResource LibraryMenuButton}"/>
+            <Button x:Name="DeleteButton" Content="删除" Click="DeleteMenu_Click" Style="{StaticResource LibraryMenuDanger}"/>
+          </StackPanel>
+        </Border>
+      </Popup>
       <Popup x:Name="SubtitlePopup"
              PlacementTarget="{Binding ElementName=SubtitleButton}"
              Placement="Top"

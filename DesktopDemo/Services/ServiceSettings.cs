@@ -28,6 +28,7 @@ public sealed class ServiceSettings
     public bool ShowOriginal { get; set; } = true;
     public bool ShowDuplicates { get; set; }
     public bool Exclusive { get; set; }
+    public string PlayMode { get; set; } = "order";
     public string DeviceId { get; set; } = "";
     public string BiliCookie { get; set; } = "";
     public string BiliBuvid3 { get; set; } = "";
@@ -62,6 +63,7 @@ public sealed class ServiceSettings
                 ShowOriginal = stored.ShowOriginal,
                 ShowDuplicates = stored.ShowDuplicates,
                 Exclusive = stored.Exclusive,
+                PlayMode = KnownPlayMode(stored.PlayMode),
                 DeviceId = stored.DeviceId ?? "",
                 BiliCookie = Unprotect(stored.BiliCookie),
                 BiliBuvid3 = stored.BiliBuvid3 ?? "",
@@ -103,6 +105,7 @@ public sealed class ServiceSettings
             ShowOriginal = ShowOriginal,
             ShowDuplicates = ShowDuplicates,
             Exclusive = Exclusive,
+            PlayMode = KnownPlayMode(PlayMode),
             DeviceId = DeviceId,
             BiliCookie = Protect(BiliCookie),
             BiliBuvid3 = BiliBuvid3,
@@ -158,6 +161,12 @@ public sealed class ServiceSettings
         WhisperQwen => WhisperQwen,
         WhisperQwen3 => "Qwen3-ASR",
         _ => "本机任务接口",
+    };
+
+    private static string KnownPlayMode(string? mode) => mode switch
+    {
+        "shuffle" or "repeat" or "order" => mode,
+        _ => "order",
     };
 
     private static string? KnownModel(string? model) => model switch
@@ -254,6 +263,7 @@ public sealed class ServiceSettings
         public bool ShowOriginal { get; set; } = true;
         public bool ShowDuplicates { get; set; }
         public bool Exclusive { get; set; }
+        public string? PlayMode { get; set; }
         public string? DeviceId { get; set; }
         public string? BiliCookie { get; set; }
         public string? BiliBuvid3 { get; set; }

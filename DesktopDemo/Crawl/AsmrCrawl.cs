@@ -6,6 +6,7 @@ using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using PlayerDemo.Library;
 
 namespace PlayerDemo.Crawl;
 
@@ -471,7 +472,7 @@ public static partial class AsmrCrawl
         image.StreamSource = new MemoryStream(bytes);
         image.EndInit();
         image.Freeze();
-        return image;
+        return TrackLoader.CenterSquare(image);
     }
 
     private static async Task SaveAsync(string url, string path, Action<long, long> onBytes, CancellationToken cancellationToken, bool image = false)

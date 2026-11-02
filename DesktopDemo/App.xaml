@@ -123,13 +123,14 @@
       <Setter Property="BorderThickness" Value="0"/>
       <Setter Property="CaretBrush" Value="{StaticResource InkBrush}"/>
       <Setter Property="SelectionBrush" Value="#D9C4B0"/>
-      <Setter Property="Padding" Value="14,10"/>
+      <Setter Property="Padding" Value="14,8"/>
+      <Setter Property="MinHeight" Value="40"/>
       <Setter Property="FontSize" Value="13"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="TextBox">
-            <Border x:Name="Bd" Background="#FFFCF8" BorderBrush="#E4D9CC" BorderThickness="1" CornerRadius="12" Padding="{TemplateBinding Padding}">
-              <ScrollViewer x:Name="PART_ContentHost" Focusable="False"/>
+            <Border x:Name="Bd" Background="#FFFCF8" BorderBrush="#E4D9CC" BorderThickness="1" CornerRadius="12" Padding="{TemplateBinding Padding}" ClipToBounds="False">
+              <ScrollViewer x:Name="PART_ContentHost" Focusable="False" Margin="0,-3,0,-3" VerticalAlignment="Center"/>
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsKeyboardFocused" Value="True">
@@ -147,13 +148,14 @@
       <Setter Property="BorderThickness" Value="0"/>
       <Setter Property="CaretBrush" Value="{StaticResource InkBrush}"/>
       <Setter Property="SelectionBrush" Value="#D9C4B0"/>
-      <Setter Property="Padding" Value="14,10"/>
+      <Setter Property="Padding" Value="14,8"/>
+      <Setter Property="MinHeight" Value="40"/>
       <Setter Property="FontSize" Value="13"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="PasswordBox">
-            <Border x:Name="Bd" Background="#FFFCF8" BorderBrush="#E4D9CC" BorderThickness="1" CornerRadius="12" Padding="{TemplateBinding Padding}">
-              <ScrollViewer x:Name="PART_ContentHost" Focusable="False"/>
+            <Border x:Name="Bd" Background="#FFFCF8" BorderBrush="#E4D9CC" BorderThickness="1" CornerRadius="12" Padding="{TemplateBinding Padding}" ClipToBounds="False">
+              <ScrollViewer x:Name="PART_ContentHost" Focusable="False" Margin="0,-3,0,-3" VerticalAlignment="Center"/>
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsKeyboardFocused" Value="True">

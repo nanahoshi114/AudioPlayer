@@ -11,23 +11,72 @@
         Topmost="True"
         ResizeMode="NoResize"
         Width="760"
-        Height="168"
-        MinWidth="280"
-        MinHeight="96"
+        Height="240"
+        MinWidth="420"
+        MinHeight="180"
         MaxWidth="1400"
         MaxHeight="520"
         UseLayoutRounding="True"
         TextOptions.TextFormattingMode="Display"
         TextOptions.TextRenderingMode="Grayscale"
         FontFamily="Microsoft YaHei UI">
+  <Window.Resources>
+    <Style x:Key="BarButton" TargetType="Button">
+      <Setter Property="Foreground" Value="White"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Width" Value="32"/>
+      <Setter Property="Height" Value="32"/>
+      <Setter Property="Margin" Value="1,0"/>
+      <Setter Property="Focusable" Value="False"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Bd" Background="Transparent" CornerRadius="8">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="#33FFFFFF"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="BarText" TargetType="Button" BasedOn="{StaticResource BarButton}">
+      <Setter Property="Width" Value="Auto"/>
+      <Setter Property="Padding" Value="8,0"/>
+      <Setter Property="FontSize" Value="12"/>
+    </Style>
+  </Window.Resources>
   <Border x:Name="Frame" CornerRadius="12" BorderThickness="1.5" BorderBrush="Transparent" Background="#01000000" Padding="16,12">
     <Grid>
-      <Grid.RowDefinitions>
-        <RowDefinition Height="1.45*"/>
-        <RowDefinition Height="*"/>
-      </Grid.RowDefinitions>
-      <local:LyricLine x:Name="CurrentLine" Grid.Row="0" FontWeight="Bold" Fill="White" Stroke="#E6000000"/>
-      <local:LyricLine x:Name="NextLine" Grid.Row="1" FontWeight="SemiBold" Fill="#FFD0D0D0" Stroke="#E6000000"/>
+      <StackPanel x:Name="LinesHost" VerticalAlignment="Center" Margin="12,8,12,8">
+        <local:LyricLine x:Name="CurrentLine" MaxLines="2" FontWeight="Bold" Fill="#8A5A32" Stroke="#2A1C16"/>
+        <local:LyricLine x:Name="NextLine" Margin="0,10,0,0" MaxLines="2" FontWeight="Normal" Fill="#C4A894" Stroke="#5C4638"/>
+      </StackPanel>
+      <Border x:Name="HoverBar" VerticalAlignment="Top" HorizontalAlignment="Center" Visibility="Collapsed"
+              Background="#E0181818" CornerRadius="18" Padding="8,4" Margin="0,6,0,0" Panel.ZIndex="2">
+        <StackPanel Orientation="Horizontal">
+          <Button x:Name="OriginalButton" Style="{StaticResource BarText}" Content="显示原文" ToolTip="显示或收起原文" Click="Original_Click"/>
+          <Button Style="{StaticResource BarButton}" ToolTip="上一首" Click="Previous_Click">
+            <Path Width="14" Height="14" Stretch="Fill" Fill="White" Data="M12,1 L4,7 12,13 Z M2,1 H4 V13 H2 Z"/>
+          </Button>
+          <Button Style="{StaticResource BarButton}" ToolTip="播放" Click="Play_Click">
+            <Grid Width="14" Height="14">
+              <Path x:Name="PlayMark" Stretch="Fill" Fill="White" Data="M2,1 L2,13 12,7 Z"/>
+              <Path x:Name="PauseMark" Stretch="Fill" Fill="White" Visibility="Collapsed" Data="M1,1 H5 V13 H1 Z M9,1 H13 V13 H9 Z"/>
+            </Grid>
+          </Button>
+          <Button Style="{StaticResource BarButton}" ToolTip="下一首" Click="Next_Click">
+            <Path Width="14" Height="14" Stretch="Fill" Fill="White" Data="M2,1 L10,7 2,13 Z M10,1 H12 V13 H10 Z"/>
+          </Button>
+          <Button Style="{StaticResource BarButton}" Content="×" FontSize="16" ToolTip="关闭字幕" Click="Close_Click"/>
+        </StackPanel>
+      </Border>
     </Grid>
   </Border>
 </Window>
