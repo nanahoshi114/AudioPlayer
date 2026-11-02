@@ -127,9 +127,12 @@ public static partial class BilibiliClient
 
     public static async Task<IReadOnlyList<CrawlHit>> LookupAsync(ServiceSettings settings, string input, CancellationToken cancellationToken)
     {
-        var match = Bvid().Match(input);
+        var text = input.Trim();
+        if (text.Length == 0)
+            throw new InvalidOperationException("请输入关键词");
+        var match = Bvid().Match(text);
         if (!match.Success)
-            throw new InvalidOperationException("请输入正确的 BV 号");
+            return (await SearchPageAsync(settings, text, 1, cancellationToken)).Hits;
         var bvid = match.Value;
         using var document = await GetJsonAsync(settings, "https://api.bilibili.com/x/web-interface/view?bvid=" + Uri.EscapeDataString(bvid), "https://www.bilibili.com", false, cancellationToken);
         var root = document.RootElement;
@@ -197,6 +200,77 @@ public static partial class BilibiliClient
         }
 
         return hits;
+    }
+
+    public static async Task<CrawlBatch> OpenAsync(ServiceSettings settings, string input, CancellationToken cancellationToken)
+    {
+        var text = input.Trim();
+        if (text.Length == 0)
+            throw new InvalidOperationException("请输入关键词");
+        if (Bvid().IsMatch(text))
+            return new CrawlBatch(await LookupAsync(settings, text, cancellationToken), null);
+        return await SearchPageAsync(settings, text, 1, cancellationToken);
+    }
+
+    public static async Task<CrawlBatch> SearchPageAsync(ServiceSettings settings, string keyword, int page, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var mixin = await MixinAsync(settings, false, cancellationToken);
+        var signed = Sign(new Dictionary<string, string>
+        {
+            ["search_type"] = "video",
+            ["keyword"] = keyword,
+            ["page"] = page.ToString(CultureInfo.InvariantCulture),
+            ["page_size"] = "20",
+        }, mixin);
+        var address = WithQuery("https://api.bilibili.com/x/web-interface/wbi/search/type", signed);
+        using var document = await GetJsonAsync(settings, address, "https://search.bilibili.com/all?keyword=" + Uri.EscapeDataString(keyword), false, cancellationToken);
+        var root = document.RootElement;
+        if (Code(root) != 0)
+            throw new InvalidOperationException(Detail(root, "没有找到相关视频"));
+        var result = Child(Child(root, "data"), "result");
+        var hits = new List<CrawlHit>();
+        if (result.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in result.EnumerateArray())
+            {
+                var id = Bvid().Match(Text(item, "bvid"));
+                if (!id.Success)
+                    continue;
+                var title = Plain(Text(item, "title"));
+                var author = Plain(Text(item, "author"));
+                var length = Text(item, "duration");
+                if (length.Length > 0)
+                    author = author.Length == 0 ? length : author + " · " + length;
+                hits.Add(new CrawlHit(0, id.Value, title.Length == 0 ? id.Value : title, author, ToHttps(Text(item, "pic")))
+                {
+                    Origin = "bili",
+                    AlbumTitle = title.Length == 0 ? id.Value : title,
+                    CoverReferer = "https://www.bilibili.com/",
+                });
+            }
+        }
+
+        if (hits.Count == 0)
+        {
+            if (page <= 1)
+                throw new InvalidOperationException("没有找到相关视频");
+            return new CrawlBatch([], null);
+        }
+
+        return new CrawlBatch(hits, (page + 1).ToString(CultureInfo.InvariantCulture));
+    }
+
+    private static string Plain(string text)
+    {
+        var stripped = Markup().Replace(text, "");
+        return stripped
+            .Replace("&amp;", "&", StringComparison.Ordinal)
+            .Replace("&lt;", "<", StringComparison.Ordinal)
+            .Replace("&gt;", ">", StringComparison.Ordinal)
+            .Replace("&quot;", "\"", StringComparison.Ordinal)
+            .Replace("&#39;", "'", StringComparison.Ordinal)
+            .Trim();
     }
 
     public static async Task<IReadOnlyList<string>> DownloadAsync(
@@ -1365,6 +1439,9 @@ public static partial class BilibiliClient
 
     [GeneratedRegex("BV[0-9A-Za-z]{10}")]
     private static partial Regex Bvid();
+
+    [GeneratedRegex("<[^>]+>")]
+    private static partial Regex Markup();
 
     [GeneratedRegex("""id\s*=\s*["']1-name["']\s*>([^<]+)<""")]
     private static partial Regex RefreshCsrf();

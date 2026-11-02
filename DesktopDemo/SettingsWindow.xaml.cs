@@ -327,7 +327,7 @@ public partial class SettingsPage : UserControl
 
     private void BiliHelp_Click(object sender, RoutedEventArgs e) =>
         ShowHelp("B站", """
-            Cookie 只保存在这台电脑上，用来读取收藏夹，以及下载这个账号可以收听的音频，包括需要登录或大会员的视频。
+            爬取页可以输入关键词搜索视频，也可以粘贴 BV 号或视频链接。Cookie 只保存在这台电脑上，用来读取收藏夹，以及下载这个账号可以收听的音频，包括需要登录或大会员的视频。
 
             可以粘贴 SESSDATA，也可以粘贴整段 Cookie。扫码登录后，登录信息会在需要时自动更新。粘贴的内容不会自动更新。
 

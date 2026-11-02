@@ -86,27 +86,33 @@ public static partial class YouTubeClient
         return response.IsSuccessStatusCode ? "已保存" : "保存了，但连不上 YouTube";
     }
 
-    public static async Task<IReadOnlyList<CrawlHit>> LookupAsync(ServiceSettings settings, string input, CancellationToken cancellationToken)
+    public static async Task<IReadOnlyList<CrawlHit>> LookupAsync(ServiceSettings settings, string input, CancellationToken cancellationToken) =>
+        (await OpenAsync(settings, input, cancellationToken)).Hits;
+
+    public static async Task<CrawlBatch> OpenAsync(ServiceSettings settings, string input, CancellationToken cancellationToken)
     {
         var text = input.Trim();
         if (text.Length == 0)
             throw new InvalidOperationException("请输入关键词");
         var typed = SearchQueryOf(text);
         if (typed != null)
-            return await SearchAsync(settings, typed, cancellationToken);
+            return await SearchPageAsync(settings, typed, null, cancellationToken);
         var video = VideoOf(text);
         var playlist = PlaylistOf(text);
         if (video != null && (playlist == null || text.Contains("watch", StringComparison.OrdinalIgnoreCase) || text.Contains("youtu.be", StringComparison.OrdinalIgnoreCase) || text.Contains("shorts", StringComparison.OrdinalIgnoreCase)))
-            return [await VideoAsync(settings, video, cancellationToken)];
+            return new CrawlBatch([await VideoAsync(settings, video, cancellationToken)], null);
         if (playlist != null)
-            return await PlaylistAsync(settings, playlist, cancellationToken);
+            return await PlaylistPageAsync(settings, playlist, null, cancellationToken);
         if (video != null)
-            return [await VideoAsync(settings, video, cancellationToken)];
-        return await SearchAsync(settings, text, cancellationToken);
+            return new CrawlBatch([await VideoAsync(settings, video, cancellationToken)], null);
+        return await SearchPageAsync(settings, text, null, cancellationToken);
     }
 
-    public static Task<IReadOnlyList<CrawlHit>> PlaylistAsync(ServiceSettings settings, string playlistId, CancellationToken cancellationToken) =>
-        BrowseAsync(settings, playlistId, cancellationToken);
+    public static async Task<IReadOnlyList<CrawlHit>> PlaylistAsync(ServiceSettings settings, string playlistId, CancellationToken cancellationToken) =>
+        (await PlaylistPageAsync(settings, playlistId, null, cancellationToken)).Hits;
+
+    public static Task<CrawlBatch> PlaylistPageAsync(ServiceSettings settings, string playlistId, string? continuation, CancellationToken cancellationToken) =>
+        BrowsePageAsync(settings, playlistId, continuation, cancellationToken);
 
     public static async Task<IReadOnlyList<string>> DownloadAsync(
         ServiceSettings settings,
@@ -124,9 +130,13 @@ public static partial class YouTubeClient
         var root = Path.Combine(TrackLoader.LibraryRoot(), Safe(folderId));
         Directory.CreateDirectory(root);
         WriteWork(root, resolved.AlbumTitle.Length == 0 ? resolved.Title : resolved.AlbumTitle, resolved.Circle);
-        var path = Path.Combine(root, Safe(resolved.Title) + ".m4a");
+        var extension = string.Equals(resolved.MediaExtension, ".webm", StringComparison.OrdinalIgnoreCase) ? ".webm" : ".m4a";
+        var path = Path.Combine(root, Safe(resolved.Title) + extension);
+        var replaced = extension == ".webm" ? Path.Combine(root, Safe(resolved.Title) + ".m4a") : "";
         if (File.Exists(path) && new FileInfo(path).Length > 0)
         {
+            if (replaced.Length > 0)
+                TryDelete(replaced);
             Report(progress, resolved.Title, -1, -1, true);
         }
         else
@@ -139,7 +149,11 @@ public static partial class YouTubeClient
                     Report(progress, resolved.Title, received, total, false), cancellationToken);
                 if (new FileInfo(partial).Length < 1024)
                     throw new InvalidOperationException("音频下不来");
+                if (extension == ".webm" && !StartsWithEbml(partial))
+                    throw new InvalidOperationException("YouTube 音轨不是完整的 WebM");
                 File.Move(partial, path, true);
+                if (replaced.Length > 0)
+                    TryDelete(replaced);
             }
             catch
             {
@@ -171,10 +185,11 @@ public static partial class YouTubeClient
             CoverReferer = "https://www.youtube.com/",
             MediaUrl = player.Url,
             MediaAgent = player.Agent,
+            MediaExtension = player.Extension == ".webm" ? ".webm" : ".m4a",
         };
     }
 
-    private readonly record struct PlayerResult(string? Url, string Agent, string Title, string Author, string? Thumbnail, string Status, string Reason);
+    private readonly record struct PlayerResult(string? Url, string Agent, string Title, string Author, string? Thumbnail, string Status, string Reason, string Extension);
 
     private readonly record struct ClientSpec(string Name, string Version, string Number, string Agent, string? DeviceMake, string? DeviceModel, string? OsName, string? OsVersion, int? Sdk);
 
@@ -188,6 +203,8 @@ public static partial class YouTubeClient
 
     private readonly record struct StreamRef(string Mime, int Bitrate, string Url, string Cipher);
 
+    private readonly record struct AudioLink(string Url, string Extension);
+
     private sealed class Solved
     {
         public static readonly Solved Empty = new();
@@ -197,6 +214,7 @@ public static partial class YouTubeClient
 
     private static async Task<PlayerResult> PlayerAsync(ServiceSettings settings, string videoId, bool withCookie, CancellationToken cancellationToken)
     {
+        PlayerResult? fallback = null;
         PlayerResult? last = null;
         foreach (var client in Players)
         {
@@ -208,19 +226,24 @@ public static partial class YouTubeClient
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
-                result = new PlayerResult(null, client.Agent, videoId, "", null, "", "连不上 YouTube");
+                result = new PlayerResult(null, client.Agent, videoId, "", null, "", "连不上 YouTube", ".m4a");
             }
             catch (HttpRequestException)
             {
-                result = new PlayerResult(null, client.Agent, videoId, "", null, "", "连不上 YouTube");
+                result = new PlayerResult(null, client.Agent, videoId, "", null, "", "连不上 YouTube", ".m4a");
             }
 
-            if (result.Url != null)
-                return result;
             last = result;
+            if (result.Url == null)
+                continue;
+            if (result.Extension == ".webm")
+                return result;
+            fallback ??= result;
         }
 
-        return last ?? new PlayerResult(null, VisionAgent, videoId, "", null, "", NoAudio);
+        if (fallback != null)
+            return fallback.Value;
+        return last ?? new PlayerResult(null, VisionAgent, videoId, "", null, "", NoAudio, ".m4a");
     }
 
     private static async Task<PlayerResult> PlayerOnceAsync(
@@ -270,7 +293,7 @@ public static partial class YouTubeClient
         using var response = await Http.SendAsync(request, cancellationToken);
         var payload = await response.Content.ReadAsStringAsync(cancellationToken);
         if (!response.IsSuccessStatusCode)
-            return new PlayerResult(null, client.Agent, videoId, "", null, "", "连不上 YouTube");
+            return new PlayerResult(null, client.Agent, videoId, "", null, "", "连不上 YouTube", ".m4a");
         JsonDocument document;
         try
         {
@@ -278,7 +301,7 @@ public static partial class YouTubeClient
         }
         catch (JsonException)
         {
-            return new PlayerResult(null, client.Agent, videoId, "", null, "", "连不上 YouTube");
+            return new PlayerResult(null, client.Agent, videoId, "", null, "", "连不上 YouTube", ".m4a");
         }
 
         using (document)
@@ -291,13 +314,13 @@ public static partial class YouTubeClient
             var title = Text(details, "title");
             var author = Text(details, "author");
             var thumbnail = ThumbnailOf(details) ?? ("https://i.ytimg.com/vi/" + videoId + "/hqdefault.jpg");
-            string? url = null;
+            AudioLink? audio = null;
             var message = reason;
             if (status.Length == 0 || status == "OK")
             {
                 try
                 {
-                    url = await MaterializeAsync(ListStreams(Child(root, "streamingData")), cancellationToken);
+                    audio = await MaterializeAsync(ListStreams(Child(root, "streamingData")), cancellationToken);
                 }
                 catch (InvalidOperationException ex)
                 {
@@ -305,120 +328,102 @@ public static partial class YouTubeClient
                 }
             }
 
-            if (url == null && message.Length == 0)
+            if (audio == null && message.Length == 0)
                 message = status == "LOGIN_REQUIRED"
                     ? "这个视频需要登录，请在设置里保存 YouTube Cookie"
                     : NoAudio;
-            return new PlayerResult(url, client.Agent, title.Length == 0 ? videoId : title, author, thumbnail, status, message);
+            return new PlayerResult(audio?.Url, client.Agent, title.Length == 0 ? videoId : title, author, thumbnail, status, message, audio?.Extension ?? ".m4a");
         }
     }
 
-    private static async Task<IReadOnlyList<CrawlHit>> BrowseAsync(ServiceSettings settings, string playlistId, CancellationToken cancellationToken)
+    private static async Task<CrawlBatch> BrowsePageAsync(ServiceSettings settings, string playlistId, string? continuation, CancellationToken cancellationToken)
     {
         var gate = await EnsureVisitorAsync(cancellationToken);
-        var hits = new List<CrawlHit>();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        string? continuation = null;
-        for (var page = 0; page < 5 && hits.Count < 200; page++)
+        cancellationToken.ThrowIfCancellationRequested();
+        var payload = continuation == null
+            ? JsonSerializer.Serialize(new
+            {
+                browseId = "VL" + playlistId,
+                context = WebContext(gate),
+            }, Json)
+            : JsonSerializer.Serialize(new
+            {
+                continuation,
+                context = WebContext(gate),
+            }, Json);
+        using var request = new HttpRequestMessage(HttpMethod.Post, "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false")
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            string payload;
-            try
-            {
-            payload = continuation == null
-                ? JsonSerializer.Serialize(new
-                {
-                    browseId = "VL" + playlistId,
-                    context = WebContext(gate),
-                }, Json)
-                : JsonSerializer.Serialize(new
-                {
-                    continuation,
-                    context = WebContext(gate),
-                }, Json);
-            using var request = new HttpRequestMessage(HttpMethod.Post, "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false")
-            {
-                Content = new StringContent(payload, Encoding.UTF8, "application/json"),
-            };
-            request.Headers.TryAddWithoutValidation("User-Agent", WebAgent);
-            request.Headers.TryAddWithoutValidation("X-YouTube-Client-Name", "1");
-            request.Headers.TryAddWithoutValidation("X-YouTube-Client-Version", gate.WebVersion);
-            request.Headers.TryAddWithoutValidation("Origin", "https://www.youtube.com");
-            request.Headers.TryAddWithoutValidation("Referer", "https://www.youtube.com/playlist?list=" + playlistId);
-            StampCookie(request, settings.YouTubeCookie);
-            using var response = await Http.SendAsync(request, cancellationToken);
-            var body = await response.Content.ReadAsStringAsync(cancellationToken);
-            if (!response.IsSuccessStatusCode)
-                throw new InvalidOperationException(response.StatusCode == HttpStatusCode.Unauthorized ? "请先在设置里保存 YouTube Cookie" : "连不上 YouTube");
-            using var document = JsonDocument.Parse(body);
-            var before = hits.Count;
-            Collect(document.RootElement, hits, seen);
-            continuation = Continuation(document.RootElement);
-            if (hits.Count == before || continuation == null)
-                break;
-            }
-            catch (Exception ex) when (hits.Count > 0 && (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested))
-            {
-                break;
-            }
-        }
-
+            Content = new StringContent(payload, Encoding.UTF8, "application/json"),
+        };
+        request.Headers.TryAddWithoutValidation("User-Agent", WebAgent);
+        request.Headers.TryAddWithoutValidation("X-YouTube-Client-Name", "1");
+        request.Headers.TryAddWithoutValidation("X-YouTube-Client-Version", gate.WebVersion);
+        request.Headers.TryAddWithoutValidation("Origin", "https://www.youtube.com");
+        request.Headers.TryAddWithoutValidation("Referer", "https://www.youtube.com/playlist?list=" + playlistId);
+        StampCookie(request, settings.YouTubeCookie);
+        using var response = await Http.SendAsync(request, cancellationToken);
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException(response.StatusCode == HttpStatusCode.Unauthorized ? "请先在设置里保存 YouTube Cookie" : "连不上 YouTube");
+        using var document = JsonDocument.Parse(body);
+        var hits = new List<CrawlHit>();
+        Collect(document.RootElement, hits, new HashSet<string>(StringComparer.Ordinal));
         if (hits.Count == 0)
+        {
+            if (continuation != null)
+                return new CrawlBatch([], null);
             throw new InvalidOperationException(settings.YouTubeCookie.Length == 0 && playlistId is "LL" or "WL"
                 ? "请先在设置里保存 YouTube Cookie"
                 : "没有读到这个播放列表");
-        return hits;
-    }
-
-    private static async Task<IReadOnlyList<CrawlHit>> SearchAsync(ServiceSettings settings, string query, CancellationToken cancellationToken)
-    {
-        var gate = await EnsureVisitorAsync(cancellationToken);
-        var hits = new List<CrawlHit>();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        string? continuation = null;
-        for (var page = 0; page < 3 && hits.Count < 40; page++)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var payload = continuation == null
-                ? JsonSerializer.Serialize(new { query, context = WebContext(gate) }, Json)
-                : JsonSerializer.Serialize(new { continuation, context = WebContext(gate) }, Json);
-            using var request = new HttpRequestMessage(HttpMethod.Post, "https://www.youtube.com/youtubei/v1/search?prettyPrint=false")
-            {
-                Content = new StringContent(payload, Encoding.UTF8, "application/json"),
-            };
-            request.Headers.TryAddWithoutValidation("User-Agent", WebAgent);
-            request.Headers.TryAddWithoutValidation("X-YouTube-Client-Name", "1");
-            request.Headers.TryAddWithoutValidation("X-YouTube-Client-Version", gate.WebVersion);
-            request.Headers.TryAddWithoutValidation("Origin", "https://www.youtube.com");
-            request.Headers.TryAddWithoutValidation("Referer", "https://www.youtube.com/results?search_query=" + Uri.EscapeDataString(query));
-            StampCookie(request, settings.YouTubeCookie);
-            using var response = await Http.SendAsync(request, cancellationToken);
-            var body = await response.Content.ReadAsStringAsync(cancellationToken);
-            if (!response.IsSuccessStatusCode)
-                throw new InvalidOperationException("连不上 YouTube");
-            JsonDocument document;
-            try
-            {
-                document = JsonDocument.Parse(body);
-            }
-            catch (JsonException)
-            {
-                throw new InvalidOperationException("连不上 YouTube");
-            }
-
-            using (document)
-            {
-                var before = hits.Count;
-                CollectSearch(document.RootElement, hits, seen);
-                continuation = Continuation(document.RootElement);
-                if (hits.Count == before || continuation == null)
-                    break;
-            }
         }
 
-        if (hits.Count == 0)
-            throw new InvalidOperationException("没有找到相关视频");
-        return hits;
+        return new CrawlBatch(hits, Continuation(document.RootElement), "list:" + playlistId);
+    }
+
+    public static async Task<CrawlBatch> SearchPageAsync(ServiceSettings settings, string query, string? continuation, CancellationToken cancellationToken)
+    {
+        var gate = await EnsureVisitorAsync(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        var payload = continuation == null
+            ? JsonSerializer.Serialize(new { query, context = WebContext(gate) }, Json)
+            : JsonSerializer.Serialize(new { continuation, context = WebContext(gate) }, Json);
+        using var request = new HttpRequestMessage(HttpMethod.Post, "https://www.youtube.com/youtubei/v1/search?prettyPrint=false")
+        {
+            Content = new StringContent(payload, Encoding.UTF8, "application/json"),
+        };
+        request.Headers.TryAddWithoutValidation("User-Agent", WebAgent);
+        request.Headers.TryAddWithoutValidation("X-YouTube-Client-Name", "1");
+        request.Headers.TryAddWithoutValidation("X-YouTube-Client-Version", gate.WebVersion);
+        request.Headers.TryAddWithoutValidation("Origin", "https://www.youtube.com");
+        request.Headers.TryAddWithoutValidation("Referer", "https://www.youtube.com/results?search_query=" + Uri.EscapeDataString(query));
+        StampCookie(request, settings.YouTubeCookie);
+        using var response = await Http.SendAsync(request, cancellationToken);
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException("连不上 YouTube");
+        JsonDocument document;
+        try
+        {
+            document = JsonDocument.Parse(body);
+        }
+        catch (JsonException)
+        {
+            throw new InvalidOperationException("连不上 YouTube");
+        }
+
+        using (document)
+        {
+            var hits = new List<CrawlHit>();
+            CollectSearch(document.RootElement, hits, new HashSet<string>(StringComparer.Ordinal));
+            if (hits.Count == 0)
+            {
+                if (continuation != null)
+                    return new CrawlBatch([], null);
+                throw new InvalidOperationException("没有找到相关视频");
+            }
+
+            return new CrawlBatch(hits, Continuation(document.RootElement));
+        }
     }
 
     private static object WebContext(VisitorGate gate) => new
@@ -435,7 +440,7 @@ public static partial class YouTubeClient
 
     private static void CollectSearch(JsonElement element, List<CrawlHit> hits, HashSet<string> seen)
     {
-        if (hits.Count >= 40)
+        if (hits.Count >= 80)
             return;
         switch (element.ValueKind)
         {
@@ -584,21 +589,35 @@ public static partial class YouTubeClient
             var cipher = Text(format, "signatureCipher");
             if (cipher.Length == 0)
                 cipher = Text(format, "cipher");
-            list.Add(new StreamRef(Text(format, "mimeType"), (int)Long(format, "bitrate"), Text(format, "url"), cipher));
+            var bitrate = (int)Long(format, "bitrate");
+            if (bitrate <= 0)
+                bitrate = (int)Long(format, "averageBitrate");
+            list.Add(new StreamRef(Text(format, "mimeType"), bitrate, Text(format, "url"), cipher));
         }
     }
 
     private static long Rank(StreamRef stream)
     {
         var mime = stream.Mime;
+        // 96 kbps 以上的 Opus 听感好于同档 AAC。更低的 Opus 仍让给 AAC。
+        if (mime.StartsWith("audio/webm", StringComparison.OrdinalIgnoreCase) && mime.Contains("opus", StringComparison.OrdinalIgnoreCase))
+        {
+            var rate = stream.Bitrate > 0 ? stream.Bitrate : 160_000;
+            var tier = rate >= 96_000 ? 5_000_000_000L : 2_500_000_000L;
+            return tier + rate;
+        }
+
         if (mime.StartsWith("audio/mp4", StringComparison.OrdinalIgnoreCase))
-            return (mime.Contains("mp4a", StringComparison.OrdinalIgnoreCase) ? 3_000_000_000L : 2_000_000_000L) + stream.Bitrate;
+            return (mime.Contains("mp4a", StringComparison.OrdinalIgnoreCase) ? 4_000_000_000L : 3_000_000_000L) + Math.Max(stream.Bitrate, 0);
         if (mime.StartsWith("video/mp4", StringComparison.OrdinalIgnoreCase) && mime.Contains("mp4a", StringComparison.OrdinalIgnoreCase))
-            return 1_000_000_000L + stream.Bitrate;
+            return 1_000_000_000L + Math.Max(stream.Bitrate, 0);
         return -1;
     }
 
-    private static async Task<string?> MaterializeAsync(List<StreamRef> streams, CancellationToken cancellationToken)
+    private static string ExtensionOf(string mime) =>
+        mime.StartsWith("audio/webm", StringComparison.OrdinalIgnoreCase) ? ".webm" : ".m4a";
+
+    private static async Task<AudioLink?> MaterializeAsync(List<StreamRef> streams, CancellationToken cancellationToken)
     {
         var ranked = streams
             .Where(stream => Rank(stream) >= 0 && (stream.Url.Length > 0 || stream.Cipher.Length > 0))
@@ -635,7 +654,7 @@ public static partial class YouTubeClient
         {
             var url = Finish(stream, solved);
             if (url != null)
-                return url;
+                return new AudioLink(url, ExtensionOf(stream.Mime));
         }
 
         if (sigs.Count > 0 || ns.Count > 0)
@@ -1168,6 +1187,20 @@ public static partial class YouTubeClient
         if (cleaned.Length > 80)
             cleaned = cleaned[..80].Trim();
         return cleaned.Length == 0 ? "audio" : cleaned;
+    }
+
+    private static bool StartsWithEbml(string path)
+    {
+        try
+        {
+            using var stream = File.OpenRead(path);
+            Span<byte> magic = stackalloc byte[4];
+            return stream.Read(magic) == 4 && magic[0] == 0x1A && magic[1] == 0x45 && magic[2] == 0xDF && magic[3] == 0xA3;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
     }
 
     private static void TryDelete(string path)

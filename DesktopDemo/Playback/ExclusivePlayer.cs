@@ -1,4 +1,5 @@
 using NAudio.CoreAudioApi;
+using NAudio.CoreAudioApi.Interfaces;
 using NAudio.Wave;
 using PlayerDemo.Library;
 
@@ -85,9 +86,18 @@ public sealed class ExclusivePlayer : IDisposable
                 list.RemoveAt(index);
                 list.Insert(0, item);
             }
+
+            if (list.Count > 0 && list[0].Id == defaultId)
+                list[0] = (list[0].Id, list[0].Name + "（默认）");
         }
 
         return list;
+    }
+
+    public void InvalidateDevice()
+    {
+        _formats = null;
+        _formatsKey = null;
     }
 
     public static double ReadVolume(string? deviceId)
@@ -142,6 +152,12 @@ public sealed class ExclusivePlayer : IDisposable
         }
 
         raw = CleanHeader(raw);
+        if (!HasSamples(raw))
+        {
+            raw.Dispose();
+            return PlayResult.Fail("这个文件没有读出音频");
+        }
+
         if (_output != null && _swap != null && CanFeed(raw))
         {
             try
@@ -404,6 +420,24 @@ public sealed class ExclusivePlayer : IDisposable
         _devices = null;
     }
 
+    private static bool HasSamples(WaveStream raw)
+    {
+        if (!raw.CanSeek)
+            return true;
+        try
+        {
+            var count = Math.Max(raw.WaveFormat.BlockAlign, 1);
+            var buffer = new byte[count];
+            var read = raw.Read(buffer, 0, count);
+            raw.Position = 0;
+            return read > 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private static WaveStream CleanHeader(WaveStream raw)
     {
         var format = raw.WaveFormat;
@@ -647,6 +681,66 @@ public sealed class ExclusivePlayer : IDisposable
         string.IsNullOrEmpty(deviceId)
             ? devices.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia)
             : devices.GetDevice(deviceId);
+}
+
+public sealed class OutputDeviceWatcher : IMMNotificationClient, IDisposable
+{
+    private readonly MMDeviceEnumerator _devices = new();
+    private bool _disposed;
+
+    public event EventHandler? Changed;
+
+    public OutputDeviceWatcher()
+    {
+        _devices.RegisterEndpointNotificationCallback(this);
+    }
+
+    public void OnDeviceStateChanged(string deviceId, DeviceState newState) => Notify();
+
+    public void OnDeviceAdded(string pwstrDeviceId) => Notify();
+
+    public void OnDeviceRemoved(string deviceId) => Notify();
+
+    public void OnDefaultDeviceChanged(DataFlow flow, Role role, string defaultDeviceId)
+    {
+        if (flow == DataFlow.Render)
+            Notify();
+    }
+
+    public void OnPropertyValueChanged(string pwstrDeviceId, PropertyKey key)
+    {
+    }
+
+    public void Dispose()
+    {
+        if (_disposed)
+            return;
+        _disposed = true;
+        try
+        {
+            _devices.UnregisterEndpointNotificationCallback(this);
+        }
+        catch
+        {
+            // 退出时设备枚举器可能已经关掉。
+        }
+
+        _devices.Dispose();
+    }
+
+    private void Notify()
+    {
+        if (_disposed)
+            return;
+        try
+        {
+            Changed?.Invoke(this, EventArgs.Empty);
+        }
+        catch
+        {
+            // 通知来自系统线程，这次刷新失败时下一次设备变化还会再来。
+        }
+    }
 }
 
 enum OutputAdjust

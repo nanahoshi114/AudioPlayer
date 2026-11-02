@@ -95,7 +95,7 @@ public static class TrackLoader
                 BitsPerSample = format.BitsPerSample,
                 IsFloat = IsFloat(format),
                 Channels = format.Channels,
-                Codec = CodecName(path),
+                Codec = stream is OpusWaveStream ? "Opus" : CodecName(path),
                 ArtBytes = art,
                 CoverPath = coverPath,
                 Subtitles = subtitles,
@@ -119,6 +119,14 @@ public static class TrackLoader
             return new AiffFileReader(path);
         if (ext.Equals(".wav", StringComparison.OrdinalIgnoreCase))
             return new WaveFileReader(path);
+        if (ext.Equals(".webm", StringComparison.OrdinalIgnoreCase) || ext.Equals(".ogg", StringComparison.OrdinalIgnoreCase) || ext.Equals(".opus", StringComparison.OrdinalIgnoreCase))
+        {
+            if (OpusWaveStream.TryOpen(path, out var opus) && opus != null)
+                return opus;
+        }
+
+        if (ext.Equals(".m4a", StringComparison.OrdinalIgnoreCase) || ext.Equals(".mp4", StringComparison.OrdinalIgnoreCase) || ext.Equals(".m4s", StringComparison.OrdinalIgnoreCase))
+            FragmentedMp4.EnsureProgressive(path);
         return new MediaFoundationReader(path);
     }
 

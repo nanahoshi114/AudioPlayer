@@ -35,7 +35,7 @@
         </WrapPanel>
       </StackPanel>
       <Border Grid.Row="1" Margin="0,16,0,0" Background="{DynamicResource CardBrush}" CornerRadius="18" Padding="8">
-        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <ScrollViewer x:Name="HitScroll" ScrollChanged="HitScroll_ScrollChanged" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
           <ItemsControl x:Name="Hits">
             <ItemsControl.ItemTemplate>
               <DataTemplate>

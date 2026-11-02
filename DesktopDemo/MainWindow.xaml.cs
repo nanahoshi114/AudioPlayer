@@ -46,6 +46,10 @@ public partial class MainWindow : Window
     private bool _showDuplicates;
     private bool _listReady;
     private bool _outputReady;
+    private string? _appliedDeviceId;
+    private bool _appliedExclusive;
+    private OutputDeviceWatcher? _deviceWatcher;
+    private readonly DispatcherTimer _deviceRefresh;
 
     public MainWindow()
     {
@@ -67,12 +71,25 @@ public partial class MainWindow : Window
         _clock = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
         _clock.Tick += (_, _) => RefreshClock();
         _clock.Start();
+        _deviceRefresh = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
+        _deviceRefresh.Tick += (_, _) =>
+        {
+            _deviceRefresh.Stop();
+            RefreshDevices();
+        };
 
         Loaded += (_, _) =>
         {
             LoadDevice();
+            if (_deviceWatcher == null)
+            {
+                _deviceWatcher = new OutputDeviceWatcher();
+                _deviceWatcher.Changed += (_, _) => Dispatcher.BeginInvoke(ScheduleDeviceRefresh);
+            }
+
             LoadStoredLibrary();
         };
+        Activated += (_, _) => ScheduleDeviceRefresh();
         SourceInitialized += (_, _) =>
         {
             AttachWindowShadow();
@@ -162,33 +179,109 @@ public partial class MainWindow : Window
 
     private void LoadDevice()
     {
-        _outputReady = false;
         ExclusiveBox.IsChecked = _settings.Exclusive;
-        DeviceBox.Items.Clear();
+        RefreshDevices();
+    }
+
+    private void ScheduleDeviceRefresh()
+    {
+        if (!IsLoaded || _deviceWatcher == null)
+            return;
+        _deviceRefresh.Stop();
+        _deviceRefresh.Start();
+    }
+
+    private void RefreshDevices()
+    {
+        var selectedId = (DeviceBox.SelectedItem as OutputDevice)?.Id ?? _settings.DeviceId;
+        IReadOnlyList<(string Id, string Name)> devices;
         try
         {
-            var selected = 0;
-            var index = 0;
-            foreach (var device in ExclusivePlayer.ListDevices())
-            {
-                DeviceBox.Items.Add(new OutputDevice(device.Id, device.Name));
-                if (!string.IsNullOrEmpty(_settings.DeviceId) && device.Id == _settings.DeviceId)
-                    selected = index;
-                index++;
-            }
-
-            if (DeviceBox.Items.Count == 0)
-                DeviceText.Text = "没有播放设备";
-            else
-                DeviceBox.SelectedIndex = selected;
+            devices = ExclusivePlayer.ListDevices();
         }
         catch
         {
             DeviceText.Text = "没有播放设备";
+            return;
         }
 
+        if (SameDevices(devices))
+            return;
+
+        _player.InvalidateDevice();
+        _outputReady = false;
+        DeviceBox.Items.Clear();
+        var selected = 0;
+        for (var index = 0; index < devices.Count; index++)
+        {
+            DeviceBox.Items.Add(new OutputDevice(devices[index].Id, devices[index].Name));
+            if (!string.IsNullOrEmpty(selectedId) && devices[index].Id == selectedId)
+                selected = index;
+        }
+
+        if (DeviceBox.Items.Count == 0)
+        {
+            DeviceText.Text = "没有播放设备";
+            _outputReady = true;
+            if (_appliedDeviceId != null)
+            {
+                _appliedDeviceId = null;
+                _player.Stop();
+                OutputText.Text = "没有播放设备";
+            }
+
+            return;
+        }
+
+        DeviceBox.SelectedIndex = selected;
         _outputReady = true;
-        ApplyOutput(restart: false);
+        var now = DeviceBox.SelectedItem as OutputDevice;
+        var exclusive = ExclusiveBox.IsChecked == true;
+        if (now != null && now.Id == _appliedDeviceId && exclusive == _appliedExclusive)
+        {
+            RefreshDeviceStatus(now.Id, exclusive);
+            return;
+        }
+
+        ApplyOutput(restart: _player.IsPlaying || _player.IsPaused);
+    }
+
+    private bool SameDevices(IReadOnlyList<(string Id, string Name)> devices)
+    {
+        if (devices.Count != DeviceBox.Items.Count)
+            return false;
+        for (var index = 0; index < devices.Count; index++)
+        {
+            if (DeviceBox.Items[index] is not OutputDevice item)
+                return false;
+            if (item.Id != devices[index].Id || item.Name != devices[index].Name)
+                return false;
+        }
+
+        return true;
+    }
+
+    private void RefreshDeviceStatus(string deviceId, bool exclusive)
+    {
+        if (_draggingVolume)
+        {
+            DeviceText.Text = exclusive ? "独占" : "共享";
+            return;
+        }
+
+        try
+        {
+            _volumeReady = false;
+            _volumeScalar = ExclusivePlayer.ReadVolume(deviceId);
+            PaintVolume();
+            _volumeReady = true;
+            DeviceText.Text = exclusive ? "独占" : "共享";
+        }
+        catch
+        {
+            _volumeReady = true;
+            DeviceText.Text = "读不了这台设备";
+        }
     }
 
     private void DeviceBox_SelectionChanged(object sender, SelectionChangedEventArgs e) => ApplyOutput(restart: true);
@@ -215,6 +308,8 @@ public partial class MainWindow : Window
         _settings.DeviceId = device.Id;
         _settings.Exclusive = exclusive;
         _settings.Save();
+        _appliedDeviceId = device.Id;
+        _appliedExclusive = exclusive;
         _player.UseDevice(device.Id, exclusive);
         try
         {
@@ -1169,6 +1264,9 @@ public partial class MainWindow : Window
     private void Window_Closed(object? sender, EventArgs e)
     {
         _clock.Stop();
+        _deviceRefresh.Stop();
+        _deviceWatcher?.Dispose();
+        _deviceWatcher = null;
         _job?.Cancel();
         _floatSubtitles.Shutdown();
         _player.Dispose();

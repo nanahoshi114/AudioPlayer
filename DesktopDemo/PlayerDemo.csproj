@@ -15,6 +15,7 @@
     <EmbeddedResource Include="Crawl\yt-solver.cjs" LogicalName="PlayerDemo.yt-solver.cjs" />
   </ItemGroup>
   <ItemGroup>
+    <PackageReference Include="Concentus" Version="2.2.2" />
     <PackageReference Include="NAudio" Version="2.2.1" />
     <PackageReference Include="QRCoder" Version="1.6.0" />
     <PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0" />

@@ -9,6 +9,8 @@ using System.Windows.Media.Imaging;
 
 namespace PlayerDemo.Crawl;
 
+public readonly record struct CrawlBatch(IReadOnlyList<CrawlHit> Hits, string? More, string? Feed = null);
+
 public sealed class CrawlHit : INotifyPropertyChanged
 {
     private ImageSource? _cover;
@@ -34,6 +36,7 @@ public sealed class CrawlHit : INotifyPropertyChanged
     public string AlbumTitle { get; init; } = "";
     public string? MediaUrl { get; init; }
     public string? MediaAgent { get; init; }
+    public string MediaExtension { get; init; } = ".m4a";
     public string CoverReferer { get; init; } = "https://asmr.one/";
     public bool IsPicked
     {
@@ -98,7 +101,10 @@ public static partial class AsmrCrawl
     private static readonly HttpClient Http = new() { Timeout = Timeout.InfiniteTimeSpan };
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Task<ImageSource?>> Covers = new();
 
-    public static async Task<IReadOnlyList<CrawlHit>> SearchAsync(string input, CancellationToken cancellationToken)
+    public static async Task<IReadOnlyList<CrawlHit>> SearchAsync(string input, CancellationToken cancellationToken) =>
+        (await OpenAsync(input, cancellationToken)).Hits;
+
+    public static async Task<CrawlBatch> OpenAsync(string input, CancellationToken cancellationToken)
     {
         var keyword = input.Trim();
         if (keyword.Length == 0)
@@ -106,13 +112,18 @@ public static partial class AsmrCrawl
         if (Code().IsMatch(keyword) || keyword.All(char.IsDigit))
         {
             var work = await LoadAsync(keyword, cancellationToken);
-            return [new CrawlHit(0, work.SourceId, work.Title, work.Circle, work.CoverUrl)];
+            return new CrawlBatch([new CrawlHit(0, work.SourceId, work.Title, work.Circle, work.CoverUrl)], null);
         }
 
-        var encoded = Uri.EscapeDataString(keyword);
-        using var document = await GetAsync($"/api/search/{encoded}?order=dl_count&sort=desc&page=1&pageSize=20&subtitle=0&includeTranslationWorks=true", cancellationToken);
+        return await SearchPageAsync(keyword, 1, cancellationToken);
+    }
+
+    public static async Task<CrawlBatch> SearchPageAsync(string keyword, int page, CancellationToken cancellationToken)
+    {
+        var encoded = Uri.EscapeDataString(keyword.Trim());
+        using var document = await GetAsync($"/api/search/{encoded}?order=dl_count&sort=desc&page={page}&pageSize=20&subtitle=0&includeTranslationWorks=true", cancellationToken);
         if (!document.RootElement.TryGetProperty("works", out var works) || works.ValueKind != JsonValueKind.Array)
-            return [];
+            return new CrawlBatch([], null);
         var hits = new List<CrawlHit>();
         foreach (var item in works.EnumerateArray())
         {
@@ -129,7 +140,7 @@ public static partial class AsmrCrawl
             hits.Add(new CrawlHit(id, source, Text(item, "title"), circle, cover));
         }
 
-        return hits;
+        return new CrawlBatch(hits, hits.Count == 0 ? null : (page + 1).ToString(System.Globalization.CultureInfo.InvariantCulture));
     }
 
     public static async Task<CrawlWork> LoadAsync(string input, CancellationToken cancellationToken)
