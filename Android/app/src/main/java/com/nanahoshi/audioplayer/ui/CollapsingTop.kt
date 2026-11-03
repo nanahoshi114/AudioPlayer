@@ -37,15 +37,16 @@ import kotlin.math.roundToInt
 @Composable
 fun CollapsingTop(
     header: @Composable ColumnScope.() -> Unit,
+    resetKey: Any? = null,
     pinned: @Composable ColumnScope.() -> Unit = {},
     content: @Composable (Modifier) -> Unit,
 ) {
     val headerHeight = remember { mutableFloatStateOf(0f) }
     val pinnedHeight = remember { mutableFloatStateOf(0f) }
-    val offset = remember { mutableFloatStateOf(0f) }
+    val offset = androidx.compose.runtime.saveable.rememberSaveable(resetKey) { mutableFloatStateOf(0f) }
     val reduceMotion by rememberUpdatedState(LocalReduceMotion.current)
     val scope = rememberCoroutineScope()
-    val connection = remember {
+    val connection = remember(offset) {
         object : NestedScrollConnection {
             private var settling: Job? = null
 

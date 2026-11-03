@@ -38,7 +38,7 @@ class ClipboardImportViewModel(app: Application) : AndroidViewModel(app) {
                     val parts = details.parts.filter { it.cid > 0 }.distinctBy { it.cid }
                     check(parts.isNotEmpty())
                     val saved = parts.all { graph.db.tracks().findByBvid(it.bvid, it.cid) != null }
-                    ClipboardImportPreview(target, details.video.title, details.video.coverUrl, saved, parts)
+                    ClipboardImportPreview(target, details.video.title, details.video.coverUrl, saved, parts, biliVideo = details.video)
                 }
                 ClipboardSource.ASMR -> {
                     val saved = graph.library.folderBySource(target.id)
@@ -57,9 +57,14 @@ class ClipboardImportViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         }
-        override suspend fun save(preview: ClipboardImportPreview, selectedParts: List<BiliPart>): String {
+        override suspend fun save(preview: ClipboardImportPreview, selectedParts: List<BiliPart>): String? {
             when (preview.target.source) {
-                ClipboardSource.BILIBILI -> { graph.library.importParts(selectedParts); return "已导入 ${selectedParts.size} 首到音频库" }
+                ClipboardSource.BILIBILI -> {
+                    val details = com.nanahoshi.audioplayer.bilibili.BiliVideoDetails(checkNotNull(preview.biliVideo), preview.parts)
+                    val requests = graph.biliImportRequests.choose(listOf(details)) ?: return null
+                    requests.forEach { graph.library.importBili(it) }
+                    return "已导入音频库"
+                }
                 ClipboardSource.ASMR -> graph.library.ensureAsmrWork(graph.asmr.loadWork(preview.target.id))
                 ClipboardSource.YOUTUBE -> graph.library.saveYouTube(checkNotNull(preview.youtubeVideo))
             }

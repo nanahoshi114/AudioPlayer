@@ -65,6 +65,7 @@ import com.nanahoshi.audioplayer.ui.components.LabelBadge
 import com.nanahoshi.audioplayer.ui.components.SourceBadge
 import com.nanahoshi.audioplayer.ui.formatDuration
 import com.nanahoshi.audioplayer.ui.theme.LocalReduceMotion
+import com.nanahoshi.audioplayer.ui.theme.LocalSourceColors
 import com.nanahoshi.audioplayer.asmr.WorkFacts
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -206,16 +207,21 @@ internal fun ItemName(name: String, expanded: Boolean) {
 @Composable
 internal fun FolderRow(
     folder: FolderEntity,
+    biliArtist: String? = null,
     selected: Boolean,
     selecting: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     onCache: (() -> Unit)?,
     onRecognize: (() -> Unit)?,
-    onDelete: () -> Unit,
+    onDelete: (() -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
     var menu by remember { mutableStateOf(false) }
+    if (folder.biliBvid != null) {
+        BiliVideoPreviewRow(folder, biliArtist, selected, selecting, onClick, onLongClick, onDelete, modifier)
+        return
+    }
     val work = folder.asmrSourceId != null
     if (work) {
         WorkPreviewRow(
@@ -249,7 +255,7 @@ internal fun FolderRow(
             }
         },
         trailingContent = {
-            if (!selecting) {
+            if (!selecting && (onCache != null || onRecognize != null || onDelete != null)) {
                 IconButton(onClick = { menu = true }) {
                     Icon(Icons.Default.MoreVert, contentDescription = "更多")
                 }
@@ -260,13 +266,72 @@ internal fun FolderRow(
                     if (onRecognize != null) {
                         DropdownMenuItem(text = { Text("识别为作品") }, onClick = { menu = false; onRecognize() })
                     }
-                    DropdownMenuItem(text = { Text("从音频库移除") }, onClick = { menu = false; onDelete() })
+                    if (onDelete != null) DropdownMenuItem(text = { Text("从音频库移除") }, onClick = { menu = false; onDelete() })
                 }
             }
         },
         modifier = modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick),
         colors = ListItemDefaults.colors(containerColor = container),
     )
+}
+
+/** BadgeLine uses BoxWithConstraints, so this card must not use ListItem's intrinsic slots. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun BiliVideoPreviewRow(
+    folder: FolderEntity,
+    artist: String?,
+    selected: Boolean,
+    selecting: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    onDelete: (() -> Unit)?,
+    modifier: Modifier = Modifier,
+) {
+    var menu by remember { mutableStateOf(false) }
+    val container by animateColorAsState(
+        if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
+        label = "biliVideoSelected",
+    )
+    Row(
+        modifier
+            .fillMaxWidth()
+            .background(container)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        if (selecting) Checkbox(checked = selected, onCheckedChange = { onClick() })
+        else CoverImage(folder.coverUri, size = 64.dp)
+        Column(Modifier.padding(start = 12.dp).weight(1f)) {
+            Text(
+                folder.name,
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = if (selected) Int.MAX_VALUE else 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                artist?.ifBlank { null } ?: "UP 主未知",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 2.dp),
+            )
+            BadgeLine(
+                leading = listOf(BadgeItem("B站", LocalSourceColors.current.bilibili),
+                    BadgeItem("多P", MaterialTheme.colorScheme.secondary)),
+                tags = listOf(BadgeItem(folder.biliBvid.orEmpty(), MaterialTheme.colorScheme.onSurfaceVariant)),
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        }
+        if (!selecting && onDelete != null) Box {
+            IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "更多") }
+            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                DropdownMenuItem(text = { Text("从音频库移除") }, onClick = { menu = false; onDelete() })
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -280,7 +345,7 @@ private fun WorkPreviewRow(
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     onCache: (() -> Unit)?,
-    onDelete: () -> Unit,
+    onDelete: (() -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
     val facts = WorkFacts.fromJson(folder.workMeta) ?: WorkFacts(
@@ -347,7 +412,7 @@ private fun WorkPreviewRow(
                     if (onCache != null) {
                         DropdownMenuItem(text = { Text("缓存到本地") }, onClick = { onMenu(false); onCache() })
                     }
-                    DropdownMenuItem(text = { Text("从音频库移除") }, onClick = { onMenu(false); onDelete() })
+                    if (onDelete != null) DropdownMenuItem(text = { Text("从音频库移除") }, onClick = { onMenu(false); onDelete() })
                 }
             }
         }
@@ -367,7 +432,7 @@ internal fun TrackRow(
     onPlayNext: () -> Unit,
     onDownload: (() -> Unit)?,
     onDeleteDownloaded: (() -> Unit)?,
-    onDelete: () -> Unit,
+    onDelete: (() -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
     var menu by remember { mutableStateOf(false) }
@@ -434,7 +499,7 @@ internal fun TrackRow(
                             onClick = { menu = false; onDeleteDownloaded() },
                         )
                     }
-                    DropdownMenuItem(text = { Text("从音频库移除") }, onClick = { menu = false; onDelete() })
+                    if (onDelete != null) DropdownMenuItem(text = { Text("从音频库移除") }, onClick = { menu = false; onDelete() })
                 }
             }
         },
@@ -449,7 +514,7 @@ internal fun TrackRow(
 internal fun FileRow(
     file: LibraryFileEntity,
     onClick: () -> Unit,
-    onDelete: () -> Unit,
+    onDelete: (() -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
     var menu by remember { mutableStateOf(false) }
@@ -468,11 +533,13 @@ internal fun FileRow(
         supportingContent = { Text(label) },
         leadingContent = { Icon(icon, contentDescription = null) },
         trailingContent = {
-            IconButton(onClick = { menu = true }) {
-                Icon(Icons.Default.MoreVert, contentDescription = "更多")
-            }
-            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                DropdownMenuItem(text = { Text("从音频库移除") }, onClick = { menu = false; onDelete() })
+            if (onDelete != null) {
+                IconButton(onClick = { menu = true }) {
+                    Icon(Icons.Default.MoreVert, contentDescription = "更多")
+                }
+                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    DropdownMenuItem(text = { Text("从音频库移除") }, onClick = { menu = false; onDelete() })
+                }
             }
         },
         modifier = modifier.clickable(onClick = onClick),

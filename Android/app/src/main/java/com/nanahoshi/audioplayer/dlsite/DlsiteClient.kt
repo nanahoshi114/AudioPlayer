@@ -930,14 +930,11 @@ class DlsiteClient(private val credentials: CredentialStore) {
                             type.equals("text", ignoreCase = true) -> FileKind.TEXT
                             else -> previewKind(title.ifBlank { fileName })
                         }
-                        if (kind == FileKind.OTHER && fileExtension(fileName) !in setOf("jpg", "jpeg", "png", "webp", "gif", "txt")) {
-                            return null
-                        }
                         PlayEntry(
                             title = title,
                             children = emptyList(),
                             audio = null,
-                            preview = RemotePreview(title, url, kind, PLAY_REFERER, authed = true),
+                            preview = RemotePreview(title, url, kind, PLAY_REFERER, authed = true, workno = workno, fileKey = fileName),
                         )
                     }
                 }

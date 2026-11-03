@@ -12,6 +12,7 @@ sealed interface BiliSearchInput {
     data class Keyword(val text: String, val mode: BiliSearchMode) : BiliSearchInput
 }
 
+@kotlinx.serialization.Serializable
 data class BiliVideoHit(
     val bvid: String, val title: String, val author: String, val coverUrl: String,
     val durationMs: Long, val mid: Long = 0,

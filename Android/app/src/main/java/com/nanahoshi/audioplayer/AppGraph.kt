@@ -49,12 +49,14 @@ class AppGraph(app: Application) {
     val appearance = AppearancePreferences(app)
     val cache = CacheStore(app) { app.imageLoader }
     val library = LibraryRepository(app, db, bilibili, asmr, dlsite)
+    val biliImportRequests = com.nanahoshi.audioplayer.data.BiliImportRequests { library.biliLibrary.mode(it) }
+    val dlsiteDownloadRequests = com.nanahoshi.audioplayer.data.DlsiteDownloadRequests()
     val downloads = DownloadCenter(app, db, asmr, dlsite, bilibili, youtube, library)
     val subtitles = SubtitleSource(app, db, bilibili, asmr)
     val translator = TranslateCenter(app, db, credentials, subtitles)
     val senseVoice = SenseVoiceModelManager(app)
     val whisper = WhisperCenter(app, db, credentials, downloads, translator, senseVoice)
-    val player = PlayerClient(app, library)
+    val player = PlayerClient(app, library) { messages.value = it }
 }
 
 class AudioPlayerApplication : Application(), ImageLoaderFactory {

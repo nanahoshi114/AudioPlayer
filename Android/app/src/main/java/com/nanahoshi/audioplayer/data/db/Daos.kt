@@ -4,11 +4,18 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Update
 import com.nanahoshi.audioplayer.data.TrackSource
 import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface FolderDao {
+    @Query("SELECT * FROM folders WHERE biliBvid = :bvid LIMIT 1")
+    suspend fun findBiliVideo(bvid: String): FolderEntity?
+
+    @Update
+    suspend fun update(value: FolderEntity)
+
     @Query("SELECT * FROM folders WHERE parentId IS :parentId ORDER BY position ASC, name ASC")
     fun observeChildren(parentId: Long?): Flow<List<FolderEntity>>
 
@@ -63,6 +70,12 @@ interface FolderDao {
 
 @Dao
 interface TrackDao {
+    @Query("SELECT * FROM tracks WHERE bvid = :bvid ORDER BY page ASC, id ASC")
+    suspend fun forBvid(bvid: String): List<com.nanahoshi.audioplayer.data.db.TrackEntity>
+
+    @Update
+    suspend fun update(value: TrackEntity)
+
     @Query("SELECT * FROM tracks ORDER BY addedAt DESC")
     fun observeAll(): Flow<List<TrackEntity>>
 
@@ -144,6 +157,9 @@ interface TrackDao {
 
 @Dao
 interface LibraryFileDao {
+    @Update
+    suspend fun update(value: LibraryFileEntity)
+
     @Query("SELECT * FROM library_files WHERE folderId IS :folderId")
     fun observeIn(folderId: Long?): Flow<List<LibraryFileEntity>>
 
@@ -180,6 +196,23 @@ interface LibraryFileDao {
 
 @Dao
 interface DownloadDao {
+    @Query("UPDATE downloads SET biliImportPart = NULL WHERE source = 'BILIBILI' AND workKey = :bvid")
+    suspend fun clearBiliImportMetadata(bvid: String)
+
+    @Query("UPDATE downloads SET status = 'FAILED', error = :error WHERE id = :id AND status = 'RUNNING'")
+    suspend fun failRunning(id: Long, error: String)
+    @Query("SELECT * FROM downloads WHERE kind = 'DLSITE_ARCHIVE' AND workKey = :workno ORDER BY id DESC LIMIT 1")
+    suspend fun latestArchive(workno: String): DownloadEntity?
+
+    @Query("SELECT * FROM downloads WHERE kind = 'DLSITE_ARCHIVE' AND workKey = :workno AND status IN ('QUEUED', 'RUNNING') LIMIT 1")
+    suspend fun activeArchive(workno: String): DownloadEntity?
+
+    @Query("UPDATE downloads SET phase = :phase WHERE id = :id AND status = 'RUNNING'")
+    suspend fun setPhase(id: Long, phase: String)
+
+    @Query("UPDATE downloads SET status = 'FAILED', error = '已中止' WHERE id = :id AND kind = 'DLSITE_ARCHIVE' AND status IN ('QUEUED', 'RUNNING')")
+    suspend fun cancelArchive(id: Long): Int
+
     @Query("UPDATE downloads SET biliImportPart = :metadata WHERE id = :id AND source = 'BILIBILI'")
     suspend fun setBiliImportPart(id: Long, metadata: String)
 
@@ -261,6 +294,12 @@ interface DownloadDao {
 
 @Dao
 interface WhisperDao {
+    @Query("UPDATE whisper_jobs SET awaitDownloadId = NULL, awaitFileKey = NULL WHERE id = :id")
+    suspend fun clearAwaitDownload(id: Long)
+
+    @Query("UPDATE whisper_jobs SET awaitDownloadId = :downloadId, awaitFileKey = :fileKey WHERE id = :id")
+    suspend fun setAwaitDownload(id: Long, downloadId: Long, fileKey: String?)
+
     @Query("SELECT * FROM whisper_jobs ORDER BY id DESC")
     fun observe(): Flow<List<WhisperJobEntity>>
 
@@ -611,4 +650,50 @@ interface QueueDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun savePlayback(state: PlaybackStateEntity)
+}
+
+
+@Dao
+interface DlsiteOriginalDao {
+    @Query("SELECT * FROM dlsite_original_works WHERE workno = :workno")
+    suspend fun work(workno: String): DlsiteOriginalWorkEntity?
+
+    @Query("SELECT * FROM dlsite_original_works")
+    suspend fun works(): List<DlsiteOriginalWorkEntity>
+
+    @Query("SELECT * FROM dlsite_original_entries WHERE workno = :workno")
+    suspend fun entries(workno: String): List<DlsiteOriginalEntryEntity>
+
+    @Query("SELECT * FROM dlsite_original_entries")
+    suspend fun allEntries(): List<DlsiteOriginalEntryEntity>
+
+    @Query("SELECT * FROM dlsite_original_entries")
+    fun observeEntries(): Flow<List<DlsiteOriginalEntryEntity>>
+
+    @Query("SELECT * FROM dlsite_original_entries WHERE trackId = :trackId LIMIT 1")
+    suspend fun entryForTrack(trackId: Long): DlsiteOriginalEntryEntity?
+
+    @Query("SELECT * FROM dlsite_original_entries WHERE workno = :workno AND playFileKey = :key LIMIT 1")
+    suspend fun entryForPlay(workno: String, key: String): DlsiteOriginalEntryEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertWork(work: DlsiteOriginalWorkEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertEntries(entries: List<DlsiteOriginalEntryEntity>)
+
+    @Query("DELETE FROM dlsite_original_entries WHERE workno = :workno")
+    suspend fun deleteEntries(workno: String)
+}
+
+@Dao
+interface BiliImportDao {
+    @Query("SELECT * FROM bili_import_intents")
+    suspend fun all(): List<BiliImportIntentEntity>
+    @Query("SELECT * FROM bili_import_intents WHERE bvid = :bvid")
+    suspend fun get(bvid: String): BiliImportIntentEntity?
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun put(intent: BiliImportIntentEntity)
+    @Query("DELETE FROM bili_import_intents WHERE bvid = :bvid")
+    suspend fun delete(bvid: String)
 }

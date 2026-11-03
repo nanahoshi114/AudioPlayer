@@ -48,6 +48,7 @@ class YouTubeViewModel(app: Application) : AndroidViewModel(app) {
     val tracks = graph.db.tracks().observeAll()
     val downloads = graph.downloads.observe()
     private var request: Job? = null
+    var searchRevision by mutableStateOf(0L); private set
     private var generation = 0L
     init {
         viewModelScope.launch {
@@ -63,6 +64,7 @@ class YouTubeViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun cancelSearch() { generation++; request?.cancel(); request = null; loading = false }
     fun search(listId: String? = null) {
+        searchRevision++
         cancelSearch()
         val token = generation
         loading = true; error = null; partial = false; selected = emptySet(); videos = emptyList()
@@ -116,6 +118,7 @@ fun YouTubeBrowser(
     val stored = tracks.filter { it.source == TrackSource.YOUTUBE }.associateBy { it.youtubeVideoId }
     val active = jobs.filter { it.source == TrackSource.YOUTUBE.name && it.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING) }.map { it.workKey }.toSet()
     val listState = rememberLazyListState()
+    com.nanahoshi.audioplayer.ui.components.ResetOnNewSearch(listState, viewModel.searchRevision)
     LaunchedEffect(playlistId) { if (playlistId != null) viewModel.search(playlistId) }
     BackHandler(viewModel.selected.isNotEmpty()) { viewModel.clearSelection() }
     Column(Modifier.fillMaxSize()) {

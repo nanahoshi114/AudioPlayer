@@ -1,12 +1,21 @@
-# 交接
+# 项目开发指南
 
-Android 音频播放器，应用名「音频播放器」，包名 `com.nanahoshi.audioplayer`。听本机文件、B 站音轨、YouTube 独立音轨、asmr.one，以及用户自己在 DLsite 买过的作品。界面是 Jetpack Compose。仓库 `https://github.com/nanahoshi114/AudioPlayer.git`。
+## 1. 项目范围
 
-仓库根目录包含 `Android/`（Android 工程）和 `DesktopDemo/`（Windows 桌面播放器，WPF/.NET 8）。以下内容和路径均指 `Android/` 工程。
+本仓库包含两个工程：
 
-产品说明以当前代码为准。`Android/README.md` 和 `Android/docs/` 已按当前进度同步；以后改功能时，一并更新相关文档。
+- `Android/`：Android 音频播放器，应用名为「音频播放器」，包名为 `com.nanahoshi.audioplayer`，使用 Jetpack Compose。
+- `DesktopDemo/`：Windows 桌面播放器，使用 WPF / .NET 8。
 
-## 编译
+仓库地址：<https://github.com/nanahoshi114/AudioPlayer.git>。
+
+本指南主要适用于 Android 工程。下文源码目录相对于 `Android/app/src/main/java/com/nanahoshi/audioplayer/`；构建命令在 `Android/` 下执行。
+
+Android 支持本地音频、B 站音轨、YouTube 独立音轨、asmr.one 作品及用户在 DLsite 购买的内容。当前产品行为以代码为准，功能变更应同步更新 `Android/README.md` 及相关接口文档。本文件保留稳定的开发约束，不累积逐次构建结果或临时调试记录。
+
+## 2. 开发与交付
+
+### 2.1 构建与验证
 
 ```sh
 cd Android
@@ -14,122 +23,170 @@ export GRADLE_USER_HOME="$HOME/.gradle"
 ./gradlew :app:compileDebugKotlin --no-configuration-cache
 ```
 
-需要本机 Gradle 目录和网络时，命令在沙箱外跑。单测同样加 `--tests`。单元测试不要调用 Android 的 `org.json`。
+- Kotlin 2.2.10，AGP 9.4.1，compileSdk / targetSdk 37，minSdk 24，Java 11。
+- 需要访问本机 Gradle 缓存或网络时，在沙箱外执行命令。定向单测使用 `--tests`，并保留 `--no-configuration-cache`。
+- 单元测试不得调用 Android 的 `org.json`，解析测试使用适合 JVM 的实现。
+- 当前环境存在 JDK 25 回退 Kotlin JVM 24、加密偏好 API 弃用及 `android.disallowKotlinSourceSets` 提示。除非任务涉及相关问题，否则无需为消除提示调整依赖或配置。
+- 真机为 Realme RMX5010，沙箱内无法通过 adb 访问。安装应用须有用户明确授权；设备测试的编译通过与实际运行应分别说明。
 
-Kotlin 2.2.10，AGP 9.4.1，compileSdk / targetSdk 37，minSdk 24，Java 11。本机 JDK 25 时，Kotlin 会退回 JVM 24，这是原有提示。`EncryptedSharedPreferences` / `MasterKey` 的弃用警告、`android.disallowKotlinSourceSets` 也是原有提示。不要为了清掉这些去改依赖或配置。
+### 2.2 版本控制与安全
 
-真机是 Realme RMX5010。adb 在沙箱里看不到设备。用户没要求时不要安装。
+- 未经用户明确要求，不执行提交或推送。提交说明使用简短中文，前缀采用 `feats:`、`fix:` 或 `docs:`。
+- 正式 APK 由 Android Studio 签名，输出至 `Android/app/release/app-release.apk`。`Android/app/build/` 和 `Android/app/release/` 均不纳入版本控制。
+- 口令、Cookie、SESSDATA、refresh token 等凭证不得写入日志、提交说明或文档。错误信息不得泄露凭证或完整临时媒体地址。
 
-正式包由 Android Studio 在 `Android/` 工程里签到 `Android/app/release/app-release.apk`。`Android/app/build` 和 `Android/app/release` 都不要提交。
+## 3. 文档与源码索引
 
-## 文档
+### 3.1 文档
 
-- `Android/README.md`：给用户看的功能说明。
-- `Android/docs/bilibili-api.md`、`Android/docs/asmr-one-api.md`、`Android/docs/dlsite-api.md`、`Android/docs/whisper-api.md`：接口和播放器的调用方式。
-- `Android/docs/youtube-api.md`：Android / DesktopDemo 的 YouTube 调用方式、验证限制，以及 2026-10-27 的只读调查。
+- `Android/README.md`：用户功能说明。
+- `Android/docs/bilibili-api.md`：B 站搜索、投稿、播放、导入和下载。
+- `Android/docs/youtube-api.md`：Android / DesktopDemo 的 YouTube 实现及验证限制。
+- `Android/docs/asmr-one-api.md`、`Android/docs/dlsite-api.md`：作品接口、登录与文件读取。
+- `Android/docs/whisper-api.md`：听写接口与本机模型。
+- `Android/docs/update-api.md`：更新检查与发布约定。
 
-## 代码地图
+### 3.2 源码
 
-下表位置相对 `Android/app/src/main/java/com/nanahoshi/audioplayer`。
+- `ui/components`：通用顶栏、多选栏、来源标签和空状态。
+- `ui/library`、`ui/playlist`：音频库、作品页、文件预览和播放列表。
+- `ui/player`、`playback`：播放界面、队列、播放服务及字幕读取。
+- `ui/asmr`：在线搜索、作品详情、「我的」及已购买列表。
+- `bilibili`、`ui/bilibili`：搜索、投稿、分 P 操作、播放地址、收藏夹、字幕及登录。
+- `youtube`、`ui/youtube`：搜索、列表、音轨播放下载、签名脚本及 Cookie 管理。
+- `asmr`、`dlsite`：作品元数据、远端文件和授权。
+- `ui/importing`：剪贴板预览及确认导入。
+- `ui/settings`、`ui/theme`：设置、外观、模型配置及更新检查。
+- `ui/download`、`data`：任务管理、文件管理、凭证、听写和翻译。
+- `data/db`：Room 实体、查询与迁移。
+- `AppGraph.kt`：在 `Application.onCreate` 中按依赖顺序组装服务。
 
-| 位置 | 做什么 |
-| --- | --- |
-| `ui/components` | 顶栏、多选栏、来源标签、空状态、封面 |
-| `ui/library` | 音频库、作品页、收藏夹导入、图片和文本预览 |
-| `ui/playlist` | 播放列表 |
-| `ui/player` | 正在播放、底部小条、字幕按钮 |
-| `ui/asmr` | 在线搜索、作品详情、我的、已购买列表 |
-| `ui/settings` | 设置、外观、听写和翻译、清理缓存、关于与检查更新 |
-| `ui/theme` | 配色、主题色生成、封面取色、动效参数 |
-| `ui/download` | 进行中的下载、听写、翻译；已落盘文件的下载管理 |
-| `playback` | 播放服务、在线音频、字幕读取 |
-| `bilibili`、`ui/bilibili` | 视频和 UP 主搜索、投稿、分 P 操作、播放地址、收藏夹、字幕、扫码登录 |
-| `youtube`、`ui/youtube` | 搜索、列表、独立音轨播放下载、签名脚本与 Cookie |
-| `asmr` | asmr.one 作品、搜索、音轨地址 |
-| `dlsite` | 商店、商品页、登录、已购 Play、试听 |
-| `data` | 库、下载、已落盘文件、凭证、听写、翻译 |
-| `data/db` | Room，当前第 14 版 |
-| `AppGraph.kt` | 在 `Application.onCreate` 里组装。顺序是 db、credentials、bilibili、youtube、asmr、dlsite、librarySort、appearance、cache、library、downloads、subtitles、translator、senseVoice、whisper、player |
+## 4. 数据与文件约束
 
-底栏五页：音频库、播放列表、在线搜索、我的、设置。作品页和作品详情打开时底栏和播放条留着，顶部标题栏隐藏。已购买、收藏夹、正在播放、下载、下载管理、听写和翻译、清理缓存、关于、文件预览是单独一页，顶栏和底栏都隐藏。
+### 4.1 数据库
 
-## 不要改坏
+- `AppDatabase` 当前版本为 **16**，`exportSchema = false`。新安装按实体建表，升级使用显式 `MIGRATION_*`；不支持数据库降级。
+- 新增可空列时，迁移中的 `ALTER TABLE ... ADD COLUMN` 不设置 `DEFAULT`，实体字段不设置 `@ColumnInfo(defaultValue)`，确保新装与升级结构一致。现有 `endpoint`、`translatedAt`、`translateStatus`、`skipTranslate`、`model`、`biliImportPart` 等列遵循此规则。
+- `skipTranslate` 为 `null` 或 `false` 的旧任务，听写完成后仍执行翻译。旧任务 `model` 为空时保留原有按地址匹配的兼容逻辑。
+- 修改曲目、作品、下载、队列或播放列表时，应保留曲目身份及字幕关联；文件复用不得通过删除并重建曲目实现。
 
-- 还没保存进库的队列项用 `PlayerClient.playQueueItem`。`playTrack` 只在 `track.id > 0` 时追加。
-- DLsite 试听行的 source 是 `DLSITE`，但 `fileKey` 为空。空 `fileKey` 不要带上 DLsite 登录。
-- DLsite 登录走 WebView（`login.dlsite.com` 会拦 OkHttp），登录后读取 Cookie，用 `mergeDlsiteCookies` 去掉 `cf_` / `__cf` / `_cfuvid` 再保存；退出时清 WebView Cookie。不要把账号密码表单恢复成主登录路径。
-- 作品页的滚动分两层：外层作品信息和文件框一起滚，文件框内的 `LazyColumn` 自己滚。`WorkPageScrollConnection` 保证向下翻先滚外层、外层到底才滚文件区，向上翻先滚文件区、文件区到顶才回外层；`文件`标题、来源切换、面包屑不能放进文件 LazyColumn。进入子文件夹只重建内层状态，外层不重置。作品页的列表、播放队列、多选顺序固定 `LibrarySort.NAME`。
-- 作品页是单独路由 `library/work/{folderId}`，用自己的 `LibraryViewModel` 实例，不和音频库列表共用。作品同时有 DLsite 和 asmr.one 两套文件时，作品页按 `workFileSource` 切换显示，点一首播放也只把该来源的曲目放进队列，「缓存到本地」也只缓存该来源。缓存时用缓存的购买信息：已购买（或已有 Play 文件）且 asmr.one 也有曲目，就弹窗选来源；选 DLsite 但还没有 Play 文件时先补读 Play 文件。没弹窗时取当前来源，在作品外面发起时按 Play 优先取一套。要下载的音频里，同一文件夹中前缀相同、只差扩展名的，按扩展名组合弹窗问保留哪种，其余不下载，没有冲突的照常下载（`findFormatConflicts`）；普通文件夹仍然是整个文件夹一起播放和下载。作品里已经有 Play 文件时，打开直接显示切换，不再查 DLsite 的购买状态；没有 Play 文件时才在后台确认购买状态，买过才显示切换，不能拖住打开。返回在子文件夹里先上一级，到作品根再退出，不能用 `up()` 越过作品根。
-- 队列弹层禁用 Material3 的滑动手势（`sheetGesturesEnabled = false`，不显示默认把手），关闭走标题栏按钮、遮罩或返回键；列表要保留拖动排序和滚动。
-- 字幕按钮只在字幕已就绪、当前没有句子、且不是「没有听出人声」时出现。句子之间的空隙不要把按钮露出来。
-- B站字幕列表需要有效的登录 Cookie；未登录或登录失效时接口仍返回 code 0，但 `subtitles` 为空、`login_mid` 为 0，不要当成「没有字幕」。播放页要提示重新登录，并保留生成字幕的入口。列表或正文为空时（限流）换一次新的播放信息地址重试。从下载管理播放没入库的 B 站缓存音轨时，队列项没有 trackId，用 `queue_items.workno` / `fileKey` 当 bvid / cid，不要要求 trackId。
-- 音频库作品行和在线搜索卡片的标签用 `BadgeLine`：RJ 号固定显示，标签按宽度放，放不下的收进 `+N`；`LabelBadge` 保持单行，不要退回 `Row` + 可换行 `Text`，否则最后一个标签会被挤成竖排。
-- 字幕全文列表点一行跳到该句起始，列表留在原页。正在播放页上的当前句仍用来打开全文列表。当前句颜色：深色 `0xFF90CAF9`，浅色 `0xFF1565C0`。深浅按应用实际主题（`LocalDarkTheme`）判断，不要直接用 `isSystemInDarkTheme()`，否则「外观」里强制深色或浅色时会错。
-- 「外观」存在 `AppearancePreferences`（SharedPreferences `appearance`）：主题模式（跟随系统/浅色/深色）和主题色来源（系统取色/跟随封面/预设）。系统取色是默认；Android 12 以下退回默认靛蓝。封面取色只在选了「跟随封面」时才加载封面，取不出彩色时保持上一次的颜色。预设里的「靛蓝」用手调的默认配色，其余预设由 `seedColorScheme` 生成。状态栏和导航栏图标颜色跟着实际主题走，不跟系统。
-- 听写结果写在 `filesDir/subtitles/{sha256}.json`。同一文件内容、同一听写地址、同一模型、字幕文件还在时，不重新上传。换地址或换模型会再跑并覆盖。旧记录没有模型或模型已删除时，不再按地址匹配，会重新生成。
-- 「生成字幕」设 `skipTranslate = true`，不请求翻译。「生成字幕和翻译」才在听写完成后翻译。重试沿用原来的 `skipTranslate`。
-- 手动「生成翻译」跑在 `TranslateCenter` 自己的协程里。离开正在播放页只取消等待，不取消这次翻译。
-- 删除生成字幕时，删生成文件、已完成的听写记录和翻译记录。不要删进行中的听写，不要删同目录里原有的 lrc/srt，也不要删远端字幕。
-- 「设置」里的下载管理列出已经在手机上的 asmr.one / DLsite 音频、缓存的 B 站音轨、这些音频的生成字幕，以及该作品下载目录里的 lrc/srt/vtt。每一行带上文件大小。`filesDir/subtitles` 里其余生成字幕也会列出来。生成字幕的列表名是音频名加上 `.json`。顶栏下载图标仍是进行中的任务。删音频时清掉本地文件和完成的下载记录，作品留在库里；同时删这首的生成字幕。不删进行中的听写，也不删下载目录里原有的 lrc/srt。只删字幕行时不删音频。缓存 B 站只保存音轨，播已经缓存的曲目时读本地文件。缓存 B 站音轨时把视频自带的字幕一起写到 `filesDir/bilibili/{bvid}/{cid}.json`，播放优先读本地字幕；删音轨时一起删。
-- 清理缓存只统计并删除 `cacheDir`（封面图片等临时缓存）。不删除 `filesDir` 里的下载音频、B 站缓存音轨、字幕和听写暂存。默认上限 200MB。超过上限后按文件修改时间从早到晚删，直到回到上限以内；Coil 的 `journal*` 不删。手动「清理缓存」会清空这份临时缓存。
-- 音频库里还不是作品的本地文件夹，可以用「识别为作品」对照文件树。已在 DLsite 购买且能连上时，先对照 DLsite 的文件，对上提示「DLsite匹配成功」，曲目标成 DLsite。没买过、DLsite 对不上，或 DLsite 连不上，再对照 asmr.one，对上提示「asmr.one匹配成功」。DLsite 连不上且 asmr.one 也对不上，提示「DLsite未连接且asmr.one匹配失败」。两边都对不上，提示「DLsite/asmr.one均匹配失败」。本地可以少文件或文件夹，不能多出作品里没有的。对上以后曲目 id 和本地路径保持不变，已经生成的字幕还在。作品已经在库里时，作品页「识别本地文件夹」（`recognizeLocalTree`）用系统文件夹选择器选目录，按当前来源（`workFileSource`）对照这一套的曲目，规则相同；对上的曲目只 `updateLocalUri` 成本地 `content:` URI，不新建曲目、不删库里原有的本地文件夹。已下载到 App 目录（`/` 路径）的曲目保留下载副本。同一个本地文件已经挂在别的曲目上时跳过并在提示里说明，不覆盖、不撞唯一索引。
-- 「删除已下载的文件」不分来源（ASMR / DLSITE / B 站）。`localUri` 是 App 目录路径时删文件；是 `content:` / `file:`（识别挂上的）时只 `clearLocalUri`，不删磁盘文件、不改文件夹，曲目回到在线曲目。LOCAL 曲目不动。曲目行菜单对识别挂上的曲目显示「取消识别」。
-- 音频库多选时，只要选中了作品（`asmrSourceId` 非空的文件夹），顶栏不显示下一个播放、加到末尾、下载、加入播放列表，只留删除已下载的文件和移除。播放列表详情页没有「加入音频」，只能从音频库多选加入。
-- 音频库搜索匹配文件夹名、作品标签（`workMeta` 里的 tags）、曲目名和文件名；纯数字还匹配作品编号。作品内部的子文件夹、曲目、文件都归到最近的作品根（`workRootOf`），一个作品只出现一次。
-- 中止只停手机上的这次 HTTP。自部署听写服务（Qwen3-ASR）没有取消接口；SenseVoiceSmall 只在片段之间响应取消，不与 JNI 解码并发调 release。听写还在等下载时，不要把音频下载一起取消。错误文案恰好是「已中止」时，下载列表不要显示「查看返回」。
-- 听写按保存的模型选接口，现有三个：`qwen-audio-3.1-asr`、`Qwen3-ASR`、`SenseVoiceSmall`。每个模型各自保存地址和密钥；切换下拉只显示该模型已保存的内容，保存和清除也只作用于当前模型。进行中的任务继续用它自己的模型密钥。`qwen-audio-3.1-asr` 是线上模型：界面不显示地址，只保存 API Key；请求固定走 `https://dashscope.aliyuncs.com`，不论时长都先临时上传再轮询，模型名 `qwen-audio-3.1-asr-flash-filetrans`，超过 1GB 不上传。`Qwen3-ASR` 地址不能空：先读取服务上的模型名，再请求 `/v1/audio/transcriptions`，日语；返回分段时间则按段写字幕，只有整段文字时写成覆盖整首时长的一条。`SenseVoiceSmall` 完全在本机运行（sherpa-onnx，vendored 的 `com.k2fsa.sherpa.onnx` Kotlin API 和 `Android/app/src/main/jniLibs/arm64-v8a/` 的 .so，只带 arm64），没有地址和口令，任务 endpoint 存 null（双方 null 视为同一服务，去重成立）；模型文件在 `filesDir/sense-voice/`，由 `SenseVoiceModelManager` 从 GitHub Releases 下载（tar.bz2 边下边解，不落压缩包），只认 int8-2024-07-17 的多语种包（版本记在 `version.txt`，不符就在启动时删掉重下）；2025-09-09 的包实为 WSYue-ASR 粤语模型，日语只出汉字，不要换回去；VAD 模型 `silero_vad.onnx` 打包在 assets；`hasWhisper` 对它恒为 false，播放页旁路走 `SenseVoiceModelManager.isReady()`；长音频用 Silero VAD 按静音切 ≤28 秒分段（MediaExtractor + MediaCodec 流式解码 16kHz 单声道），token 时间戳加段偏移拼回整首。旧偏好里存着已删模型（whisper-1 / 本地部署 / 本机任务接口）时一次性迁移成 `qwen-audio-3.1-asr`，不伪造 API Key；队列里旧模型的任务直接失败并提示已移除。保存时地址为空仍保存所选模型。保存听写地址时不要自动补 `/v1`。
-- 翻译只用千问AI平台和 DeepSeek 两个预设平台，地址固定，不再让用户填写，也不再补 `/v1`。口令和模型名按平台分开保存。模型名没填时，千问用 `qwen3.8-flash`，DeepSeek 用 `deepseek-flash`。深度思考关闭时千问发 `enable_thinking: false`，DeepSeek 发 `thinking.type: disabled`。打开后千问只发 `enable_thinking` 和 `reasoning_effort`（低 `low`、中 `medium`、高 `xhigh`），不要同时发 `thinking_budget`。DeepSeek 的 `reasoning_effort` 放在请求顶层（高 `high`、最高 `max`），不要放进 `thinking`。思考过程在 `reasoning_content`，不要写进字幕。
-- 润色失败保留原译文，不把任务记成翻译失败。自动润色发生在译文已经写入之后。手动「润色」不进下载列表，跑在 `TranslateCenter` 自己的协程里；离开正在播放页只取消等待，不取消这次润色。
-- 本地复制进 `filesDir/whisper-src/` 的文件名没有后缀。上传时按文件头补 `mp3` / `flac` / `m4a` / `aac` / `wav` / `ogg`，不要改磁盘上的暂存文件名。只有 `content:` URI 和重试时缺文件才复制；任务进行中不要清掉这份暂存，任务结束、取消或重试后清掉没有被任务引用的暂存文件。重试优先用任务原来的文件，其次从曲目本地文件再复制。SenseVoiceSmall 直接读本地文件（MediaExtractor 走真实路径），不走上传，也不用这份暂存。
-- targetSdk 37。听写地址是局域网、本机或 `.local` 时（只有 Qwen3-ASR 可能出现；SenseVoiceSmall 离线，公网和它都不申请），Android 17 要在请求前申请 `ACCESS_LOCAL_NETWORK`。判断用 `isLocalNetworkAddress`，字面 IP 才解析，不要为了判断去做 DNS。翻译走两个公网平台，不申请本地网络。
-- 文案不要用「家里电脑」。翻译说明只写通用大模型，不要点名某个专用翻译模型。
-- 不要把口令、Cookie、SESSDATA、refresh token 写进日志、提交说明或文档。
+### 4.2 下载与删除
 
+- 下载任务页使用「音频 / 字幕」分段选择，分别保留位置；音频包含完整包，字幕包含听写和翻译。
+- 下载管理展示已落盘的在线音频、B 站缓存音轨、生成字幕及作品下载目录中的 `lrc/srt/vtt`，并显示文件大小；顶栏下载入口展示进行中的任务。
+- 在线曲目优先播放有效的本地副本。删除已下载文件时，保留在线曲目，清理完成的下载记录及对应生成字幕。
+- DLsite 完整原始包使用独立作品任务和原始目录清单；下载、解压和事务发布全部成功后才替换本地关联并删除压缩包，失败不影响已有副本、不自动降级为 Play 音轨。移除音频库内容不连带删除原始清单身份或磁盘下载。
+- 原始文件按作品号和完整相对路径关联，保留匹配曲目编号、Play 身份及字幕关系；不得只按文件名前缀或去掉扩展名合并不同音轨。原包独有曲目不得伪造 Play 文件身份，缺少本地文件时仅可重新下载完整包。
+- `localUri` 为 App 目录绝对路径时可删除文件；为识别关联的 `content:` 或 `file:` URI 时仅清除关联，保留用户文件及文件夹。LOCAL 曲目不适用此删除操作。
+- 删除生成字幕时，清理生成文件及已完成的听写、翻译记录；保留进行中的听写、原有字幕文件和远端字幕。仅删除字幕不得连带删除音频。
+- 未知文件通过 `FileProvider` 或可转授的 content URI 在外部打开；远端文件暂存于 `cacheDir/external-open`，不入库、不传递登录凭证。暂存目录在下载及当前预览页使用期间受保护，退出后参与缓存清理；失败和取消清理本次半成品。
+- 「清理缓存」仅处理 `cacheDir`，不处理 `filesDir` 中的下载、字幕或听写暂存。默认上限 200 MB，自动清理按修改时间从早到晚执行，并保留 Coil 的 `journal*`。
 
+## 5. 界面与播放
 
-## YouTube
+### 5.1 导航与通用行为
 
-- 在线搜索切换「作品 / B站 / YouTube」；「我的」粘贴 Cookie、读取 LL/WL，不做网页登录和自动续期。账号变化取消旧列表请求并清空结果。
-- `TrackSource.YOUTUBE`，视频编号存 `tracks.youtubeVideoId`（可空唯一索引，12→13 无 DEFAULT）；未入库队列用 `workno` 存视频编号、`fileKey=audio`、`remoteUrl` 存稳定观看页地址。临时媒体地址不落库。
-- 下载只选独立 `audio/mp4`，不取带视频兜底、WebM/Opus。完成后在事务中自动入库并关联下载记录，同视频复用原曲目。音轨在 `filesDir/youtube/{videoId}/audio.m4a`，每个 HTTP 请求最多 1 MiB，校验 Content-Range 后拼接；断流最多重试当前段两次，保留完成的段。不要退回大文件 `Range: bytes=0-` 的整段读取：真机当前代理下约 8–12 KB/s，1 MiB 分段约 1 MB/s。下载中止清本次 `.part`，不能删重试的暂存。
-- 签名组件复用桌面端 cjs，在隐藏 WebView 内适配输入输出；必须隔离 `globalThis.location`，禁止联网、文件访问和 Java 桥，不触碰 DLsite 的全局 Cookie。媒体 CDN 不带用户登录 Cookie。没有 PO Token；2026-11-01 主机匿名样例要求登录/验证，但真机当前代理下 `GvSm3Q8qnDo` 匿名解析成功，分段修复后完整下载 117,270,266 字节并播放。不能以单一网络结果推断所有视频。
-- 队列、播放列表、下载管理、删除已下载文件和生成字幕都要保留 YouTube 视频身份。删除缓存只去本地副本和生成字幕，保留在线曲目；不请求 YouTube 原生字幕。
+- 底栏包括音频库、播放列表、在线搜索、我的、设置。作品页和作品详情保留底栏及播放条，隐藏主页面顶栏；其他独立功能页隐藏主页面顶栏和底栏。
+- 未入库内容使用 `PlayerClient.playQueueItem`；仅对 `track.id > 0` 的已入库曲目使用 `playTrack` 追加逻辑。
+- 队列弹层使用 `sheetGesturesEnabled = false`，隐藏默认把手，通过关闭按钮、遮罩或返回键关闭；保留列表滚动及拖动排序。
+- 作品和搜索卡片的标签使用 `BadgeLine`，RJ 号固定显示，超出宽度的标签收起为 `+N`；`LabelBadge` 保持单行。
+- `BadgeLine` 使用 `BoxWithConstraints`，不得直接放入 Material3 `ListItem` 等会查询固有尺寸的内容槽；带此标签的列表卡片使用普通 `Row` / `Column` 布局。
+- 主题与系统栏图标使用应用实际主题状态；需要判断深浅时使用 `LocalDarkTheme`。封面取色仅在选择该模式后执行，取色失败时保留已有颜色。
 
-## 剪贴板导入
+### 5.2 音频库与作品页
 
-- `MainActivity` 每次进入前台只在 RESUMED 且窗口有焦点后读一次剪贴板，不在后台或焦点弹窗反复读取。`ClipboardImportViewModel` 属于 Activity，旋转时保留预览和进行中的导入。
-- 仅识别 BV、RJ、YouTube 单个视频链接／分享文字；明确视频链接优先于分享标题里的编号。只解析文本和 http(s) URI，不用 `coerceToText` 打开 content URI，不执行剪贴板 Intent，不写原文或异常原文到日志。
-- `ClipboardImportController` 先预览标题封面，确认后才入库根目录，不自动播放或下载。B 站多 P 默认全选可取消；RJ 沿用 asmr.one，YouTube 用 `videoInfo`（官方 oEmbed，不解析媒体／执行脚本）。取消和新候选通过代号隔离旧响应；导入中不允许重复确认或替换条目。
-- SharedPreferences `clipboard_import` 只记候选身份 + 系统复制时间的 SHA-256 摘要，处理同一份内容后不重复提示。复制时间 API 26 起可用；更旧系统仅按身份去重。不要清空用户剪贴板。数据库仍为 14。
-- 2026-11-01：138 项定向单测、Debug 和设备测试 APK 构建通过。剪贴板 ClipData 与确认弹窗设备用例已补充，但未运行、未安装手机；系统实际剪贴板读取和进入前台时序仍需真机验收。
+- 作品页路由为 `library/work/{folderId}`，使用独立的 `LibraryViewModel`，不复用音频库列表实例。
+- 音频库作品页和在线详情共用 `WorkFileBrowser` 两层布局；在线详情保留图库、试听和原有操作，图库可打开缩放大图。
+- 作品页使用两层滚动：向下先滚外层，外层到底后滚文件列表；向上先滚文件列表，到顶后滚外层。`WorkPageScrollConnection` 负责协调，文件标题、来源切换和路径栏位于文件 `LazyColumn` 外。进入子文件夹仅重置内层位置。
+- 作品页的列表、播放队列及多选顺序固定为 `LibrarySort.NAME`。路径栏始终显示，以「根目录」为起点；返回操作逐层上移，到作品根后退出，不越过作品根。
+- 同一作品含 DLsite 和 asmr.one 两套文件时，显示、播放和作品页缓存均以 `workFileSource` 为准。已有 Play 文件时直接允许来源切换；否则在后台确认购买状态，不阻塞页面打开。
+- 缓存来源选择使用已有购买信息：已购买或已有 Play 文件，且 asmr.one 也有曲目时，先选择来源。无需选择时，作品页使用当前来源，作品页外优先使用 DLsite。选定 DLsite 后直接下载整个作品的原始压缩包并自动解压，不以已有 Play 文件或单曲本地副本代替完整包。
+- asmr.one 缓存同目录同名前缀、仅扩展名不同的音频时，使用 `findFormatConflicts` 确认格式组合；无冲突文件正常处理。DLsite 完整包不做格式筛选，保留全部原始文件。普通文件夹维持整目录播放和下载行为。
+- 作品内部的曲目、文件及子文件夹禁止单独从音频库移除；所有入口共用作品归属判断，仓储事务再次校验。整部作品或包含整部作品的普通父目录仍可移除，批量操作包含未被整作品覆盖的受限条目时整体拒绝。删除下载副本、播放列表及队列移除不受此限制。
+- 多选中包含作品文件夹时，仅提供删除已下载文件和移除操作。播放列表从音频库多选添加曲目。
+- 普通文件夹内隐藏来源筛选，显示和递归搜索不受根目录来源限制；范围为当前目录及后代，不返回范围外祖先、不触发在线 RJ 提示，返回根目录恢复筛选。导入菜单不提供新建文件夹，内部目录创建保留。
+- 音频库搜索匹配文件夹名、作品标签、曲目名和文件名；纯数字同时匹配作品编号。作品内部结果按 `workRootOf` 归并至最近作品根，避免重复展示作品。
 
-## B 站搜索和导入
+### 5.3 本地文件识别
 
-- 音频库「导入在线音频」只切换到在线搜索，恢复来源与页面状态，不携带当前文件夹；在线保存统一放根目录。不要恢复已移除的 BV/RJ 输入弹窗。
-- B 站有「视频 / UP主」搜索；数字在视频模式是关键词、在 UP 主模式是 UID。BV／主页链接优先识别。分页失败保留已读内容和页码，中止后不得自动续读；旧请求不能覆盖新查询。
-- 点视频不入库；多 P 播放单选，保存／下载多选，批量操作汇总后确认。未入库播放用远端队列，`workno=bvid`、`fileKey=cid`、稳定观看链接，MediaItem 转成 B 站 DASH 音轨，不直接播放观看页。
-- 搜索下载调用 `enqueueBili(parts, autoImport = true)`；默认 false，收藏夹缓存不变。`downloads.biliImportPart` 保存可空的分 P 入库元数据，13→14 不设 DEFAULT；正在运行的旧缓存任务可追加该意图，完成时必须重新读取。成功才在事务内复用／保存曲目并关联下载，失败不新增曲目，已有曲目不改文件夹。
-- [Android/docs/bilibili-api.md](Android/docs/bilibili-api.md) 记录接口、分页及验证限制。投稿接口主机匿名探测曾返回 HTTP 412，不能显示成“没有投稿”。
+- 普通本地文件夹识别为作品时，优先匹配已购买且可访问的 DLsite 文件，失败后匹配 asmr.one；应区分连接失败与内容不匹配。
+- 本地目录可缺少作品文件，但不得包含作品文件树之外的内容。识别成功应保留曲目编号、本地路径和字幕关联。
+- 已入库作品使用 `recognizeLocalTree`，按当前 `workFileSource` 匹配系统选择的目录，仅更新匹配曲目的 `localUri`，不新建曲目或删除原文件夹。
+- 已下载至 App 目录的曲目保留下载副本；同一本地文件已关联其他曲目时跳过并说明，避免覆盖关联或违反唯一索引。
 
-## B 站登录
+## 6. 在线来源与导入
 
-扫码登录把 Cookie 和 refresh token 存进加密偏好。大约每 20 小时检查一次，B 站要求更新时换新 Cookie，并确认旧 token 作废。粘贴 SESSDATA 或整段 Cookie 不会自动更新；若内容和已保存的不同，会清掉 refresh token。
+### 6.1 在线搜索与 B 站
 
-文字框在「SESSDATA登录」弹窗里，没点保存之前不参与请求。已经扫码登录又改了文字再保存，必须先让用户确认。`bili_ticket` 和 buvid 会单独更新，它们不是登录身份。
+- 三个搜索来源提交新查询（包括相同条件）、改变筛选或排序时重置分页与列表位置，作品搜索同时展开折叠栏；追加分页、切来源和详情返回保留位置，旧响应不得覆盖新查询。
+- 在线搜索来源顺序为「作品 / B站 / YouTube」，分别保留输入、结果及滚动位置。音频库「导入在线音频」仅切换至在线搜索并恢复状态；在线保存统一放入库根目录。
+- B 站提供视频和 UP 主模式。纯数字在视频模式中为关键词，在 UP 主模式中为 UID；明确的 BV 或主页链接优先识别。
+- 分页失败保留已加载内容和页码，中止后不自动续读；取消旧请求并阻止旧响应覆盖新查询。访问受限应显示错误，不作为空结果处理。
+- 点视频只播放所选 P，不自动入库。所有 B站入库入口共用多 P 方式选择：分开导入按勾选保存，统一导入保存全部 P 为一个带「多P」标签的视频项。分 P 页面按 page 排序并支持多选，禁止部分移除；整组移除允许。
+- 未入库 B 站队列以 `workno=bvid`、`fileKey=cid` 保存身份，使用稳定观看页链接恢复；播放时解析 DASH 音轨，不将观看页当作媒体。
+- 搜索下载使用 `enqueueBiliImports`，持久化每 BV 的批次和入库请求；统一下载等待全部 P 有效后事务发布。`enqueueBili` 默认不入库，保留纯缓存语义。`biliImportPart` 兼容旧 BiliPart JSON 和含批次身份的元数据，不保存媒体临时地址。
+- B站视频分组使用独立的 `folders.biliBvid` 唯一标识，不复用 asmr 字段；15→16 添加可空列（无 DEFAULT）及 `bili_import_intents`。转换先迁移全部既有曲目，再移除空分组，保留身份与关联。新的保存、转换或移除使旧批次失效，下载回调不得恢复过时分组。
+- 已有下载任务可补充自动入库意图，完成时须重新读取任务信息。成功后在事务中复用或保存曲目、关联下载并登记完成；失败不新增曲目；只有用户确认组织方式转换时才调整既有曲目归属。
+- B 站缓存仅保存音轨，视频字幕写入 `filesDir/bilibili/{bvid}/{cid}.json`。播放优先使用本地字幕，删除音轨时同时删除该缓存字幕。
+- B 站字幕需要有效登录。`code = 0` 且字幕为空、`login_mid = 0` 时应提示重新登录，并保留生成字幕入口；列表或正文因限流为空时，刷新播放信息后最多重试一次。
+- 从下载管理播放未入库 B 站音轨时，以队列的 `workno` 和 `fileKey` 获取身份，不依赖 `trackId`。
 
-## 关于和检查更新
+### 6.2 登录与授权
 
-- 「设置 → 关于」从 PackageManager 读取实际安装包版本名和构建号，不在界面写死版本，也不为显示版本而改构建版本。
-- `AppUpdateClient` 用独立匿名 OkHttp 请求固定仓库的 `/releases/latest`，只读 JSON；要求正式版且已有 uploaded APK。版本按数字段比较（v 前缀、缺省零、预发布和构建标识），未知版本不猜测，保留发布页入口。本地版本更高不能提示降级。
-- 只在用户点击时检查，不自动检查、下载或安装。外部浏览器打开固定仓库的全部发布列表或对应 tag 页；不得用附件下载 URL、WebView、DownloadCenter 或安装权限代替。`browser.invalid` 仅用于 PackageManager 选浏览器，不请求该地址。接口与发布约定见 `Android/docs/update-api.md`。
-- 2026-11-02：真实 latest API 返回 v1.1，本地工程 1.2 应显示本机版本更高；146 项定向单测和两份 Debug APK 构建通过。About 设备用例只编译，浏览器往返与真实设备交互尚未运行，本轮未安装手机。
+- B 站扫码登录将 Cookie 和 refresh token 存入加密偏好，约每 20 小时检查更新需求；刷新完成后确认旧 token 作废。
+- 粘贴 SESSDATA 或 Cookie 不提供自动续期；保存内容改变时清除 refresh token。输入在保存前不参与请求，替换已有扫码身份前需用户确认。`bili_ticket` 和 buvid 不视为登录身份。
+- DLsite 登录使用 WebView。登录后通过 `mergeDlsiteCookies` 过滤 `cf_`、`__cf`、`_cfuvid` 等条目后保存，退出时清理 WebView Cookie。
+- DLsite 试听虽使用 `DLSITE` 来源，但 `fileKey` 为空；此类请求不携带 DLsite 登录凭证。
+- DLsite 部分下载及听写前置下载先选择完整原始包、Play 部分文件或取消；试听除外。原始包使用独立的桌面浏览器标识、登录会话和受限重定向，避免进入手机文件列表；不能把 Play 媒体凭证发送到任意下载主机；临时地址不得落库或进入日志。原始文件音质以作者上传内容为准，不承诺必为无损编码。
 
-## 数据库
+### 6.3 YouTube
 
-`AppDatabase` 版本是 14，`exportSchema = false`。新安装用实体建表，升级只走 `MIGRATION_*`。Room 不能降级：手机上已是 14 时，装回更低版本会在启动时崩溃。
+- 登录采用粘贴 Cookie，支持 LL/WL 私人列表，不提供网页登录或自动续期。账号变化后取消旧列表请求并清空结果。
+- `TrackSource.YOUTUBE` 的身份保存在 `tracks.youtubeVideoId`，使用可空唯一索引；12→13 迁移不设置默认值。未入库队列使用 `workno=视频编号`、`fileKey=audio` 和稳定观看页地址，临时媒体地址不落库。
+- 仅选择独立 `audio/mp4` 音轨，不使用带视频格式或 WebM/Opus 兜底，不读取 YouTube 原生字幕。当前不支持 PO Token；可用性受视频和网络环境影响。
+- 签名组件复用桌面端 cjs，在隐藏 WebView 中适配。隔离 `globalThis.location`，禁止联网、文件访问和 Java 桥，不修改 DLsite 的全局 Cookie；媒体 CDN 请求不携带用户登录 Cookie。
+- 音轨保存至 `filesDir/youtube/{videoId}/audio.m4a`。每个 HTTP 请求最多读取 1 MiB，校验 `Content-Range` 后拼接；断流最多重试当前段两次，保留完整段，不改为无界 Range 整段读取。
+- 中止时仅清理本次 `.part`，不得删除重试任务正在使用的暂存。下载完成后在事务中自动入库并关联下载，同视频复用已有曲目。
+- 队列、播放列表、下载管理和生成字幕均须保留视频身份；删除本地副本后仍可恢复在线播放。
 
-新增可空列：`ALTER TABLE ... ADD COLUMN` 不要写 `DEFAULT`，Kotlin 字段不要加 `@ColumnInfo(defaultValue)`。`endpoint`、`translatedAt`、`translateStatus`、`skipTranslate`、`model`、`biliImportPart` 都是这样。`skipTranslate` 为 `null` 或 `false` 时，旧任务听写完成后仍翻译。`model` 为空的旧任务仍按地址匹配，不强迫重跑。
+### 6.4 剪贴板导入
 
-## 提交
+- `MainActivity` 每次进入前台，仅在 RESUMED 且窗口有焦点后读取一次剪贴板。Activity 级 `ClipboardImportViewModel` 保留旋转期间的预览和导入状态。
+- 仅识别 BV、RJ 和 YouTube 单视频链接或分享文字，明确视频链接优先于标题中的编号。只解析文本和 HTTP(S) URI，不打开 `content:` URI，不执行剪贴板 Intent，不记录原文，不清空用户剪贴板。
+- `ClipboardImportController` 先读取标题和封面，确认后导入根目录，不自动播放或下载。B站多 P 进入共用入库选择，分开导入默认全选，RJ 使用 asmr.one，YouTube 预览使用 `videoInfo` 的官方 oEmbed，不解析媒体或执行脚本。
+- 取消和新候选通过请求代号隔离旧响应，导入中禁止重复确认或替换条目。
+- `clipboard_import` 偏好仅保存候选身份与复制时间的 SHA-256 摘要。API 26 以下仅按身份去重；同一份已处理内容不重复提示。
 
-用户没明确要求时不要提交，也不要推远端。说明用简短中文，前缀用 `feats:`、`fix:`、`docs:`。
+## 7. 听写、翻译与字幕
+
+### 7.1 任务生命周期
+
+- 听写结果保存至 `filesDir/subtitles/{sha256}.json`。文件内容、服务地址和模型相同，且生成文件仍存在时复用结果；地址或模型改变时重新生成。无有效模型信息的已完成记录不按地址直接复用。
+- 「生成字幕」设置 `skipTranslate = true`；「生成字幕和翻译」才在听写后翻译。重试保留原设置。
+- 手动翻译和润色由 `TranslateCenter` 独立协程执行；离开播放页仅取消界面等待。自动润色在译文落盘后执行，润色失败保留译文及翻译成功状态。
+- 中止仅取消本地任务。Qwen3-ASR 无服务端取消接口；SenseVoiceSmall 在片段间响应取消，JNI 解码与 release 不得并发。听写等待下载时，取消听写不连带取消音频下载。
+- 选择 DLsite 完整原始包的听写任务绑定指定下载任务，等待解压和目标文件关联完成；目标缺失时明确失败，不被其它压缩音轨下载提前唤醒。旧任务空依赖字段保留原兼容逻辑。
+- `filesDir/whisper-src/` 暂存文件保持无后缀，上传时根据文件头设置格式。任务结束、取消或重试后仅清理无任务引用的暂存；重试优先复用原文件，其次从曲目本地文件复制。SenseVoiceSmall 直接读取本地文件，不使用上传暂存。
+
+### 7.2 模型与网络
+
+- 听写模型为 `qwen-audio-3.1-asr`、`Qwen3-ASR` 和 `SenseVoiceSmall`。地址及密钥按模型独立保存，运行中的任务使用其自身配置；地址为空时仍保存模型选择。
+- `qwen-audio-3.1-asr` 固定使用阿里云接口和 `qwen-audio-3.1-asr-flash-filetrans` 模型，经临时上传后轮询结果，不上传超过 1 GB 的文件。
+- Qwen3-ASR 要求非空地址，先读取模型名再请求 `/v1/audio/transcriptions`，语言为日语；保留服务返回的分段时间，只有整段文字时覆盖整首时长。保存地址不自动补 `/v1`。
+- SenseVoiceSmall 使用 sherpa-onnx，在 arm64 设备离线运行，`endpoint` 为 `null`，双方为空时仍可去重。就绪状态使用 `SenseVoiceModelManager.isReady()`。
+- SenseVoiceSmall 固定使用 `int8-2024-07-17` 多语种包及 `version.txt` 校验；`2025-09-09` 包为粤语模型，不可替代。使用 Silero VAD 将 16 kHz 单声道音频切成不超过 28 秒的片段，拼接时保留时间偏移。
+- 已移除模型的偏好迁移至 `qwen-audio-3.1-asr`，不生成虚假密钥；旧模型的待执行任务明确失败。
+- Android 17 下，Qwen3-ASR 访问局域网、本机或 `.local` 地址前申请 `ACCESS_LOCAL_NETWORK`。使用 `isLocalNetworkAddress` 判断，仅解析字面 IP，不额外发起 DNS 查询。
+- 翻译平台限定千问 AI 平台和 DeepSeek，地址固定，密钥与模型名按平台独立保存。平台地址、默认模型及思考参数集中在 `data/TranslatePlatforms.kt`，修改时保留各平台的字段差异；思考内容 `reasoning_content` 不写入字幕。
+
+### 7.3 字幕交互
+
+- 字幕按钮仅在字幕就绪、无当前句子且结果不是「没有听出人声」时显示；句间空隙不触发按钮显示。
+- 字幕全文列表点击句子后跳转至句子起始时间，保留列表页面；播放页当前句用于打开全文列表。
+
+## 8. 关于与更新检查
+
+- 「设置 → 关于」通过 PackageManager 读取实际安装包的版本名和构建号，不使用界面常量代替。
+- `AppUpdateClient` 使用独立匿名请求读取固定仓库 `/releases/latest`，仅接受包含已上传 APK 的正式发布。版本按数字段及预发布规则比较，无法解析时不推断版本关系，本地版本较高时不提示降级。
+- 检查由用户手动触发；应用不自动检查、下载或安装更新。下载入口通过外部浏览器打开固定仓库的发布列表或 tag 页面，不使用附件下载地址、WebView 或下载管理服务。
+- `browser.invalid` 仅用于 PackageManager 查询浏览器，不发起网络请求。接口及发布要求见 `Android/docs/update-api.md`。

@@ -8,12 +8,15 @@ import java.io.File
 
 /** 持久化下载和入库意图；与 HTTP 工作者分开，重启重试和已有任务都使用相同规则。 */
 internal class BiliDownloads(private val filesDir: File, private val db: AppDatabase, private val library: LibraryRepository) {
-    suspend fun enqueue(parts: List<BiliPart>, autoImport: Boolean = false): Int {
+    suspend fun enqueue(parts: List<BiliPart>, autoImport: Boolean = false, batchId: String? = null): Int {
         var added = 0
         for (part in parts.distinctBy { it.bvid to it.cid }) {
             if (biliAudioFile(filesDir, part.bvid, part.cid) == null) continue
             val queued = db.withTransaction {
-                val metadata = if (autoImport) part.importMetadata() else null
+                val metadata = if (batchId != null) com.nanahoshi.audioplayer.bilibili.biliLibraryJson.encodeToString(
+                    com.nanahoshi.audioplayer.bilibili.BiliDownloadImport.serializer(),
+                    com.nanahoshi.audioplayer.bilibili.BiliDownloadImport(part, batchId))
+                else if (autoImport) part.importMetadata() else null
                 val active = db.downloads().activeForFile(TrackSource.BILIBILI.name, part.bvid, part.cid.toString())
                 if (active != null) {
                     if (metadata != null) db.downloads().setBiliImportPart(active.id, metadata)
@@ -31,8 +34,7 @@ internal class BiliDownloads(private val filesDir: File, private val db: AppData
                     return@withTransaction false
                 }
                 // 用户识别挂上的本地文件同样可以直接使用，不再额外下载。
-                if (track != null && LocalAudio.hasStoredCopy(track.localUri) &&
-                    (track.localUri?.startsWith('/') != true || File(track.localUri).length() > 0)) return@withTransaction false
+                if (track != null && library.biliLibrary.hasLocalPart(part)) return@withTransaction false
                 db.downloads().insert(DownloadEntity(
                     trackId = track?.id ?: 0, title = part.title.ifBlank { part.bvid }, bytesDone = 0, bytesTotal = 0,
                     status = DownloadStatus.QUEUED, error = null, source = TrackSource.BILIBILI.name,

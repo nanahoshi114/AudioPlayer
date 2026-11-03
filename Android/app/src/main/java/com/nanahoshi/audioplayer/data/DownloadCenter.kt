@@ -6,6 +6,7 @@ import com.nanahoshi.audioplayer.youtube.YouTubeVideo
 import com.nanahoshi.audioplayer.youtube.readyYouTubeAudio
 import com.nanahoshi.audioplayer.youtube.youtubeAudioFile
 
+import androidx.room.withTransaction
 import android.content.Context
 import android.util.Log
 import com.nanahoshi.audioplayer.asmr.AsmrClient
@@ -24,6 +25,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.async
 import kotlinx.coroutines.ensureActive
@@ -71,12 +73,170 @@ class DownloadCenter(
     private val kick = Channel<Unit>(Channel.CONFLATED)
     private val subtitleLock = Mutex()
 
+    private val archiveLock = Mutex()
+    private val archiveRunners = java.util.concurrent.ConcurrentHashMap<Long, kotlinx.coroutines.Job>()
+    private val archiveClient = com.nanahoshi.audioplayer.dlsite.DlsiteArchiveClient { dlsite.cookieHeader() }
+    private val originals = DlsiteOriginalStore(appContext, db, dlsite, library)
+
+    suspend fun requestWorkno(track: TrackEntity): String? =
+        db.dlsiteOriginals().entryForTrack(track.id)?.workno ?: worknoOf(track)
+
+    suspend fun enqueueDlsiteArchive(workno: String, title: String = workno): Long = withContext(Dispatchers.IO) {
+        archiveLock.withLock {
+            val key = DlsiteClient.canonicalWorkno(workno)
+            db.downloads().activeArchive(key)?.let { return@withLock it.id }
+            val saved = db.dlsiteOriginals().work(key)
+            val entries = db.dlsiteOriginals().entries(key)
+            if (saved != null && entries.any { it.kind == "AUDIO" } &&
+                entries.all { if (it.kind == "FOLDER") File(it.localPath).isDirectory else File(it.localPath).isFile }) {
+                val needsRelink = saved.rootFolderId == null || db.folders().get(saved.rootFolderId) == null ||
+                    entries.any { entry ->
+                        when (entry.kind) {
+                            "AUDIO" -> entry.trackId?.let { db.tracks().getById(it) }?.localUri != entry.localPath
+                            "FOLDER" -> entry.folderId?.let { db.folders().get(it) } == null
+                            else -> entry.fileId?.let { db.files().get(it) }?.localUri != entry.localPath
+                        }
+                    }
+                if (needsRelink) {
+                    originals.importDirectory(key, File(saved.directory), saved.generation)
+                }
+                db.downloads().latestArchive(key)?.takeIf { it.status == DownloadStatus.DONE }?.let { return@withLock it.id }
+            }
+            val id = db.downloads().insert(DownloadEntity(
+                trackId = 0, title = "$title · 原始压缩包", bytesDone = 0, bytesTotal = 0,
+                status = DownloadStatus.QUEUED, error = null, source = TrackSource.DLSITE.name,
+                workKey = key, kind = "DLSITE_ARCHIVE",
+            ))
+            kick.trySend(Unit)
+            id
+        }
+    }
+
+    fun cancel(id: Long) {
+        scope.launch {
+            if (db.downloads().cancelArchive(id) > 0) archiveRunners[id]?.cancel()
+            else cancelYouTube(id)
+        }
+    }
+
+    suspend fun originalPathForTrack(trackId: Long): String? =
+        db.dlsiteOriginals().entryForTrack(trackId)?.localPath?.takeIf { File(it).isFile }
+
+    private suspend fun downloadArchive(job: DownloadEntity) = kotlinx.coroutines.coroutineScope {
+        val workno = job.workKey ?: error("没有作品编号")
+        val self = currentCoroutineContext()[kotlinx.coroutines.Job]!!
+        archiveRunners[job.id] = self
+        val generation = java.util.UUID.randomUUID().toString()
+        val directory = File(dlsiteRoot, "$workno/original/$generation")
+        val staging = File(filesDir, "dlsite-archives/$workno/${job.id}")
+        var published = false
+        val oldCopies = db.tracks().onlineWithLocal().filter { track ->
+            track.source == TrackSource.DLSITE && requestWorkno(track)?.let { DlsiteClient.canonicalWorkno(it) } == workno
+        }.mapNotNull { track -> track.localUri?.takeIf { path -> path.startsWith("/") }?.let { track.id to it } }
+        val oldDirectory = db.dlsiteOriginals().work(workno)?.directory
+        try {
+            if (db.downloads().get(job.id)?.status != DownloadStatus.RUNNING) throw CancellationException()
+            db.downloads().setPhase(job.id, "RESOLVING")
+            db.downloads().setPhase(job.id, "DOWNLOADING")
+            var lastProgress = 0L
+            val packages = archiveClient.download(workno, staging, onProgress = { done, total ->
+                if (done - lastProgress >= 256 * 1024 || total == done) {
+                    lastProgress = done
+                    scope.launch {
+                        if (self.isActive) db.downloads().activeProgress(job.id, done, total ?: 0L)
+                    }
+                }
+            }, checkCancelled = { self.ensureActive() })
+            self.ensureActive()
+            db.downloads().setPhase(job.id, "EXTRACTING")
+            com.nanahoshi.audioplayer.dlsite.DlsiteArchiveExtractor.extract(packages, directory) { self.ensureActive() }
+            self.ensureActive()
+            db.downloads().setPhase(job.id, "IMPORTING")
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                originals.importDirectory(workno, directory, generation,
+                    beforeCommit = {
+                        self.ensureActive()
+                        if (db.downloads().get(job.id)?.status != DownloadStatus.RUNNING) throw CancellationException()
+                    }, onPublish = {
+                        db.downloads().setLocalPath(job.id, directory.absolutePath)
+                        val bytes = packages.sumOf { it.length() }
+                        db.downloads().finish(job.id, bytes, bytes)
+                    })
+                published = true
+            }
+            // 清单发布后不再响应中止；完整包只在发布成功后回收。
+            staging.deleteRecursively()
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                retireOriginalCopies(oldCopies, oldDirectory)
+            }
+        } catch (error: com.nanahoshi.audioplayer.dlsite.DlsiteArchiveIntegrityException) {
+            // 已确认损坏的包无法通过再次解压修复；仅清理这个任务的暂存。
+            staging.deleteRecursively()
+            throw error
+        } finally {
+            archiveRunners.remove(job.id, self)
+            if (!published) directory.deleteRecursively()
+        }
+    }
+
+    private suspend fun retireOriginalCopies(paths: List<Pair<Long, String>>, oldDirectory: String?) {
+        val active = db.whisper().activeLocalPaths().toSet()
+        val tracks = db.tracks().onlineWithLocal().mapNotNull { it.localUri }.toSet()
+        val files = db.files().observeAll().first().mapNotNull { it.localUri }.toSet()
+        val queue = db.queue().snapshot()
+        val queued = queue.flatMap { listOfNotNull(it.localUri, it.remoteUrl) }.toSet()
+        // 已创建的MediaItem可能仍持有切换前的本地路径，队列里的曲目暂不回收旧副本。
+        val queuedTrackIds = queue.mapNotNull { it.trackId }.toSet()
+        val protected = active + tracks + files + queued + paths.filter { it.first in queuedTrackIds }.map { it.second }
+        for (path in paths.map { it.second }.distinct()) {
+            val file = File(path)
+            val canonical = runCatching { file.canonicalPath }.getOrNull() ?: continue
+            val managed = listOf(root, dlsiteRoot).any { canonical.startsWith(it.canonicalPath + File.separator) }
+            if (managed && path !in protected && file.isFile && file.delete()) db.downloads().deleteFinishedForPath(path)
+        }
+        val old = oldDirectory?.let(::File) ?: return
+        if (old.canonicalPath.startsWith(dlsiteRoot.canonicalPath + File.separator) &&
+            protected.none { it == old.path || it.startsWith(old.path + File.separator) }) {
+            old.deleteRecursively()
+        }
+    }
+
+    /** 回收进程中断后未发布的解压代次；失败任务的完整压缩包保留供重试。 */
+    private suspend fun cleanUnpublishedOriginals() {
+        val works = db.dlsiteOriginals().works()
+        val references = works.map { it.directory } +
+            db.tracks().onlineWithLocal().mapNotNull { it.localUri } +
+            db.files().observeAll().first().mapNotNull { it.localUri } +
+            db.queue().snapshot().flatMap { listOfNotNull(it.localUri, it.remoteUrl) } +
+            db.whisper().activeLocalPaths()
+        val protected = references.filter { it.startsWith("/") }.mapNotNull {
+            runCatching { File(it).canonicalPath }.getOrNull()
+        }
+        val rootPath = dlsiteRoot.canonicalPath + File.separator
+        for (workDirectory in dlsiteRoot.listFiles().orEmpty()) {
+            if (!Regex("(?:RJ|BJ|VJ)[0-9]+").matches(workDirectory.name)) continue
+            for (generation in File(workDirectory, "original").listFiles().orEmpty()) {
+                if (runCatching { java.util.UUID.fromString(generation.name) }.isFailure) continue
+                val path = generation.canonicalPath
+                if (!path.startsWith(rootPath) || protected.any { it == path || it.startsWith(path + File.separator) }) continue
+                generation.deleteRecursively()
+            }
+        }
+        for (job in db.downloads().finished().filter { it.kind == "DLSITE_ARCHIVE" }) {
+            val workno = job.workKey ?: continue
+            if (!Regex("(?:RJ|BJ|VJ)[0-9]+").matches(workno)) continue
+            File(filesDir, "dlsite-archives/$workno/${job.id}").deleteRecursively()
+        }
+    }
+
     fun observe(): Flow<List<DownloadEntity>> = db.downloads().observe()
 
     init {
         scope.launch {
             File(filesDir, "youtube").walkTopDown().filter { it.isFile && it.name.endsWith(".part") }.forEach { it.delete() }
             db.downloads().failActive("下载中断，请重试")
+            cleanUnpublishedOriginals()
+            runCatching { library.biliLibrary.publish() }
             for (ignored in kick) {
                 while (true) {
                     val job = db.downloads().nextQueued() ?: break
@@ -99,7 +259,7 @@ class DownloadCenter(
         if (!key.isNullOrBlank() && db.downloads().activeForFile(item.source.name, storedKey, key) != null) {
             return@withContext false
         }
-        if (localCopy(item.source.name, storedKey, key) != null) return@withContext false
+        if (savedRemotePath(item.source, storedKey, key) != null) return@withContext false
         if (db.downloads().activeForUrl(item.remoteUrl) != null) return@withContext false
         db.downloads().insert(
             DownloadEntity(
@@ -158,6 +318,12 @@ class DownloadCenter(
     suspend fun enqueue(tracks: List<TrackEntity>): Int = withContext(Dispatchers.IO) {
         var added = 0
         for (track in tracks) {
+            if (track.source == TrackSource.DLSITE && track.fileHash.isNullOrBlank() && !LocalAudio.hasStoredCopy(track.localUri)) {
+                val workno = requestWorkno(track) ?: continue
+                enqueueDlsiteArchive(workno)
+                added += 1
+                continue
+            }
             if (track.source == TrackSource.YOUTUBE) {
                 val id = track.youtubeVideoId ?: continue
                 added += enqueueYouTube(listOf(YouTubeVideo(
@@ -195,6 +361,20 @@ class DownloadCenter(
         val added = biliDownloads.enqueue(parts, autoImport)
         if (added > 0) kick.trySend(Unit)
         added
+    }
+
+    suspend fun enqueueBiliImports(requests: List<com.nanahoshi.audioplayer.bilibili.BiliImportRequest>): Int = withContext(Dispatchers.IO) {
+        var added = 0
+        try {
+            for (request in requests) {
+                db.withTransaction {
+                    val batch = library.biliLibrary.beginDownload(request)
+                    added += biliDownloads.enqueue(request.parts, batchId = batch)
+                    library.biliLibrary.publish(request.video.bvid)
+                }
+            }
+            added
+        } finally { kick.trySend(Unit) }
     }
 
     suspend fun enqueueYouTube(videos: List<YouTubeVideo>): Int = withContext(Dispatchers.IO) {
@@ -258,17 +438,22 @@ class DownloadCenter(
 
     fun retry(id: Long) {
         scope.launch {
-            if (youtubeRunners[id]?.isActive == true) return@launch
+            if (youtubeRunners[id]?.isActive == true || archiveRunners[id]?.isActive == true) return@launch
             db.downloads().requeue(id)
             kick.trySend(Unit)
         }
     }
 
     private suspend fun downloadOne(job: DownloadEntity) {
-        if (job.source == TrackSource.YOUTUBE.name) {
-            if (db.downloads().startQueued(job.id) == 0) return
-        } else db.downloads().markRunning(job.id)
+        if (db.downloads().startQueued(job.id) == 0) return
         try {
+            if (job.kind == "DLSITE_ARCHIVE") {
+                kotlinx.coroutines.supervisorScope {
+                    val runner = async { downloadArchive(job) }
+                    runner.await()
+                }
+                return
+            }
             if (job.source == TrackSource.YOUTUBE.name) {
                 kotlinx.coroutines.coroutineScope {
                     val runner = async(start = kotlinx.coroutines.CoroutineStart.LAZY) { downloadYouTube(job) }
@@ -360,14 +545,29 @@ class DownloadCenter(
             val size = dest.length()
             db.downloads().finish(job.id, size, size)
         } catch (error: Exception) {
-            db.downloads().fail(job.id, if (job.source == TrackSource.YOUTUBE.name) {
+            if (job.kind == "DLSITE_ARCHIVE" && db.downloads().get(job.id)?.status == DownloadStatus.DONE) return
+            val message = if (job.kind == "DLSITE_ARCHIVE") {
+                if (error is CancellationException) "已中止"
+                else if (error is com.nanahoshi.audioplayer.dlsite.DlsiteArchiveException) error.message ?: "原始压缩包下载失败"
+                else "原始压缩包处理失败，请重试"
+            } else if (job.source == TrackSource.YOUTUBE.name) {
                 if (error is CancellationException) "已中止" else if (error is YouTubeException) error.message ?: "YouTube 下载失败" else "YouTube 下载失败"
-            } else error.message ?: "下载失败")
+            } else error.message ?: "下载失败"
+            if (job.kind == "DLSITE_ARCHIVE") db.downloads().failRunning(job.id, message)
+            else db.downloads().fail(job.id, message)
         }
     }
 
     private suspend fun downloadRemote(job: DownloadEntity) {
         val workKey = job.workKey?.ifBlank { null } ?: "work"
+        if (job.source == TrackSource.DLSITE.name && !job.fileKey.isNullOrBlank()) {
+            savedRemotePath(TrackSource.DLSITE, workKey, job.fileKey)?.let { path ->
+                db.downloads().setLocalPath(job.id, path)
+                val size = File(path).length()
+                db.downloads().finish(job.id, size, size)
+                return
+            }
+        }
         val rootDir = if (job.source == TrackSource.ASMR.name) root else dlsiteRoot
         val dest = File(rootDir, "$workKey/${fileName(job)}")
         dest.parentFile?.mkdirs()
@@ -472,12 +672,22 @@ class DownloadCenter(
     }
 
     suspend fun savedRemotePath(source: TrackSource, workKey: String, fileKey: String?): String? = withContext(Dispatchers.IO) {
-        workKeys(workKey).firstNotNullOfOrNull { key -> localCopy(source.name, key, fileKey) }
+        val key = canonicalWorkKey(workKey)
+        if (source == TrackSource.DLSITE && !fileKey.isNullOrBlank()) {
+            db.dlsiteOriginals().entryForPlay(key, rawFileKey(fileKey) ?: fileKey)?.localPath
+                ?.takeIf { File(it).isFile }?.let { return@withContext it }
+        }
+        workKeys(workKey).firstNotNullOfOrNull { candidate -> localCopy(source.name, candidate, fileKey) }
     }
 
     suspend fun downloadedKeys(source: TrackSource, workKey: String): Set<String> = withContext(Dispatchers.IO) {
         val keys = workKeys(workKey)
         buildSet {
+            if (source == TrackSource.DLSITE) {
+                db.dlsiteOriginals().entries(canonicalWorkKey(workKey)).forEach { entry ->
+                    if (File(entry.localPath).isFile) entry.playFileKey?.let { add(it) }
+                }
+            }
             keys.forEach { key ->
                 db.downloads().finishedForWork(source.name, key).forEach { row ->
                     val path = row.localPath

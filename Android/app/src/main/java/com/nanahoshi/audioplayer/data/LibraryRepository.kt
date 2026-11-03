@@ -28,6 +28,7 @@ import androidx.room.withTransaction
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.withContext
 
 enum class WorkFill {
@@ -50,6 +51,10 @@ class LibraryRepository(
     private val asmr: AsmrClient,
     private val dlsite: DlsiteClient,
 ) {
+    internal val biliLibrary = BiliLibraryStore(context, db, ::upsertBili)
+
+    suspend fun importBili(request: com.nanahoshi.audioplayer.bilibili.BiliImportRequest): List<TrackEntity> = biliLibrary.save(request)
+
     private val youtubeLock = kotlinx.coroutines.sync.Mutex()
 
     suspend fun saveYouTube(video: YouTubeVideo, localPath: String? = null, downloadId: Long? = null): TrackEntity =
@@ -95,14 +100,30 @@ class LibraryRepository(
 
     fun observeAllFiles(): Flow<List<LibraryFileEntity>> = db.files().observeAll()
 
-    fun observeTracksIn(folderId: Long?): Flow<List<TrackEntity>> = db.tracks().observeIn(folderId)
+    fun observeTracksIn(folderId: Long?): Flow<List<TrackEntity>> = combine(
+        db.tracks().observeIn(folderId), db.dlsiteOriginals().observeEntries(),
+    ) { tracks, _ -> filterOriginalTracks(folderId, tracks) }
+
+    private suspend fun originalEntriesForFolder(folderId: Long?): List<com.nanahoshi.audioplayer.data.db.DlsiteOriginalEntryEntity>? {
+        if (folderId == null) return null
+        val all = db.dlsiteOriginals().allEntries()
+        val code = db.dlsiteOriginals().works().firstOrNull { it.rootFolderId == folderId }?.workno
+            ?: all.firstOrNull { it.kind == "FOLDER" && it.folderId == folderId }?.workno ?: return null
+        return all.filter { it.workno == code }
+    }
+
+    private suspend fun filterOriginalTracks(folderId: Long?, tracks: List<TrackEntity>): List<TrackEntity> {
+        val entries = originalEntriesForFolder(folderId) ?: return tracks
+        val ids = entries.mapNotNull { it.trackId }.toSet()
+        return tracks.filter { it.source != TrackSource.DLSITE || it.id in ids }
+    }
 
     suspend fun track(id: Long): TrackEntity? = withContext(Dispatchers.IO) {
         db.tracks().getById(id)
     }
 
     suspend fun tracksIn(folderId: Long?): List<TrackEntity> = withContext(Dispatchers.IO) {
-        db.tracks().inFolder(folderId)
+        filterOriginalTracks(folderId, db.tracks().inFolder(folderId))
     }
 
     suspend fun ensureWorkFiles(folderId: Long): WorkFill = withContext(Dispatchers.IO) {
@@ -225,9 +246,19 @@ class LibraryRepository(
         db.folders().findBySourceId(sourceId) != null
     }
 
-    fun observeFilesIn(folderId: Long?): Flow<List<LibraryFileEntity>> = db.files().observeIn(folderId)
+    fun observeFilesIn(folderId: Long?): Flow<List<LibraryFileEntity>> = combine(
+        db.files().observeIn(folderId), db.dlsiteOriginals().observeEntries(),
+    ) { files, _ ->
+        val ids = originalEntriesForFolder(folderId)?.mapNotNull { it.fileId }?.toSet()
+        if (ids == null) files else files.filter { libraryFileSource(it.fileHash) != TrackSource.DLSITE || it.id in ids }
+    }
 
-    fun observeChildFolders(parentId: Long?): Flow<List<FolderEntity>> = db.folders().observeChildren(parentId)
+    fun observeChildFolders(parentId: Long?): Flow<List<FolderEntity>> = combine(
+        db.folders().observeChildren(parentId), db.dlsiteOriginals().observeEntries(),
+    ) { folders, _ ->
+        val ids = originalEntriesForFolder(parentId)?.filter { it.kind == "FOLDER" }?.mapNotNull { it.folderId }?.toSet()
+        if (ids == null) folders else folders.filter { it.contentSource != TrackSource.DLSITE.name || it.id in ids }
+    }
 
     fun observeFolder(id: Long): Flow<FolderEntity?> = db.folders().observe(id)
 
@@ -301,9 +332,19 @@ class LibraryRepository(
     }
 
     suspend fun deleteItems(trackIds: List<Long>, folderIds: List<Long>) = withContext(Dispatchers.IO) {
-        folderIds.forEach { db.folders().delete(it) }
-        trackIds.forEach { db.tracks().delete(it) }
-        compactQueue()
+        db.withTransaction {
+            val policy = LibraryRemovalPolicy(db.folders().all())
+            val parents = trackIds.mapNotNull { db.tracks().getById(it) }.map { it.folderId }
+            if (!policy.allows(parents, folderIds.toSet())) throw LibraryRemovalRejected()
+            val removedFolders = descendantFolderIds(db.folders().all(), folderIds.toSet())
+            val videoIds = db.folders().all().filter { it.id in removedFolders }.mapNotNull { it.biliBvid } +
+                db.tracks().inFolders(removedFolders.toList()).mapNotNull { it.bvid } +
+                trackIds.mapNotNull { db.tracks().getById(it)?.bvid }
+            videoIds.distinct().forEach { db.biliImports().delete(it); db.downloads().clearBiliImportMetadata(it) }
+            folderIds.forEach { db.folders().delete(it) }
+            trackIds.forEach { db.tracks().delete(it) }
+            compactQueue()
+        }
     }
 
     suspend fun orderedSelection(
@@ -322,12 +363,12 @@ class LibraryRepository(
         }
         suspend fun expand(folderId: Long) {
             for (child in children(folderId)) expand(child.id)
-            for (track in db.tracks().inFolder(folderId).sortedForLibrary(sort)) addTrack(track.id)
+            for (track in tracksIn(folderId).sortedForLibrary(sort)) addTrack(track.id)
         }
         for (folder in children(currentFolderId)) {
             if (folder.id in selectedFolderIds) expand(folder.id)
         }
-        db.tracks().inFolder(currentFolderId).sortedForLibrary(sort).forEach { track ->
+        tracksIn(currentFolderId).sortedForLibrary(sort).forEach { track ->
             if (track.id in selectedTrackIds) addTrack(track.id)
         }
         if (orderedIds.isEmpty()) return@withContext emptyList()
@@ -466,6 +507,7 @@ class LibraryRepository(
         val work = asmr.loadWork(input)
         if (db.folders().findBySourceId(work.sourceId) != null) error("已经在音频库")
         insertAsmrWork(work, parentId)
+        restoreOriginalCopy(work.sourceId)
     }
 
     suspend fun folderBySource(sourceId: String): FolderEntity? = withContext(Dispatchers.IO) {
@@ -494,7 +536,16 @@ class LibraryRepository(
                 ),
             )
             importPlayNodes(nodes, rootId, workId, facts, coverUrl, "")
+            restoreOriginalCopy(facts.sourceId)
         }
+
+    private suspend fun restoreOriginalCopy(sourceId: String) {
+        val key = runCatching { DlsiteClient.canonicalWorkno(sourceId) }.getOrNull() ?: return
+        val saved = db.dlsiteOriginals().work(key) ?: return
+        val entries = db.dlsiteOriginals().entries(key)
+        if (entries.isEmpty() || entries.any { if (it.kind == "FOLDER") !java.io.File(it.localPath).isDirectory else !java.io.File(it.localPath).isFile }) return
+        DlsiteOriginalStore(context, db, dlsite, this).importDirectory(key, java.io.File(saved.directory), saved.generation)
+    }
 
     suspend fun childFolders(parentId: Long?): List<FolderEntity> = withContext(Dispatchers.IO) {
         db.folders().childrenOf(parentId)
@@ -514,7 +565,10 @@ class LibraryRepository(
 
     /** Returns the work's root folder. Inserts it under the library root when it is not there yet. */
     suspend fun ensureAsmrWork(work: AsmrWork): Long = withContext(Dispatchers.IO) {
-        db.withTransaction { db.folders().findBySourceId(work.sourceId)?.id ?: insertAsmrWork(work, null) }
+        val id = db.withTransaction { db.folders().findBySourceId(work.sourceId)?.id ?: insertAsmrWork(work, null) }
+        val old = db.dlsiteOriginals().work(DlsiteClient.canonicalWorkno(work.sourceId))
+        if (old != null && old.rootFolderId != id) restoreOriginalCopy(work.sourceId)
+        id
     }
 
     private suspend fun insertAsmrWork(work: AsmrWork, parentId: Long?): Long {
@@ -547,7 +601,11 @@ class LibraryRepository(
     }
 
     suspend fun deleteFile(id: Long) = withContext(Dispatchers.IO) {
-        db.files().delete(id)
+        db.withTransaction {
+            val file = db.files().get(id) ?: return@withTransaction
+            if (!LibraryRemovalPolicy(db.folders().all()).canRemoveEntry(file.folderId)) throw LibraryRemovalRejected()
+            db.files().delete(id)
+        }
     }
 
     suspend fun lookupBvid(input: String): List<BiliPart> = withContext(Dispatchers.IO) {
@@ -564,19 +622,20 @@ class LibraryRepository(
         check(job.status == com.nanahoshi.audioplayer.data.db.DownloadStatus.RUNNING) { "下载任务已经结束，请重试" }
         val size = java.io.File(path).length()
         check(size > 0) { "音轨文件不存在，请重试" }
-        val track = job.biliImportPart?.let { upsertBili(biliImportPart(it, bvid, cid), null) }
-            ?: db.tracks().findByBvid(bvid, cid)
+        val metadata = job.biliImportPart?.let { com.nanahoshi.audioplayer.bilibili.decodeBiliDownloadImport(it, bvid, cid) }
+        val track = if (metadata != null && metadata.batchId == null) upsertBili(metadata.part, null)
+            else db.tracks().findByBvid(bvid, cid)
         if (track != null) {
             db.tracks().updateLocalUri(track.id, path)
             db.downloads().attachTrack(jobId, track.id)
         }
         db.downloads().setLocalPath(jobId, path)
         db.downloads().finish(jobId, size, size)
+        if (metadata?.batchId != null && db.biliImports().get(bvid)?.batchId == metadata.batchId) biliLibrary.publish(bvid)
     }
 
     suspend fun deleteTrack(id: Long) = withContext(Dispatchers.IO) {
-        db.tracks().delete(id)
-        compactQueue()
+        deleteItems(listOf(id), emptyList())
     }
 
     suspend fun createPlaylist(name: String): Long = withContext(Dispatchers.IO) {
@@ -1032,7 +1091,12 @@ class LibraryRepository(
     }
 
     private suspend fun upsertBili(part: BiliPart, folderId: Long?): TrackEntity {
-        db.tracks().findByBvid(part.bvid, part.cid)?.let { existing ->
+        val group = db.folders().findBiliVideo(part.bvid)
+        db.tracks().findByBvid(part.bvid, part.cid)?.let { old ->
+            val existing = if (group != null && old.folderId != group.id) {
+                db.tracks().setFolder(old.id, group.id)
+                old.copy(folderId = group.id)
+            } else old
             val cached = readyBiliAudio(context.filesDir, part.bvid, part.cid)
             if (cached != null && existing.localUri != cached.absolutePath) {
                 db.tracks().updateLocalUri(existing.id, cached.absolutePath)
@@ -1053,7 +1117,7 @@ class LibraryRepository(
                 cid = part.cid,
                 page = part.page,
                 addedAt = System.currentTimeMillis(),
-                folderId = folderId,
+                folderId = group?.id ?: folderId,
             ),
         )
         return db.tracks().getById(id) ?: error("保存音频失败")

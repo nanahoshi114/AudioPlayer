@@ -25,6 +25,7 @@ import com.nanahoshi.audioplayer.bilibili.*
 import com.nanahoshi.audioplayer.data.TrackSource
 import com.nanahoshi.audioplayer.data.db.DownloadStatus
 import com.nanahoshi.audioplayer.ui.CoverImage
+import com.nanahoshi.audioplayer.ui.components.ResetOnNewSearch
 import com.nanahoshi.audioplayer.ui.components.EmptyState
 import com.nanahoshi.audioplayer.ui.formatDuration
 import java.io.File
@@ -190,11 +191,3 @@ fun BiliBrowser(viewModel: BiliBrowserViewModel = viewModel()) {
 }
 
 private fun localReady(path: String?): Boolean = !path.isNullOrBlank() && if (path.startsWith('/')) File(path).isFile else true
-
-@Composable
-private fun ResetOnNewSearch(state: LazyListState, revision: Long) {
-    var seen by rememberSaveable { mutableLongStateOf(revision) }
-    LaunchedEffect(state, revision) {
-        if (seen != revision) { state.scrollToItem(0); seen = revision }
-    }
-}

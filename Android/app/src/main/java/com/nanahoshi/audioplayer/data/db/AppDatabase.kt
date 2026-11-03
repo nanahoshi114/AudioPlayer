@@ -38,6 +38,7 @@ class DownloadStatusConverter {
 @Database(
     entities = [
         FolderEntity::class,
+        BiliImportIntentEntity::class,
         TrackEntity::class,
         PlaylistEntity::class,
         PlaylistItemEntity::class,
@@ -47,12 +48,16 @@ class DownloadStatusConverter {
         DownloadEntity::class,
         WhisperJobEntity::class,
         TranslationJobEntity::class,
+        DlsiteOriginalWorkEntity::class,
+        DlsiteOriginalEntryEntity::class,
     ],
-    version = 14,
+    version = 16,
     exportSchema = false,
 )
 @TypeConverters(TrackSourceConverter::class, FileKindConverter::class, DownloadStatusConverter::class)
 abstract class AppDatabase : RoomDatabase() {
+    abstract fun dlsiteOriginals(): DlsiteOriginalDao
+    abstract fun biliImports(): BiliImportDao
     abstract fun folders(): FolderDao
     abstract fun tracks(): TrackDao
     abstract fun playlists(): PlaylistDao
@@ -79,8 +84,35 @@ abstract class AppDatabase : RoomDatabase() {
                     MIGRATION_11_12,
                     MIGRATION_12_13,
                     MIGRATION_13_14,
+                    MIGRATION_14_15,
+                    MIGRATION_15_16,
                 )
                 .build()
+
+        internal val MIGRATION_15_16 = object : Migration(15, 16) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("ALTER TABLE folders ADD COLUMN biliBvid TEXT")
+                connection.execSQL("CREATE UNIQUE INDEX index_folders_biliBvid ON folders (biliBvid)")
+                connection.execSQL("CREATE TABLE bili_import_intents (bvid TEXT NOT NULL PRIMARY KEY, batchId TEXT NOT NULL, requestJson TEXT NOT NULL)")
+                connection.execSQL("CREATE UNIQUE INDEX index_bili_import_intents_batchId ON bili_import_intents (batchId)")
+            }
+        }
+
+        internal val MIGRATION_14_15 = object : Migration(14, 15) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("ALTER TABLE downloads ADD COLUMN kind TEXT")
+                connection.execSQL("ALTER TABLE downloads ADD COLUMN phase TEXT")
+                connection.execSQL("ALTER TABLE library_files ADD COLUMN localUri TEXT")
+                connection.execSQL("ALTER TABLE whisper_jobs ADD COLUMN awaitDownloadId INTEGER")
+                connection.execSQL("ALTER TABLE whisper_jobs ADD COLUMN awaitFileKey TEXT")
+                connection.execSQL("CREATE TABLE dlsite_original_works (workno TEXT NOT NULL PRIMARY KEY, rootFolderId INTEGER, directory TEXT NOT NULL, generation TEXT NOT NULL)")
+                connection.execSQL("CREATE TABLE dlsite_original_entries (workno TEXT NOT NULL, relativePath TEXT NOT NULL, kind TEXT NOT NULL, size INTEGER NOT NULL, localPath TEXT NOT NULL, playFileKey TEXT, trackId INTEGER, fileId INTEGER, folderId INTEGER, PRIMARY KEY(workno, relativePath))")
+                connection.execSQL("CREATE INDEX index_dlsite_original_entries_trackId ON dlsite_original_entries(trackId)")
+                connection.execSQL("CREATE INDEX index_dlsite_original_entries_fileId ON dlsite_original_entries(fileId)")
+                connection.execSQL("CREATE INDEX index_dlsite_original_entries_folderId ON dlsite_original_entries(folderId)")
+                connection.execSQL("CREATE INDEX index_dlsite_original_entries_workno_playFileKey ON dlsite_original_entries(workno, playFileKey)")
+            }
+        }
 
         internal val MIGRATION_13_14 = object : Migration(13, 14) {
             override fun migrate(connection: SQLiteConnection) {

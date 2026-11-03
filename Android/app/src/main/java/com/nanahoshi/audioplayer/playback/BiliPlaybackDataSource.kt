@@ -164,7 +164,7 @@ class BiliPlaybackDataSource(
         // 识别挂上的 content:/file: 和下载到 App 目录的文件都在这里读本地。
         openStored(dataSpec, track.localUri)?.let { return it }
         val url = track.remoteUrl
-        if (url.isNullOrBlank()) throw IOException("没有可播放的地址")
+        if (url.isNullOrBlank()) throw IOException("原始文件尚未缓存，请下载完整压缩包")
         val workno = runBlocking(Dispatchers.IO) { worknoOf(track) }
         return openAuthed(dataSpec, url, DlsiteClient.PLAY_REFERER, workno, rawFileKey(track.fileHash))
     }
@@ -183,6 +183,15 @@ class BiliPlaybackDataSource(
         val workno = uri.getQueryParameter("workno").orEmpty()
         val fileKey = uri.getQueryParameter("file").orEmpty()
         if (source == TrackSource.DLSITE.name && fileKey.isNotBlank()) {
+            val stored = runBlocking(Dispatchers.IO) {
+                val canonical = DlsiteClient.canonicalWorkno(workno)
+                db.dlsiteOriginals().entryForPlay(canonical, rawFileKey(fileKey) ?: fileKey)?.localPath
+                    ?.takeIf { File(it).isFile }
+                    ?: db.downloads().finishedForWork(source, canonical).firstOrNull {
+                        rawFileKey(it.fileKey) == (rawFileKey(fileKey) ?: fileKey) && it.localPath?.let { path -> File(path).isFile } == true
+                    }?.localPath
+            }
+            openStored(dataSpec, stored)?.let { return it }
             return openAuthed(dataSpec, url, referer.ifBlank { DlsiteClient.PLAY_REFERER }, workno, fileKey)
         }
         val userAgent = if (source == TrackSource.DLSITE.name) DlsiteClient.USER_AGENT else AsmrClient.USER_AGENT

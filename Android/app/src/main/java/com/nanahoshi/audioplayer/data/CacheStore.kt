@@ -89,6 +89,24 @@ class CacheStore(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val gate = Mutex()
     private val lastImageTrim = AtomicLong(0L)
+    private val protectedDirectories = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    suspend fun protect(directory: File) = gate.withLock {
+        protectedDirectories.add(directory.canonicalPath)
+    }
+
+    fun release(directory: File) { protectedDirectories.remove(directory.canonicalPath) }
+
+    private fun protected(file: File): Boolean = protectedDirectories.any {
+        val path = file.canonicalPath
+        path == it || path.startsWith(it + File.separator)
+    }
+
+    private fun clearUnprotected(file: File) {
+        if (protected(file)) return
+        if (file.isDirectory) file.listFiles()?.forEach(::clearUnprotected)
+        file.delete()
+    }
 
     fun usage(): Long = directorySize(appContext.cacheDir)
 
@@ -108,7 +126,7 @@ class CacheStore(
             val keep = disk?.directory
             appContext.cacheDir.listFiles()?.forEach { child ->
                 if (keep != null && child.toOkioPath() == keep) return@forEach
-                child.deleteRecursively()
+                clearUnprotected(child)
             }
         }
     }
@@ -128,7 +146,7 @@ class CacheStore(
     private fun trimLocked() {
         val root = appContext.cacheDir
         if (!root.exists()) return
-        val files = root.walkTopDown().filter { it.isFile }.toList()
+        val files = root.walkTopDown().filter { it.isFile && !protected(it) }.toList()
         val infos = files.map { CacheFileInfo(it.name, it.lastModified(), it.length()) }
         for (index in cacheFilesToRemove(infos, limitState.value)) {
             files[index].delete()

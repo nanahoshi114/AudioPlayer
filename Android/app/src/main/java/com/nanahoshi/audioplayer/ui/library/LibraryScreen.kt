@@ -114,6 +114,7 @@ import com.nanahoshi.audioplayer.ui.formatDuration
 fun LibraryScreen(
     onOpenPreview: (Long) -> Unit,
     onOpenLibraryWork: (Long) -> Unit,
+    onOpenBiliVideo: (Long) -> Unit,
     onImportOnline: () -> Unit,
     viewModel: LibraryViewModel = viewModel(),
 ) {
@@ -125,6 +126,7 @@ fun LibraryScreen(
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
     val pendingAsmr by viewModel.pendingAsmr.collectAsStateWithLifecycle()
     val playlists by viewModel.playlists.collectAsStateWithLifecycle(emptyList())
+    val biliAuthors by viewModel.biliAuthors.collectAsStateWithLifecycle()
     val currentFolder by viewModel.currentFolder.collectAsStateWithLifecycle(null)
     val folderId by viewModel.currentFolderId.collectAsStateWithLifecycle()
     val cachePrompt by viewModel.cachePrompt.collectAsStateWithLifecycle()
@@ -135,13 +137,13 @@ fun LibraryScreen(
     var menuOpen by remember { mutableStateOf(false) }
     var pickingPlaylist by remember { mutableStateOf(false) }
     var pendingTree by remember { mutableStateOf<Uri?>(null) }
-    var namingFolder by remember { mutableStateOf(false) }
-    var folderName by remember { mutableStateOf("") }
     var confirmDelete by remember { mutableStateOf(false) }
     var confirmFolderDelete by remember { mutableStateOf<Long?>(null) }
     var recognizeFolder by remember { mutableStateOf<Long?>(null) }
     var recognizeCode by remember { mutableStateOf("") }
 
+    val removalPolicy by viewModel.removalPolicy.collectAsStateWithLifecycle()
+    val canRemoveSelection by viewModel.canRemoveSelection.collectAsStateWithLifecycle()
     val listState = viewModel.listState(folderId, listing.browsing)
     val fabExpanded by remember(listState) {
         derivedStateOf { listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset < 48 }
@@ -158,7 +160,7 @@ fun LibraryScreen(
     if (selecting) {
         val selectedCount = selectedTracks.size + selectedFolders.size
         // 选中了作品时，播放和加入列表的键都收起来，作品要进作品页再操作。
-        val selectsWork = folders.any { it.id in selectedFolders && !it.asmrSourceId.isNullOrBlank() }
+        val selectsWork = folders.any { it.id in selectedFolders && (!it.asmrSourceId.isNullOrBlank() || it.biliBvid != null) }
         SideEffect {
             topBar?.value = {
                 SelectionTopBar(
@@ -176,7 +178,7 @@ fun LibraryScreen(
                             )
                         }
                         add(SelectionAction("删除已下载的文件", Icons.Default.Delete, viewModel::deleteDownloadedSelection, destructive = true))
-                        add(SelectionAction("移除", Icons.Default.Delete, { confirmDelete = true }, destructive = true))
+                        if (canRemoveSelection) add(SelectionAction("移除", Icons.Default.Delete, { confirmDelete = true }, destructive = true))
                     },
                 )
             }
@@ -210,13 +212,14 @@ fun LibraryScreen(
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = viewModel::updateSearch,
-                placeholder = { Text("搜索名称或 RJ 号") },
+                placeholder = { Text(if (folderId == null) "搜索名称或 RJ 号" else "搜索当前目录及子目录") },
+                trailingIcon = if (folderId != null) ({ LibrarySortMenu(sort) { if (sort != it) viewModel.toggleSort() } }) else null,
                 leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
                 singleLine = true,
                 shape = RoundedCornerShape(28.dp),
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
             )
-            Row(
+            if (folderId == null) Row(
                 Modifier.fillMaxWidth().padding(horizontal = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -239,32 +242,12 @@ fun LibraryScreen(
                         )
                     }
                 }
-                var sortMenu by remember { mutableStateOf(false) }
-                Box {
-                    IconButton(onClick = { sortMenu = true }) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.Sort,
-                            contentDescription = if (sort == LibrarySort.NAME) "按名称" else "按时间",
-                        )
-                    }
-                    DropdownMenu(expanded = sortMenu, onDismissRequest = { sortMenu = false }) {
-                        DropdownMenuItem(
-                            text = { Text("按名称") },
-                            onClick = {
-                                sortMenu = false
-                                if (sort != LibrarySort.NAME) viewModel.toggleSort()
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("按时间") },
-                            onClick = {
-                                sortMenu = false
-                                if (sort == LibrarySort.NAME) viewModel.toggleSort()
-                            },
-                        )
-                    }
-                }
+                LibrarySortMenu(sort) { if (sort != it) viewModel.toggleSort() }
             }
+        },
+        pinned = {
+            if (folderId != null && trail.isNotEmpty()) LibraryBreadcrumb(trail = trail,
+                onRoot = { climb(trail.size) }, onCrumb = { climb(trail.lastIndex - it) })
         },
     ) { topInset ->
         if (folders.isEmpty() && entries.isEmpty()) {
@@ -285,24 +268,17 @@ fun LibraryScreen(
                 state = listState,
                 contentPadding = PaddingValues(bottom = 96.dp),
             ) {
-                if (listing.browsing && trail.isNotEmpty()) {
-                    item(key = "crumbs") {
-                        LibraryBreadcrumb(
-                            trail = trail,
-                            onRoot = { climb(trail.size) },
-                            onCrumb = { index -> climb(trail.lastIndex - index) },
-                        )
-                    }
-                }
                 items(folders, key = { "folder-${it.id}" }) { folder ->
                     FolderRow(
                         modifier = libraryMotionModifier(),
                         folder = folder,
+                        biliArtist = biliAuthors[folder.id],
                         selected = folder.id in selectedFolders,
                         selecting = selecting,
                         onClick = {
                             when {
                                 selecting -> viewModel.toggleFolder(folder.id)
+                                folder.biliBvid != null -> onOpenBiliVideo(folder.id)
                                 !folder.asmrSourceId.isNullOrBlank() -> onOpenLibraryWork(folder.id)
                                 else -> viewModel.openFolder(folder)
                             }
@@ -313,7 +289,7 @@ fun LibraryScreen(
                         } else {
                             null
                         },
-                        onRecognize = if (folder.asmrSourceId == null && folder.asmrWorkId == null) {
+                        onRecognize = if (folder.asmrSourceId == null && folder.asmrWorkId == null && folder.biliBvid == null) {
                             {
                                 recognizeCode = rjHint(folder.name)
                                 recognizeFolder = folder.id
@@ -321,7 +297,7 @@ fun LibraryScreen(
                         } else {
                             null
                         },
-                        onDelete = { confirmFolderDelete = folder.id },
+                        onDelete = if (removalPolicy?.canRemoveFolder(folder.id) == true) ({ confirmFolderDelete = folder.id }) else null,
                     )
                 }
                 items(entries, key = { entry ->
@@ -363,14 +339,14 @@ fun LibraryScreen(
                                 } else {
                                     null
                                 },
-                                onDelete = { viewModel.deleteTrack(track.id) },
+                                onDelete = if (removalPolicy?.canRemoveEntry(track.folderId) == true) ({ viewModel.deleteTrack(track.id) }) else null,
                             )
                         }
                         is LibraryEntry.File -> FileRow(
                             modifier = libraryMotionModifier(),
                             file = entry.file,
                             onClick = { onOpenPreview(entry.file.id) },
-                            onDelete = { viewModel.deleteFile(entry.file.id) },
+                            onDelete = if (removalPolicy?.canRemoveEntry(entry.file.folderId) == true) ({ viewModel.deleteFile(entry.file.id) }) else null,
                         )
                     }
                 }
@@ -387,14 +363,6 @@ fun LibraryScreen(
                 text = { Text("导入") },
             )
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                DropdownMenuItem(
-                    text = { Text("新建文件夹") },
-                    onClick = {
-                        menuOpen = false
-                        folderName = ""
-                        namingFolder = true
-                    },
-                )
                 DropdownMenuItem(
                     text = { Text("选择文件导入") },
                     onClick = {
@@ -496,28 +464,6 @@ fun LibraryScreen(
         )
     }
 
-    if (namingFolder) {
-        AlertDialog(
-            onDismissRequest = { namingFolder = false },
-            title = { Text("新建文件夹") },
-            text = {
-                OutlinedTextField(
-                    value = folderName,
-                    onValueChange = { folderName = it },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    namingFolder = false
-                    viewModel.createFolder(folderName)
-                }) { Text("确定") }
-            },
-            dismissButton = { TextButton(onClick = { namingFolder = false }) { Text("取消") } },
-        )
-    }
-
     if (confirmDelete) {
         ConfirmRemoveDialog(
             message = "移除选中的内容？手机上的原文件会保留。",
@@ -560,4 +506,18 @@ private class OpenPersistableDocument : ActivityResultContracts.OpenDocument() {
 internal class OpenPersistableTree : ActivityResultContracts.OpenDocumentTree() {
     override fun createIntent(context: Context, input: Uri?): Intent =
         super.createIntent(context, input).addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+}
+
+@Composable
+private fun LibrarySortMenu(sort: LibrarySort, onChoose: (LibrarySort) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { expanded = true }) {
+            Icon(Icons.AutoMirrored.Filled.Sort, contentDescription = if (sort == LibrarySort.NAME) "按名称" else "按时间")
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            DropdownMenuItem(text = { Text("按名称") }, onClick = { expanded = false; onChoose(LibrarySort.NAME) })
+            DropdownMenuItem(text = { Text("按时间") }, onClick = { expanded = false; onChoose(LibrarySort.ADDED) })
+        }
+    }
 }

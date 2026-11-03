@@ -125,4 +125,34 @@ class LibrarySearchTest {
         assertEquals(1, result.entries.size)
         assertEquals("本地歌", result.entries.single().name)
     }
+    @Test fun scopedSearchOnlyIncludesDescendantsAndNeverTheAnchor() {
+        val parent = FolderEntity(id = 30, name = "match parent", position = 0)
+        val anchor = FolderEntity(id = 31, parentId = 30, name = "match anchor", position = 0)
+        val child = FolderEntity(id = 32, parentId = 31, name = "match child", position = 0)
+        val sibling = FolderEntity(id = 33, parentId = 30, name = "match sibling", position = 0)
+        val result = searchListing("match", LibrarySort.NAME, listOf(parent, anchor, child, sibling),
+            listOf(track(40, 31, "match here"), track(41, 32, "match nested"), track(42, 33, "match elsewhere"),
+                track(43, null, "match root")), emptyList(), scopeFolderId = 31)
+        assertEquals(listOf(32L), result.folders.map { it.id })
+        assertEquals(setOf(40L, 41L), result.entries.filterIsInstance<LibraryEntry.Audio>().map { it.track.id }.toSet())
+    }
+
+    @Test fun groupedBiliPartsCollapseWithinTheScopeButNeverToAnOutsideAncestor() {
+        val anchor = FolderEntity(id = 30, name = "local", position = 0)
+        val group = FolderEntity(id = 31, parentId = 30, name = "video", position = 0, biliBvid = "BV1234567890")
+        val deep = FolderEntity(id = 32, parentId = 31, name = "deep", position = 0)
+        val tracks = listOf(track(40, 31, "match", TrackSource.BILIBILI), track(41, 32, "match", TrackSource.BILIBILI))
+        val result = searchListing("match", LibrarySort.NAME, listOf(anchor, group, deep), tracks, emptyList(), scopeFolderId = 30)
+        assertEquals(listOf(group.id), result.folders.map { it.id })
+        assertTrue(result.entries.isEmpty())
+        val inside = searchListing("match", LibrarySort.NAME, listOf(anchor, group, deep), tracks, emptyList(), scopeFolderId = 32)
+        assertTrue(inside.folders.isEmpty())
+        assertEquals(listOf(41L), inside.entries.filterIsInstance<LibraryEntry.Audio>().map { it.track.id })
+    }
+
+    @Test fun groupedBiliCanBeFoundByItsBvNumber() {
+        val group = FolderEntity(id = 30, name = "video", position = 0, biliBvid = "BV1234567890")
+        assertEquals(listOf(30L), search("BV1234567890", listOf(group)).folders.map { it.id })
+    }
+
 }

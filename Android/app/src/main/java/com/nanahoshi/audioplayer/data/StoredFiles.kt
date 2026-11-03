@@ -133,6 +133,14 @@ class StoredCatalog(
                 byWorkId,
             )
         }
+        for (entry in db.dlsiteOriginals().allEntries()) {
+            if (entry.kind != "AUDIO" && !isSubtitleFile(entry.relativePath)) continue
+            val file = File(entry.localPath)
+            if (!file.isFile || !inside(file, asmr, dlsite, bili)) continue
+            rememberFile(file, entry.localPath, entry.trackId?.takeIf { db.tracks().getById(it) != null },
+                null, entry.workno, lookupSource(entry.workno, bySource), file.name, null,
+                audios, looseSubtitles, asmr, dlsite, bili, bySource, byWorkId)
+        }
         val jobs = db.whisper().done().map {
             ListedJob(it.id, it.fingerprint, it.trackId, it.localPath, it.awaitRemoteUrl, it.title)
         }

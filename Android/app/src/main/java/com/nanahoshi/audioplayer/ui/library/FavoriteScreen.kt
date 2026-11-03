@@ -118,23 +118,22 @@ class FavoriteViewModel(app: Application) : AndroidViewModel(app) {
         }
         viewModelScope.launch {
             importing.value = true
-            var imported = 0
-            var failed = 0
-            for (bvid in bvids) {
-                try {
-                    val parts = graph.library.lookupBvid(bvid)
-                    imported += graph.library.importParts(parts, folderId).size
-                } catch (_: Exception) {
-                    failed += 1
+            try {
+                val details = mutableListOf<com.nanahoshi.audioplayer.bilibili.BiliVideoDetails>()
+                val failed = mutableListOf<String>()
+                for (bvid in bvids) {
+                    try { details += graph.bilibili.videoDetails(bvid) }
+                    catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                    catch (_: Exception) { failed += "$bvid：分 P 读取失败" }
                 }
-            }
-            importing.value = false
-            graph.messages.value = if (failed == 0) {
-                "已导入 $imported 首"
-            } else {
-                "已导入 $imported 首，失败 $failed 个"
-            }
-            onDone()
+                if (details.isEmpty()) { graph.messages.value = "没有读到可导入的视频"; return@launch }
+                val requests = graph.biliImportRequests.choose(details, failed) ?: return@launch
+                requests.forEach { graph.library.importBili(it) }
+                graph.messages.value = "已导入音频库" + if (failed.isNotEmpty()) "，失败 ${failed.size} 个视频" else ""
+                onDone()
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (failure: Exception) { graph.messages.value = failure.message ?: "导入失败，请重试" }
+            finally { importing.value = false }
         }
     }
 

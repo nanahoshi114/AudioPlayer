@@ -115,14 +115,35 @@ class WhisperCenter(
         }
     }
 
-    suspend fun startAfterDownload(row: QueuedTrack, translate: Boolean): WhisperStart = withContext(Dispatchers.IO) {
-        val ready = existingFile(row)
+    suspend fun startAfterDownload(row: QueuedTrack, translate: Boolean, dlsiteMode: DlsiteDownloadMode = DlsiteDownloadMode.PARTIAL): WhisperStart = withContext(Dispatchers.IO) {
+        val ready = if (row.source == TrackSource.DLSITE && dlsiteMode == DlsiteDownloadMode.ARCHIVE) {
+            val original = row.trackId?.let { downloads.originalPathForTrack(it) }
+                ?: row.workno?.let { code -> row.fileKey?.let { key ->
+                    db.dlsiteOriginals().entryForPlay(com.nanahoshi.audioplayer.dlsite.DlsiteClient.canonicalWorkno(code), rawFileKey(key) ?: key)
+                        ?.localPath?.takeIf { File(it).isFile }
+                } }
+            materialize(original)
+        } else existingFile(row)
         if (ready != null) {
             return@withContext start(row, ready, translate)
         }
         val title = row.title.ifBlank { "音频" }
         val trackId = row.trackId?.takeIf { it > 0L }
         val skipTranslate = !translate
+        if (row.source == TrackSource.DLSITE && (dlsiteMode == DlsiteDownloadMode.ARCHIVE ||
+                (trackId != null && db.tracks().getById(trackId)?.fileHash.isNullOrBlank()))) {
+            if (trackId != null && db.whisper().activeForTrack(trackId) != null) return@withContext WhisperStart.AlreadyRunning
+            val url = row.remoteUrl?.takeIf { it.isNotBlank() }
+            if (trackId == null && url != null && db.whisper().activeForUrl(url) != null) return@withContext WhisperStart.AlreadyRunning
+            val workno = trackId?.let { db.tracks().getById(it) }?.let { downloads.requestWorkno(it) }
+                ?: row.workno ?: return@withContext WhisperStart.Unavailable
+            val downloadId = downloads.enqueueDlsiteArchive(workno, title)
+            db.whisper().insert(waiting(title, trackId, url, skipTranslate).copy(
+                awaitDownloadId = downloadId, awaitFileKey = row.fileKey ?: trackId?.let { db.tracks().getById(it)?.fileHash }?.let(::rawFileKey),
+            ))
+            kick.trySend(Unit)
+            return@withContext WhisperStart.Started
+        }
         if (trackId != null) {
             if (db.whisper().activeForTrack(trackId) != null) return@withContext WhisperStart.AlreadyRunning
             val track = db.tracks().getById(trackId) ?: return@withContext WhisperStart.Unavailable
@@ -153,12 +174,24 @@ class WhisperCenter(
         WhisperStart.Started
     }
 
-    fun retry(id: Long) {
+    suspend fun needsDlsiteDownloadChoice(job: WhisperJobEntity): Boolean = withContext(Dispatchers.IO) {
+        if (!job.localPath.isNullOrBlank() && File(job.localPath).isFile) return@withContext false
+        val track = job.trackId?.let { db.tracks().getById(it) }
+        if (track != null && LocalAudio.hasStoredCopy(track.localUri)) return@withContext false
+        if (track?.source == TrackSource.DLSITE) return@withContext true
+        job.awaitDownloadId?.let { db.downloads().get(it) }?.let {
+            return@withContext it.source == TrackSource.DLSITE.name
+        }
+        val url = job.awaitRemoteUrl ?: return@withContext false
+        db.downloads().latestForUrl(url)?.let { it.source == TrackSource.DLSITE.name && !it.fileKey.isNullOrBlank() } ?: false
+    }
+
+    fun retry(id: Long, dlsiteMode: DlsiteDownloadMode = DlsiteDownloadMode.PARTIAL) {
         scope.launch {
             val job = db.whisper().get(id) ?: return@launch
             if (job.status != DownloadStatus.FAILED) return@launch
             val path = job.localPath
-            if (!path.isNullOrBlank() && File(path).isFile && job.fingerprint.isNotBlank()) {
+            if (dlsiteMode != DlsiteDownloadMode.ARCHIVE && !path.isNullOrBlank() && File(path).isFile && job.fingerprint.isNotBlank()) {
                 val staged = isStagedPath(path)
                 if (staged) holdStaged(path)
                 try {
@@ -179,7 +212,7 @@ class WhisperCenter(
                 kick.trySend(Unit)
                 return@launch
             }
-            val restored = restoreLocalCopy(job)
+            val restored = if (dlsiteMode == DlsiteDownloadMode.ARCHIVE) null else restoreLocalCopy(job)
             if (restored != null) {
                 try {
                     db.whisper().requeueWithFile(
@@ -200,6 +233,23 @@ class WhisperCenter(
                 kick.trySend(Unit)
                 return@launch
             }
+            val track = job.trackId?.let { db.tracks().getById(it) }
+            val oldDownload = job.awaitDownloadId?.let { db.downloads().get(it) }
+                ?: job.awaitRemoteUrl?.let { db.downloads().latestForUrl(it) }
+            val needsArchive = (dlsiteMode == DlsiteDownloadMode.ARCHIVE &&
+                (track?.source == TrackSource.DLSITE || oldDownload?.source == TrackSource.DLSITE.name)) ||
+                (track?.source == TrackSource.DLSITE && track.fileHash.isNullOrBlank())
+            if (needsArchive) {
+                val workno = track?.let { downloads.requestWorkno(it) } ?: oldDownload?.workKey
+                if (workno == null) { db.whisper().fail(job.id, "没有作品编号"); return@launch }
+                val id = downloads.enqueueDlsiteArchive(workno, job.title)
+                db.whisper().setAwaitDownload(job.id, id, job.awaitFileKey ?: oldDownload?.fileKey ?: track?.fileHash?.let(::rawFileKey))
+                db.whisper().requeueForDownload(job.id)
+                kick.trySend(Unit)
+                return@launch
+            }
+            // 用户重新选择部分下载后解除旧整包依赖。
+            db.whisper().clearAwaitDownload(job.id)
             db.whisper().requeueForDownload(job.id)
             val trackId = job.trackId
             if (trackId != null && trackId > 0L) {
@@ -215,6 +265,11 @@ class WhisperCenter(
                 if (!url.isNullOrBlank()) {
                     val latest = db.downloads().latestForUrl(url)
                     if (latest?.status == DownloadStatus.FAILED) downloads.retry(latest.id)
+                    else if (latest == null && oldDownload?.kind == "DLSITE_ARCHIVE" && job.awaitFileKey != null) {
+                        downloads.enqueueRemote(RemotePlayable(job.title, null, null, url, TrackSource.DLSITE,
+                            com.nanahoshi.audioplayer.dlsite.DlsiteClient.PLAY_REFERER, workno = oldDownload.workKey,
+                            fileKey = job.awaitFileKey), oldDownload.workKey.orEmpty())
+                    }
                 }
             }
             kick.trySend(Unit)
@@ -370,6 +425,16 @@ class WhisperCenter(
     }
 
     private suspend fun waitingPath(job: WhisperJobEntity): String? {
+        job.awaitDownloadId?.let { id ->
+            val download = db.downloads().get(id) ?: return null
+            if (download.status != DownloadStatus.DONE) return null
+            job.trackId?.let { downloads.originalPathForTrack(it) }?.let { return it }
+            val workno = download.workKey ?: return null
+            val key = job.awaitFileKey ?: return null
+            return db.dlsiteOriginals().entryForPlay(
+                com.nanahoshi.audioplayer.dlsite.DlsiteClient.canonicalWorkno(workno), rawFileKey(key) ?: key,
+            )?.localPath?.takeIf { File(it).isFile }
+        }
         val trackId = job.trackId
         if (trackId != null && trackId > 0L) {
             val track = db.tracks().getById(trackId)
@@ -384,6 +449,10 @@ class WhisperCenter(
     }
 
     private suspend fun downloadGaveUp(job: WhisperJobEntity): Boolean {
+        job.awaitDownloadId?.let { id ->
+            val row = db.downloads().get(id) ?: return true
+            return row.status == DownloadStatus.FAILED || row.status == DownloadStatus.DONE
+        }
         val trackId = job.trackId
         if (trackId != null && trackId > 0L) {
             if (db.downloads().activeForTrack(trackId) != null) return false
@@ -397,6 +466,10 @@ class WhisperCenter(
     }
 
     private suspend fun downloadError(job: WhisperJobEntity): String? {
+        job.awaitDownloadId?.let { id ->
+            val row = db.downloads().get(id)
+            return if (row?.status == DownloadStatus.DONE) "原始压缩包中未找到这条音频" else row?.error ?: "下载任务已不存在"
+        }
         val trackId = job.trackId
         val latest = if (trackId != null && trackId > 0L) {
             db.downloads().latestForTrack(trackId)

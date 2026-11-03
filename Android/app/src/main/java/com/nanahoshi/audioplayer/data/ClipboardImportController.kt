@@ -8,17 +8,18 @@ import kotlinx.coroutines.*
 internal data class ClipboardImportPreview(
     val target: ClipboardTarget, val title: String, val cover: String?, val alreadySaved: Boolean = false,
     val parts: List<BiliPart> = emptyList(), val youtubeVideo: YouTubeVideo? = null,
+    val biliVideo: com.nanahoshi.audioplayer.bilibili.BiliVideoHit? = null,
 )
 internal data class ClipboardImportState(
     val candidate: ClipboardImportCandidate, val preview: ClipboardImportPreview? = null,
     val selected: Set<Long> = emptySet(), val loading: Boolean = true, val saving: Boolean = false, val error: String? = null,
 ) {
-    val canImport get() = !loading && !saving && preview != null && !preview.alreadySaved &&
+    val canImport get() = !loading && !saving && preview != null && (!preview.alreadySaved || preview.target.source == ClipboardSource.BILIBILI) &&
         (preview.target.source != ClipboardSource.BILIBILI || preview.parts.any { it.cid in selected })
 }
 internal interface ClipboardImportBackend {
     suspend fun preview(target: ClipboardTarget): ClipboardImportPreview
-    suspend fun save(preview: ClipboardImportPreview, selectedParts: List<BiliPart>): String
+    suspend fun save(preview: ClipboardImportPreview, selectedParts: List<BiliPart>): String?
 }
 
 /** 所有状态更新在主线程；测试注入后端和作用域，不读 Android 剪贴板或 org.json。 */
@@ -80,7 +81,10 @@ internal class ClipboardImportController(
         job = scope.launch {
             try {
                 val result = backend.save(preview, preview.parts.filter { it.cid in current.selected })
-                if (token == generation) { state = null; message(result) }
+                if (token == generation) {
+                    if (result == null) state = current.copy(saving = false, error = null)
+                    else { state = null; message(result) }
+                }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) {
                 if (token == generation) state = current.copy(error = "导入失败，请重试")

@@ -172,6 +172,8 @@ class MainActivity : ComponentActivity() {
 
 private object Routes {
     const val Library = "library"
+    const val BiliVideo = "library/bilibili/{folderId}"
+    fun biliVideo(id: Long) = "library/bilibili/$id"
     const val LibraryWork = "library/work/{folderId}"
     fun libraryWork(folderId: Long) = "library/work/$folderId"
     const val Playlists = "playlists"
@@ -210,11 +212,13 @@ private fun PlayerApp(clipboardImport: ClipboardImportViewModel) {
     }
     val highlight = if (isTab(route)) route else lastTab
     val showTopBar = isTab(route)
-    val showBottomDock = showTopBar || route == Routes.OnlineWork || route == Routes.LibraryWork
+    val showBottomDock = showTopBar || route == Routes.OnlineWork || route == Routes.LibraryWork || route == Routes.BiliVideo
     val context = LocalContext.current
     val graph = (context.applicationContext as AudioPlayerApplication).graph
+    com.nanahoshi.audioplayer.ui.components.DlsiteDownloadDialog(graph.dlsiteDownloadRequests)
     val messages = graph.messages
     val message by messages.collectAsStateWithLifecycle()
+    com.nanahoshi.audioplayer.ui.bilibili.BiliImportDialog(graph.biliImportRequests)
     val sleepFinished by graph.player.sleepFinished
         .collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
@@ -267,8 +271,7 @@ private fun PlayerApp(clipboardImport: ClipboardImportViewModel) {
     }
     if (!sleepFinished) clipboardImport.controller.state?.let { state ->
         val controller = clipboardImport.controller
-        ClipboardImportDialog(state, controller::dismiss, controller::confirm, controller::load,
-            controller::togglePart, controller::toggleAllParts)
+        ClipboardImportDialog(state, controller::dismiss, controller::confirm, controller::load)
     }
     SharedTransitionLayout {
     val shared = this
@@ -444,6 +447,7 @@ private fun PlayerApp(clipboardImport: ClipboardImportViewModel) {
                 LibraryScreen(
                     onOpenPreview = { fileId -> navController.navigate(Routes.preview(fileId)) },
                     onOpenLibraryWork = { id -> navController.navigate(Routes.libraryWork(id)) },
+                    onOpenBiliVideo = { id -> navController.navigate(Routes.biliVideo(id)) },
                     onImportOnline = {
                         navController.navigate(Routes.Online) {
                             popUpTo(navController.graph.findStartDestination().id) { saveState = true }
@@ -464,6 +468,10 @@ private fun PlayerApp(clipboardImport: ClipboardImportViewModel) {
                     onOpenPreview = { fileId -> navController.navigate(Routes.preview(fileId)) },
                     onOpenOnline = { sourceId -> navController.navigate(Routes.onlineWork(sourceId)) },
                 )
+            }
+            composable(Routes.BiliVideo, arguments = listOf(navArgument("folderId") { type = NavType.LongType })) { entry ->
+                val id = entry.arguments?.getLong("folderId") ?: return@composable
+                com.nanahoshi.audioplayer.ui.bilibili.BiliVideoScreen(id, onBack = { navController.popBackStack() })
             }
             composable(Routes.Playlists) {
                 PlaylistListScreen(onOpen = { id -> navController.navigate(Routes.playlist(id)) })

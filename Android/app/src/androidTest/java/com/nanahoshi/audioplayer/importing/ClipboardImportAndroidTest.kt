@@ -41,7 +41,7 @@ class ClipboardImportAndroidTest {
         var state by mutableStateOf(ClipboardImportState(candidate))
         var imports = 0
         compose.setContent { MaterialTheme {
-            ClipboardImportDialog(state, {}, { imports++ }, {}, {}, {})
+            ClipboardImportDialog(state, {}, { imports++ }, {})
         } }
         compose.onNodeWithText("是否要导入：").assertIsDisplayed()
         compose.onNodeWithText("导入").assertIsNotEnabled()
@@ -53,24 +53,18 @@ class ClipboardImportAndroidTest {
         compose.onNodeWithText("视频标题").assertIsDisplayed()
         compose.onNodeWithContentDescription("导入内容封面").assertExists()
         compose.runOnIdle { assertEquals(0, imports) }
-        compose.onNodeWithText("导入").assertIsEnabled().performClick()
+        compose.onNodeWithText("选择入库方式").assertIsEnabled().performClick()
         compose.runOnIdle { assertEquals(1, imports) }
     }
 
-    @Test fun multiPartImportCanUnselectAllThenChooseOnePart() {
+    @Test fun multiPartPreviewDefersSelectionToTheSharedImportDialog() {
         val parts = listOf(BiliPart(target.id, 42, 1, "one", "UP", 1000, ""), BiliPart(target.id, 43, 2, "two", "UP", 1000, ""))
-        var state by mutableStateOf(ClipboardImportState(candidate, ClipboardImportPreview(target, "标题", null, parts = parts),
-            selected = setOf(42, 43), loading = false))
-        var chosen: Set<Long>? = null
-        compose.setContent { MaterialTheme {
-            ClipboardImportDialog(state, {}, { chosen = state.selected }, {},
-                { cid -> state = state.copy(selected = if (cid in state.selected) state.selected - cid else state.selected + cid) },
-                { state = state.copy(selected = if (state.selected.size == 2) emptySet() else setOf(42, 43)) })
-        } }
-        compose.onNodeWithText("全选 / 取消全选").performClick()
-        compose.onNodeWithText("导入").assertIsNotEnabled()
-        compose.onNodeWithText("P2 · two").performClick()
-        compose.onNodeWithText("导入").assertIsEnabled().performClick()
-        compose.runOnIdle { assertEquals(setOf(43L), chosen) }
+        val state = ClipboardImportState(candidate, ClipboardImportPreview(target, "标题", null, parts = parts),
+            selected = setOf(42, 43), loading = false)
+        var choices = 0
+        compose.setContent { MaterialTheme { ClipboardImportDialog(state, {}, { choices++ }, {}) } }
+        compose.onNodeWithText("P2 · two").assertDoesNotExist()
+        compose.onNodeWithText("选择入库方式").assertIsEnabled().performClick()
+        compose.runOnIdle { assertEquals(1, choices) }
     }
 }

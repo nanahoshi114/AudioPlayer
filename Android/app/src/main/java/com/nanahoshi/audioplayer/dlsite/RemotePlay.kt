@@ -21,6 +21,8 @@ data class RemotePreview(
     val kind: FileKind,
     val referer: String,
     val authed: Boolean,
+    val workno: String? = null,
+    val fileKey: String? = null,
 )
 
 data class PlayEntry(

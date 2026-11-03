@@ -120,6 +120,7 @@ import com.nanahoshi.audioplayer.bilibili.QrPoll
 import com.nanahoshi.audioplayer.bilibili.qrBitmap
 import com.nanahoshi.audioplayer.data.toHttps
 import com.nanahoshi.audioplayer.dlsite.DlsiteClient
+import com.nanahoshi.audioplayer.data.DlsiteDownloadMode
 import com.nanahoshi.audioplayer.asmr.AsmrCatalogItem
 import com.nanahoshi.audioplayer.asmr.AsmrNode
 import com.nanahoshi.audioplayer.asmr.AsmrWork
@@ -133,6 +134,7 @@ import com.nanahoshi.audioplayer.data.db.LibraryFileEntity
 import com.nanahoshi.audioplayer.data.db.TrackEntity
 import com.nanahoshi.audioplayer.data.previewKind
 import com.nanahoshi.audioplayer.data.rawFileKey
+import com.nanahoshi.audioplayer.data.libraryFileSource
 import com.nanahoshi.audioplayer.data.isAsmrAudio
 import com.nanahoshi.audioplayer.data.isContainer
 import com.nanahoshi.audioplayer.data.isSubtitleFile
@@ -249,6 +251,8 @@ class OnlineSearchViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var error by mutableStateOf<String?>(null)
         private set
+    var searchRevision by mutableStateOf(0L)
+        private set
     private var page = 1
     private var asmrHasMore = true
     private var dlsiteHasMore = true
@@ -317,6 +321,12 @@ class OnlineSearchViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun load(reset: Boolean) {
         job?.cancel()
+        if (reset) {
+            searchRevision++
+            page = 1
+            works = emptyList()
+        }
+        val revision = searchRevision
         val next = viewModelScope.launch {
             loading = true
             if (reset) {
@@ -361,6 +371,7 @@ class OnlineSearchViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     asmrCall.await() to dlsiteCall.await()
                 }
+                if (revision != searchRevision) return@launch
                 val asmrPage = asmrResult?.getOrNull()
                 val dlsitePage = dlsiteResult?.getOrNull()
                 if (asmrPage != null) {
@@ -390,7 +401,9 @@ class OnlineSearchViewModel(app: Application) : AndroidViewModel(app) {
                         merged[key] = item.toHit()
                     }
                 }
-                works = markListed(merged.values.toList())
+                val listed = markListed(merged.values.toList())
+                if (revision != searchRevision) return@launch
+                works = listed
                 page = nextPage
                 error = listOfNotNull(
                     asmrResult?.exceptionOrNull()?.let { "asmr.one：${it.message ?: "暂时无法连接"}" },
@@ -399,9 +412,9 @@ class OnlineSearchViewModel(app: Application) : AndroidViewModel(app) {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                error = failure.message ?: "暂时无法连接"
+                if (revision == searchRevision) error = failure.message ?: "暂时无法连接"
             } finally {
-                if (job === coroutineContext[Job]) loading = false
+                if (revision == searchRevision) loading = false
             }
         }
         job = next
@@ -499,25 +512,54 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
     var nodeFiles by mutableStateOf<List<AsmrNode>>(emptyList())
         private set
 
+    var browserPath by mutableStateOf<List<String>>(emptyList())
+        private set
+    private var browserIdentity by mutableStateOf("")
+    private val libraryNames = mutableMapOf<Long, String>()
+    private val browserStates = mutableMapOf<String, androidx.compose.foundation.lazy.LazyListState>()
+
+    fun browserListState() = browserStates.getOrPut(browserIdentity) { androidx.compose.foundation.lazy.LazyListState() }
+
+    private fun publishLocation() {
+        browserPath = when {
+            showPlay -> playStack.map { it.title }
+            usingLibrary -> libraryStack.drop(1).map { libraryNames[it].orEmpty() }
+            else -> nodeStack.map { it.title }
+        }
+        val path = when {
+            showPlay -> playStack.joinToString("/") { System.identityHashCode(it).toString() }
+            usingLibrary -> libraryStack.joinToString("/")
+            else -> nodeStack.joinToString("/") { System.identityHashCode(it).toString() }
+        }
+        browserIdentity = "$sourceKey|${fileSource.name}|$path"
+    }
+
+    fun ancestor(depth: Int) { repeat((browserPath.size - depth).coerceAtLeast(0)) { up() } }
+
+    fun openGallery(index: Int): Boolean {
+        val url = gallery.getOrNull(index) ?: return false
+        graph.remotePreview.value = com.nanahoshi.audioplayer.dlsite.RemotePreview(
+            "${facts?.title.orEmpty()} · 图 ${index + 1}", url, FileKind.IMAGE, DlsiteClient.STORE_REFERER, false)
+        return true
+    }
+
     private var sourceKey = ""
     private var rootFolderId: Long? = null
+    private var originalRootId by mutableStateOf<Long?>(null)
+    val hasOriginalFiles: Boolean get() = originalRootId != null
     private val libraryStack = mutableListOf<Long>()
     private val nodeStack = mutableListOf<AsmrNode>()
     private val playStack = mutableListOf<com.nanahoshi.audioplayer.dlsite.PlayEntry>()
     private var playRoot = emptyList<com.nanahoshi.audioplayer.dlsite.PlayEntry>()
     private val browseId = MutableStateFlow<Long?>(null)
-    private var sortMode = LibrarySort.ADDED
+    private val browseSource = MutableStateFlow(TrackSource.ASMR)
+    private val originalWorkKey = MutableStateFlow<String?>(null)
     private var loadJob: Job? = null
+    private var loadRevision = 0L
 
     init {
         viewModelScope.launch {
-            graph.librarySort.sort.collect { mode ->
-                sortMode = mode
-                if (showPlay) publishPlay() else if (!usingLibrary) publishNodes()
-            }
-        }
-        viewModelScope.launch {
-            browseId.flatMapLatest { id ->
+            combine(browseId, browseSource) { id, source -> id to source }.flatMapLatest { (id, source) ->
                 if (id == null) {
                     kotlinx.coroutines.flow.flowOf(null)
                 } else {
@@ -526,25 +568,40 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
                         graph.library.observeTracksIn(id),
                         graph.library.observeFilesIn(id),
                         graph.library.observeFolder(id),
-                        graph.librarySort.sort,
-                    ) { folders, tracks, files, folder, sort ->
+                    ) { folders, tracks, files, folder ->
+                        val displaySort = LibrarySort.NAME
                         LibraryBrowse(
                             id = id,
+                            source = source,
                             title = folder?.name.orEmpty(),
-                            folders = folders.sortedForLibrary(sort),
-                            entries = mixedEntries(tracks, files, sort),
+                            folders = folders.filter { it.contentSource == source.name || it.asmrWorkId == null }
+                                .sortedForLibrary(displaySort),
+                            entries = mixedEntries(tracks.filter { it.source == source },
+                                files.filter { libraryFileSource(it.fileHash) == source }, displaySort),
                         )
                     }
                 }
             }.collect { browse ->
-                if (browse == null || !usingLibrary) return@collect
+                if (browse == null || !usingLibrary || showPlay || browse.id != browseId.value || browse.source != browseSource.value) return@collect
                 libraryFolders = browse.folders
                 libraryEntries = browse.entries
-                if (browse.entries.any { it is LibraryEntry.Audio && it.track.source == TrackSource.DLSITE }) {
-                    filesFromPlay = true
-                }
+                filesFromPlay = browseSource.value == TrackSource.DLSITE
                 folderTitle = browse.title
                 atWorkRoot = browse.id == rootFolderId
+            }
+        }
+        viewModelScope.launch {
+            combine(originalWorkKey, graph.db.dlsiteOriginals().observeEntries(), graph.library.observeAllFolders()) { code, _, folders ->
+                val rootId = code?.let { graph.db.dlsiteOriginals().work(it)?.rootFolderId }
+                    ?.takeIf { id -> folders.any { it.id == id } }
+                code to rootId
+            }.collect { (code, rootId) ->
+                if (code == null || code != DlsiteClient.canonicalWorkno(sourceKey)) return@collect
+                originalRootId = rootId
+                if (rootId != null) {
+                    saved = true
+                    if (fileSource == WorkFileSource.PLAY) showOriginalLibrary(rootId)
+                }
             }
         }
     }
@@ -554,7 +611,10 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
             refreshDownloads(sourceId)
             return
         }
+        val revision = ++loadRevision
         sourceKey = sourceId
+        originalRootId = null
+        originalWorkKey.value = DlsiteClient.canonicalWorkno(sourceId)
         loadJob?.cancel()
         loadJob = viewModelScope.launch {
             busy = true
@@ -567,6 +627,20 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
             downloadedAsmr = emptySet()
             allowGallery = !metered
             try {
+                val existing = graph.library.folderBySource(sourceId)
+                val original = graph.db.dlsiteOriginals().work(DlsiteClient.canonicalWorkno(sourceId))
+                    ?.rootFolderId?.takeIf { graph.db.folders().get(it) != null }
+                originalRootId = original
+                val localFacts = existing?.let { folder ->
+                    WorkFacts.fromJson(folder.workMeta) ?: WorkFacts(folder.name, "", emptyList(), emptyList(), "", sourceId)
+                }
+                if (original != null && localFacts != null) {
+                    facts = localFacts
+                    coverUrl = existing.coverUri
+                    fileSource = WorkFileSource.PLAY
+                    showOriginalLibrary(original)
+                    saved = true
+                }
                 var missing = false
                 val loaded = try {
                     graph.asmr.loadWork(sourceId)
@@ -584,9 +658,10 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
                 } catch (_: Exception) {
                     null
                 }
+                if (revision != loadRevision) return@launch
                 work = loaded
                 val pageFacts = page?.facts()
-                val nextFacts = loaded?.facts() ?: pageFacts
+                val nextFacts = loaded?.facts() ?: pageFacts ?: localFacts?.takeIf { original != null }
                 if (nextFacts == null) {
                     facts = null
                     error = "没有读到作品。"
@@ -594,7 +669,7 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 facts = nextFacts
                 dlsiteSite = page?.siteId?.filter { it.isLetter() }?.ifBlank { null } ?: "maniax"
-                coverUrl = loaded?.coverUrl ?: page?.coverUrl
+                coverUrl = loaded?.coverUrl ?: page?.coverUrl ?: existing?.coverUri
                 gallery = page?.gallery.orEmpty()
                 trials = page?.trials.orEmpty().map { clip ->
                     clip.copy(artist = nextFacts.circle.ifBlank { null }, coverUri = coverUrl)
@@ -607,9 +682,12 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
                 } catch (_: Exception) {
                     false
                 }
-                val existing = graph.library.folderBySource(nextFacts.sourceId)
+                if (revision != loadRevision) return@launch
                 saved = existing != null
-                if (purchased) {
+                if (original != null) {
+                    fileSource = WorkFileSource.PLAY
+                    showOriginalLibrary(original)
+                } else if (purchased) {
                     fileSource = WorkFileSource.PLAY
                     showPlay = true
                     usingLibrary = false
@@ -650,21 +728,27 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                error = failure.message ?: "暂时无法连接"
+                if (revision == loadRevision) error = failure.message ?: "暂时无法连接"
             } finally {
-                busy = false
+                if (revision == loadRevision) busy = false
             }
         }
     }
 
     fun useFileSource(source: WorkFileSource) {
-        if (source == WorkFileSource.PLAY && !purchased) return
+        if (source == fileSource) return
+        if (source == WorkFileSource.PLAY && !purchased && originalRootId == null) return
         fileSource = source
         playStack.clear()
         nodeStack.clear()
         atWorkRoot = true
         folderTitle = ""
         if (source == WorkFileSource.PLAY) {
+            originalRootId?.let {
+                showOriginalLibrary(it)
+                browserStates.remove(browserIdentity)
+                return
+            }
             showPlay = true
             usingLibrary = false
             browseId.value = null
@@ -675,6 +759,7 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
             browseId.value = null
             publishNodes()
         }
+        browserStates.remove(browserIdentity)
     }
 
     fun playDownloaded(fileKey: String?): Boolean {
@@ -729,7 +814,10 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
             }
             usingLibrary -> {
                 libraryStack.removeAt(libraryStack.lastIndex)
+                libraryFolders = emptyList()
+                libraryEntries = emptyList()
                 browseId.value = libraryStack.last()
+                publishLocation()
             }
             else -> {
                 nodeStack.removeAt(nodeStack.lastIndex)
@@ -741,8 +829,13 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun openLibraryFolder(folder: FolderEntity) {
+        libraryNames[folder.id] = folder.name
         libraryStack.add(folder.id)
+        libraryFolders = emptyList()
+        libraryEntries = emptyList()
         browseId.value = folder.id
+        publishLocation()
+        browserStates.remove(browserIdentity)
     }
 
     fun openNode(node: AsmrNode) {
@@ -750,12 +843,15 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
         atWorkRoot = false
         folderTitle = node.title
         publishNodes()
+        browserStates.remove(browserIdentity)
     }
 
     fun playLibrary(track: TrackEntity) {
         viewModelScope.launch {
             val folderId = browseId.value ?: return@launch
-            val tracks = graph.library.tracksIn(folderId).sortedForLibrary(graph.librarySort.sort.value)
+            val source = browseSource.value
+            val tracks = graph.library.tracksIn(folderId).filter { it.source == source }
+                .sortedForLibrary(LibrarySort.NAME)
             val index = tracks.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
             graph.player.replaceAndPlay(tracks.ifEmpty { listOf(track) }, index)
         }
@@ -765,6 +861,7 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
         val current = work ?: return
         val siblings = (if (nodeStack.isEmpty()) current.nodes else nodeStack.last().children)
             .filter { isAsmrAudio(it.type, it.title) && !it.streamUrl.isNullOrBlank() }
+            .sortedBy { it.title.lowercase() }
         val items = siblings.map { sibling ->
             com.nanahoshi.audioplayer.dlsite.RemotePlayable(
                 title = sibling.title,
@@ -807,15 +904,35 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
         atWorkRoot = false
         folderTitle = entry.title
         publishPlay()
+        browserStates.remove(browserIdentity)
     }
 
     fun playPlay(entry: com.nanahoshi.audioplayer.dlsite.PlayEntry) {
-        val siblings = (if (playStack.isEmpty()) playRoot else playStack.last().children).mapNotNull { it.audio }
+        val siblings = playFiles.mapNotNull { it.audio }
         val index = siblings.indexOfFirst { it.remoteUrl == entry.audio?.remoteUrl }.coerceAtLeast(0)
         if (siblings.isEmpty()) {
             graph.messages.value = "没有可播放的音频"
         } else {
             graph.player.replaceAndPlayRemote(siblings, index)
+        }
+    }
+
+    fun downloadLibraryTrack(track: TrackEntity) {
+        viewModelScope.launch {
+            try {
+                if (com.nanahoshi.audioplayer.data.LocalAudio.hasStoredCopy(track.localUri)) return@launch
+                val workno = graph.downloads.requestWorkno(track) ?: error("找不到作品编号")
+                val mode = graph.dlsiteDownloadRequests.choose(listOf(workno),
+                    allowPartial = !track.fileHash.isNullOrBlank()) ?: return@launch
+                if (mode == DlsiteDownloadMode.ARCHIVE) {
+                    graph.downloads.enqueueDlsiteArchive(workno)
+                    graph.messages.value = "已加入完整包下载"
+                } else {
+                    val count = graph.downloads.enqueue(listOf(track))
+                    graph.messages.value = if (count > 0) "已加入下载" else "已经在本地或正在下载"
+                }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) { graph.messages.value = failure.message ?: "下载失败" }
         }
     }
 
@@ -826,8 +943,28 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         viewModelScope.launch {
-            val added = graph.downloads.enqueueRemote(audio, audio.workno ?: facts?.sourceId.orEmpty())
-            graph.messages.value = if (added) "已加入下载" else "已经在下载"
+            val workno = audio.workno ?: facts?.sourceId.orEmpty()
+            if (workno.isBlank()) {
+                graph.messages.value = "找不到作品编号"
+                return@launch
+            }
+            val mode = graph.dlsiteDownloadRequests.choose(
+                listOf(facts?.title?.ifBlank { workno } ?: workno),
+                allowPartial = !audio.fileKey.isNullOrBlank(),
+            ) ?: return@launch
+            try {
+                if (mode == DlsiteDownloadMode.ARCHIVE) {
+                    val id = graph.downloads.enqueueDlsiteArchive(workno, facts?.title?.ifBlank { workno } ?: workno)
+                    graph.messages.value = if (id > 0L) "已加入完整包下载" else "原始文件已在本地或正在下载"
+                } else {
+                    val added = graph.downloads.enqueueRemote(audio, workno)
+                    graph.messages.value = if (added) "已加入下载" else "已经在下载"
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                graph.messages.value = error.message ?: "无法创建下载任务"
+            }
         }
     }
 
@@ -914,7 +1051,16 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun showLibrary(rootId: Long) {
+    private fun showOriginalLibrary(rootId: Long) {
+        showPlay = false
+        filesFromPlay = true
+        if (!usingLibrary || rootFolderId != rootId || browseSource.value != TrackSource.DLSITE) {
+            showLibrary(rootId, TrackSource.DLSITE)
+        }
+    }
+
+    private fun showLibrary(rootId: Long, source: TrackSource = TrackSource.ASMR) {
+        browseSource.value = source
         bindChain(listOf(rootId))
     }
 
@@ -926,43 +1072,28 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
         libraryStack.addAll(chain)
         browseId.value = chain.last()
         atWorkRoot = chain.size == 1
+        publishLocation()
     }
 
     private fun publishPlay() {
+        publishLocation()
         val nodes = if (playStack.isEmpty()) playRoot else playStack.last().children
-        val folders = nodes.filter { it.children.isNotEmpty() }
-        val files = nodes.filter { it.children.isEmpty() }
-        when (sortMode) {
-            LibrarySort.NAME -> {
-                playFolders = folders.sortedBy { it.title.lowercase() }
-                playFiles = files.sortedBy { it.title.lowercase() }
-            }
-            LibrarySort.ADDED -> {
-                playFolders = folders.asReversed()
-                playFiles = files.asReversed()
-            }
-        }
+        playFolders = nodes.filter { it.children.isNotEmpty() }.sortedBy { it.title.lowercase() }
+        playFiles = nodes.filter { it.children.isEmpty() }.sortedBy { it.title.lowercase() }
     }
 
     private fun publishNodes() {
+        publishLocation()
         val nodes = if (nodeStack.isEmpty()) work?.nodes.orEmpty() else nodeStack.last().children
-        val folders = nodes.filter { it.isContainer() }
-        val files = nodes.filter { !it.isContainer() && !isSubtitleFile(it.title) }
-        when (sortMode) {
-            LibrarySort.NAME -> {
-                nodeFolders = folders.sortedBy { it.title.lowercase() }
-                nodeFiles = files.sortedBy { it.title.lowercase() }
-            }
-            LibrarySort.ADDED -> {
-                nodeFolders = folders.asReversed()
-                nodeFiles = files.asReversed()
-            }
-        }
+        nodeFolders = nodes.filter { it.isContainer() }.sortedBy { it.title.lowercase() }
+        nodeFiles = nodes.filter { !it.isContainer() && !isSubtitleFile(it.title) }.sortedBy { it.title.lowercase() }
     }
+
 }
 
 private data class LibraryBrowse(
     val id: Long,
+    val source: TrackSource,
     val title: String,
     val folders: List<FolderEntity>,
     val entries: List<LibraryEntry>,
@@ -974,6 +1105,8 @@ private fun WorkSearchScreen(
     onOpenWork: (String) -> Unit,
     viewModel: OnlineSearchViewModel = viewModel(),
 ) {
+    val listState = rememberLazyListState()
+    com.nanahoshi.audioplayer.ui.components.ResetOnNewSearch(listState, viewModel.searchRevision)
     var composing by rememberSaveable { mutableStateOf(false) }
     val reduceMotion = LocalReduceMotion.current
     AnimatedContent(
@@ -1005,7 +1138,6 @@ private fun WorkSearchScreen(
         )
     } else {
     val works = viewModel.works
-    val listState = rememberLazyListState()
     LaunchedEffect(listState, works.size, viewModel.loading) {
         snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
             .distinctUntilChanged()
@@ -1014,6 +1146,7 @@ private fun WorkSearchScreen(
             }
     }
     CollapsingTop(
+        resetKey = viewModel.searchRevision,
         header = {
             Surface(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -1422,7 +1555,7 @@ fun OnlineWorkScreen(
     Column(Modifier.fillMaxSize()) {
         AppTopBar(
             title = "作品",
-            onBack = onBack,
+            onBack = { if (viewModel.canGoUp()) viewModel.up() else onBack() },
             actions = {
                 if (viewModel.working || viewModel.busy) {
                     CircularProgressIndicator(Modifier.padding(end = 8.dp).size(20.dp))
@@ -1465,65 +1598,38 @@ fun OnlineWorkScreen(
                     viewModel.work != null -> viewModel.nodeFiles.isEmpty()
                     else -> true
                 }
-                LazyColumn(
-                    Modifier.weight(1f).fillMaxWidth(),
-                    contentPadding = PaddingValues(bottom = if (canSave) 96.dp else 16.dp),
-                ) {
-                if (viewModel.error != null && !viewModel.busy) {
-                    item(key = "error") {
-                        ErrorState(viewModel.error!!, onRetry = {
-                            viewModel.load(sourceId, context.onMeteredNetwork(), force = true)
-                        })
-                    }
-                }
-                item(key = "facts") {
-                    WorkHeader(facts, viewModel.coverUrl, purchased = viewModel.purchased)
-                }
-                if (viewModel.gallery.isNotEmpty()) {
-                    item(key = "gallery") {
-                        GalleryBlock(
-                            urls = viewModel.gallery,
-                            revealed = viewModel.allowGallery,
-                            onReveal = viewModel::revealGallery,
-                        )
-                    }
-                }
-                item(key = "trial") {
-                    TrialBlock(viewModel.trials, onPlay = viewModel::playTrial)
-                }
-                item(key = "files-title") {
-                    SectionHeader(
-                        if (viewModel.purchased) {
-                            if (viewModel.fileSource == WorkFileSource.PLAY) {
-                                "文件（来自DLSite Play）"
-                            } else {
-                                "文件（来自asmr.one）"
-                            }
-                        } else if (viewModel.showPlay || viewModel.filesFromPlay) {
-                            "文件（来自DLSite Play）"
-                        } else {
-                            "文件（来自asmr.one）"
-                        },
-                    )
-                }
-                if (viewModel.purchased) {
-                    item(key = "file-source") {
-                        SingleChoiceSegmentedButtonRow(
-                            Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                        ) {
-                            SegmentedButton(
-                                selected = viewModel.fileSource == WorkFileSource.PLAY,
-                                onClick = { viewModel.useFileSource(WorkFileSource.PLAY) },
-                                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-                            ) { Text("DLSite Play") }
-                            SegmentedButton(
-                                selected = viewModel.fileSource == WorkFileSource.ASMR,
-                                onClick = { viewModel.useFileSource(WorkFileSource.ASMR) },
-                                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-                            ) { Text("asmr.one") }
+                com.nanahoshi.audioplayer.ui.components.WorkFileBrowser(
+                    state = viewModel.browserListState(),
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    bottomPadding = PaddingValues(bottom = if (canSave) 96.dp else 24.dp),
+                    header = {
+                        if (viewModel.error != null && !viewModel.busy) ErrorState(viewModel.error!!,
+                            onRetry = { viewModel.load(sourceId, context.onMeteredNetwork(), force = true) })
+                        WorkHeader(facts, viewModel.coverUrl, purchased = viewModel.purchased)
+                        GalleryBlock(viewModel.gallery, viewModel.allowGallery, viewModel::revealGallery) { index ->
+                            if (viewModel.openGallery(index)) onOpenRemotePreview()
                         }
-                    }
-                }
+                        TrialBlock(viewModel.trials, onPlay = viewModel::playTrial)
+                    },
+                    controls = {
+                        SectionHeader("文件")
+                        if (viewModel.purchased || viewModel.hasOriginalFiles) {
+                            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+                                SegmentedButton(selected = viewModel.fileSource == WorkFileSource.PLAY,
+                                    onClick = { viewModel.useFileSource(WorkFileSource.PLAY) },
+                                    shape = SegmentedButtonDefaults.itemShape(0, 2)) {
+                                    Text("DLSite Play")
+                                }
+                                SegmentedButton(selected = viewModel.fileSource == WorkFileSource.ASMR,
+                                    onClick = { viewModel.useFileSource(WorkFileSource.ASMR) },
+                                    shape = SegmentedButtonDefaults.itemShape(1, 2)) { Text("asmr.one") }
+                            }
+                        }
+                        com.nanahoshi.audioplayer.ui.library.LibraryBreadcrumb(
+                            trail = viewModel.browserPath.mapIndexed { index, name -> com.nanahoshi.audioplayer.ui.library.LibraryCrumb(index.toLong(), name) },
+                            rootLabel = "根目录", onRoot = { viewModel.ancestor(0) }, onCrumb = { viewModel.ancestor(it + 1) })
+                    },
+                ) {
                 if (viewModel.asmrMissing && viewModel.fileSource == WorkFileSource.ASMR && !viewModel.showPlay) {
                     item(key = "missing") {
                         Box(Modifier.fillMaxWidth().padding(24.dp)) {
@@ -1531,17 +1637,6 @@ fun OnlineWorkScreen(
                         }
                     }
                 } else {
-                    if (!viewModel.atWorkRoot) {
-                        item(key = "up") {
-                            ListItem(
-                                headlineContent = { Text(viewModel.folderTitle.ifBlank { "返回" }) },
-                                leadingContent = {
-                                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回上一级")
-                                },
-                                modifier = Modifier.clickable(onClick = viewModel::up),
-                            )
-                        }
-                    }
                     if (viewModel.showPlay) {
                         itemsIndexed(viewModel.playFolders, key = { index, entry -> "play-folder-$index-${entry.title}" }) { _, entry ->
                             OnlineFolderRow(entry.title, null, work = false) { viewModel.openPlay(entry) }
@@ -1592,12 +1687,23 @@ fun OnlineWorkScreen(
                             }
                         }) { entry ->
                             when (entry) {
-                                is LibraryEntry.Audio -> OnlineTrackRow(
-                                    title = entry.track.title,
-                                    coverUrl = entry.track.coverUri,
-                                    supporting = trackSupporting(entry.track, entry.hasSubtitle),
-                                    onClick = { viewModel.playLibrary(entry.track) },
-                                )
+                                is LibraryEntry.Audio -> {
+                                    val downloaded = com.nanahoshi.audioplayer.data.LocalAudio.hasStoredCopy(entry.track.localUri)
+                                    OnlineTrackRow(
+                                        title = entry.track.title,
+                                        coverUrl = entry.track.coverUri,
+                                        supporting = trackSupporting(entry.track, entry.hasSubtitle),
+                                        onClick = { viewModel.playLibrary(entry.track) },
+                                        trailing = {
+                                            if (entry.track.source == TrackSource.DLSITE) {
+                                                IconButton(onClick = { viewModel.downloadLibraryTrack(entry.track) }, enabled = !downloaded) {
+                                                    Icon(if (downloaded) Icons.Default.Check else Icons.Default.Download,
+                                                        contentDescription = if (downloaded) "已下载" else "下载")
+                                                }
+                                            }
+                                        },
+                                    )
+                                }
                                 is LibraryEntry.File -> OnlineFileRow(entry.file) {
                                     onOpenPreview(entry.file.id)
                                 }
@@ -1791,7 +1897,7 @@ private fun trackSupporting(
 }
 
 @Composable
-private fun GalleryBlock(urls: List<String>, revealed: Boolean, onReveal: () -> Unit) {
+private fun GalleryBlock(urls: List<String>, revealed: Boolean, onReveal: () -> Unit, onOpen: (Int) -> Unit) {
     if (urls.isEmpty()) return
     Column(Modifier.fillMaxWidth()) {
         SectionHeader("图库")
@@ -1811,7 +1917,7 @@ private fun GalleryBlock(urls: List<String>, revealed: Boolean, onReveal: () -> 
                             .addHeader("User-Agent", DlsiteClient.USER_AGENT)
                             .build(),
                         contentDescription = "样图",
-                        modifier = Modifier.height(140.dp).width(186.dp).clip(RoundedCornerShape(12.dp)),
+                        modifier = Modifier.height(140.dp).width(186.dp).clip(RoundedCornerShape(12.dp)).clickable { onOpen(urls.indexOf(url)) },
                         contentScale = ContentScale.Fit,
                     )
                 }

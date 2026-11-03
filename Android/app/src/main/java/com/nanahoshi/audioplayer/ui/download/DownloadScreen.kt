@@ -10,6 +10,11 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
@@ -21,7 +26,6 @@ import androidx.compose.material3.TextButton
 import com.nanahoshi.audioplayer.ui.components.AppTopBar
 import com.nanahoshi.audioplayer.ui.components.EmptyState
 import com.nanahoshi.audioplayer.ui.components.RoundedProgress
-import com.nanahoshi.audioplayer.ui.components.SectionHeader
 import com.nanahoshi.audioplayer.ui.components.StatusBadge
 import com.nanahoshi.audioplayer.ui.components.StatusTone
 import com.nanahoshi.audioplayer.ui.components.rememberLocalNetworkAccess
@@ -32,6 +36,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.nanahoshi.audioplayer.data.TrackSource
+import com.nanahoshi.audioplayer.data.DlsiteDownloadMode
 import com.nanahoshi.audioplayer.dlsite.RemotePlayable
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
@@ -52,14 +57,25 @@ class DownloadViewModel(app: Application) : AndroidViewModel(app) {
     val whisperJobs = graph.whisper.observe()
     val translationJobs = graph.db.translations().observe()
 
-    fun cancelDownload(id: Long) { graph.downloads.cancelYouTube(id) }
+    fun cancelDownload(id: Long) { graph.downloads.cancel(id) }
 
     fun retry(id: Long) {
         graph.downloads.retry(id)
     }
 
     fun retryWhisper(id: Long) {
-        graph.whisper.retry(id)
+        viewModelScope.launch {
+            val job = graph.db.whisper().get(id) ?: return@launch
+            var mode = DlsiteDownloadMode.PARTIAL
+            if (graph.whisper.needsDlsiteDownloadChoice(job)) {
+                val track = job.trackId?.takeIf { it > 0L }?.let { graph.db.tracks().getById(it) }
+                mode = graph.dlsiteDownloadRequests.choose(
+                    listOf(job.title),
+                    allowPartial = track == null || !track.fileHash.isNullOrBlank(),
+                ) ?: return@launch
+            }
+            graph.whisper.retry(id, mode)
+        }
     }
 
     /** 重试会沿用任务自己的听写地址；局域网地址要先拿到本地网络权限。 */
@@ -118,24 +134,32 @@ fun DownloadScreen(
     val whisperJobs by viewModel.whisperJobs.collectAsStateWithLifecycle(emptyList())
     val translationJobs by viewModel.translationJobs.collectAsStateWithLifecycle(emptyList())
     val localNetwork = rememberLocalNetworkAccess { viewModel.reportLocalNetworkDenied() }
+    var subtitles by rememberSaveable { mutableStateOf(false) }
+    val audioState = rememberLazyListState()
+    val subtitleState = rememberLazyListState()
     Column(Modifier.fillMaxSize()) {
         AppTopBar(title = "下载", onBack = onBack)
-        if (jobs.isEmpty() && whisperJobs.isEmpty() && translationJobs.isEmpty()) {
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+            SegmentedButton(selected = !subtitles, onClick = { subtitles = false },
+                shape = SegmentedButtonDefaults.itemShape(0, 2)) { Text("音频") }
+            SegmentedButton(selected = subtitles, onClick = { subtitles = true },
+                shape = SegmentedButtonDefaults.itemShape(1, 2)) { Text("字幕") }
+        }
+        if (if (subtitles) whisperJobs.isEmpty() && translationJobs.isEmpty() else jobs.isEmpty()) {
             EmptyState(
-                title = "还没有下载",
-                message = "在作品里可以选择单个音频，或缓存整个文件夹。",
+                title = if (subtitles) "还没有字幕任务" else "还没有下载",
+                message = if (subtitles) "在播放页可以生成字幕或翻译字幕。" else "在作品里可以选择单个音频，或缓存整个文件夹。",
                 modifier = Modifier.fillMaxSize(),
             )
         } else {
-            LazyColumn(Modifier.fillMaxSize()) {
-                if (jobs.isNotEmpty()) {
-                    stickyHeader(key = "download-heading") { SectionHeader("下载") }
+            LazyColumn(state = if (subtitles) subtitleState else audioState, modifier = Modifier.fillMaxSize()) {
+                if (!subtitles && jobs.isNotEmpty()) {
                     items(jobs, key = { "download-${it.id}" }) { job ->
                         DownloadRow(
                             job,
                             onRetry = { viewModel.retry(job.id) },
                             onCancel = { viewModel.cancelDownload(job.id) },
-                            onPlay = if (job.status == DownloadStatus.DONE && !job.localPath.isNullOrBlank()) {
+                            onPlay = if (job.kind != "DLSITE_ARCHIVE" && job.status == DownloadStatus.DONE && !job.localPath.isNullOrBlank()) {
                                 { viewModel.play(job) }
                             } else {
                                 null
@@ -143,8 +167,7 @@ fun DownloadScreen(
                         )
                     }
                 }
-                if (whisperJobs.isNotEmpty() || translationJobs.isNotEmpty()) {
-                    stickyHeader(key = "whisper-heading") { SectionHeader("生成字幕") }
+                if (subtitles && (whisperJobs.isNotEmpty() || translationJobs.isNotEmpty())) {
                     items(whisperJobs, key = { "whisper-${it.id}" }) { job ->
                         WhisperJobRow(
                             job,
@@ -169,7 +192,14 @@ fun DownloadScreen(
 private fun DownloadRow(job: DownloadEntity, onRetry: () -> Unit, onCancel: () -> Unit, onPlay: (() -> Unit)?) {
     val status = when (job.status) {
         DownloadStatus.QUEUED -> "排队"
-        DownloadStatus.RUNNING -> "下载中"
+        DownloadStatus.RUNNING -> if (job.kind == "DLSITE_ARCHIVE") {
+            when (job.phase) {
+                "RESOLVING" -> "获取下载信息"
+                "EXTRACTING" -> "解压中"
+                "IMPORTING" -> "关联文件"
+                else -> "下载中"
+            }
+        } else "下载中"
         DownloadStatus.DONE -> "完成"
         DownloadStatus.FAILED -> if (job.error == "已中止") "已中止" else "失败"
     }
@@ -191,7 +221,9 @@ private fun DownloadRow(job: DownloadEntity, onRetry: () -> Unit, onCancel: () -
             }
         },
         trailingContent = {
-            if (job.source == TrackSource.YOUTUBE.name && job.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING)) {
+            if ((job.source == TrackSource.YOUTUBE.name || job.kind == "DLSITE_ARCHIVE") &&
+                job.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING)
+            ) {
                 TextButton(onClick = onCancel) { Text("中止") }
             } else if (job.status == DownloadStatus.FAILED) {
                 FilledTonalButton(onClick = onRetry) { Text("重试") }

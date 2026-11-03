@@ -38,6 +38,7 @@ data class PlayerUiState(
 class PlayerClient(
     context: Context,
     private val library: LibraryRepository,
+    private val onRemovalRejected: (String) -> Unit = {},
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val ready = CompletableDeferred<MediaController>()
@@ -244,22 +245,31 @@ class PlayerClient(
     fun publishNow() = scope.launch { withController { publish(this) } }
 
     fun deleteTrack(trackId: Long) = scope.launch {
-        queueMutex.withLock {
-            val affected = library.queueSnapshot().any { it.trackId == trackId }
-            library.deleteTrack(trackId)
-            if (affected) rebuildPlayerFromQueue()
+        try {
+            queueMutex.withLock {
+                val affected = library.queueSnapshot().any { it.trackId == trackId }
+                library.deleteTrack(trackId)
+                if (affected) rebuildPlayerFromQueue()
+            }
+        } catch (error: com.nanahoshi.audioplayer.data.LibraryRemovalRejected) {
+            onRemovalRejected(error.message.orEmpty())
         }
     }
 
     fun removeFromLibrary(trackIds: List<Long>, folderIds: List<Long>) = scope.launch {
         if (trackIds.isEmpty() && folderIds.isEmpty()) return@launch
-        queueMutex.withLock {
-            val doomed = library.affectedTrackIds(trackIds, folderIds)
-            val affected = library.queueSnapshot().any { it.trackId in doomed }
-            library.deleteItems(trackIds, folderIds)
-            if (affected) rebuildPlayerFromQueue()
+        try {
+            queueMutex.withLock {
+                val doomed = library.affectedTrackIds(trackIds, folderIds)
+                val affected = library.queueSnapshot().any { it.trackId in doomed }
+                library.deleteItems(trackIds, folderIds)
+                if (affected) rebuildPlayerFromQueue()
+            }
+        } catch (error: com.nanahoshi.audioplayer.data.LibraryRemovalRejected) {
+            onRemovalRejected(error.message.orEmpty())
         }
     }
+
 
     private suspend fun rebuildPlayerFromQueue() {
         val rows = library.queueSnapshot()

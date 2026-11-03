@@ -39,6 +39,7 @@ object TranslateMark {
     indices = [
         Index("parentId"),
         Index(value = ["asmrSourceId"], unique = true),
+        Index(value = ["biliBvid"], unique = true),
     ],
 )
 data class FolderEntity(
@@ -52,6 +53,7 @@ data class FolderEntity(
     val coverUri: String? = null,
     val workMeta: String? = null,
     val contentSource: String? = null,
+    val biliBvid: String? = null,
 )
 
 @Entity(
@@ -115,6 +117,7 @@ data class LibraryFileEntity(
     val addedAt: Long,
     val asmrWorkId: Long,
     val fileHash: String,
+    val localUri: String? = null,
 )
 
 @Entity(
@@ -136,6 +139,8 @@ data class DownloadEntity(
     val localPath: String? = null,
     val fileKey: String? = null,
     val biliImportPart: String? = null,
+    val kind: String? = null,
+    val phase: String? = null,
 )
 
 @Entity(tableName = "playlists")
@@ -287,6 +292,8 @@ data class WhisperJobEntity(
     val translateStatus: String? = null,
     val skipTranslate: Boolean? = null,
     val model: String? = null,
+    val awaitDownloadId: Long? = null,
+    val awaitFileKey: String? = null,
 )
 
 @Entity(tableName = "translation_jobs")
@@ -298,4 +305,38 @@ data class TranslationJobEntity(
     val queueItemId: Long?,
     val status: DownloadStatus,
     val error: String?,
+)
+
+
+/** 原始文件清单独立于音频库，移除作品后仍能管理下载。 */
+@Entity(tableName = "dlsite_original_works")
+data class DlsiteOriginalWorkEntity(
+    @PrimaryKey val workno: String,
+    val rootFolderId: Long?,
+    val directory: String,
+    val generation: String,
+)
+
+@Entity(
+    tableName = "dlsite_original_entries",
+    primaryKeys = ["workno", "relativePath"],
+    indices = [Index("trackId"), Index("fileId"), Index("folderId"), Index(value = ["workno", "playFileKey"])],
+)
+data class DlsiteOriginalEntryEntity(
+    val workno: String,
+    val relativePath: String,
+    val kind: String,
+    val size: Long,
+    val localPath: String,
+    val playFileKey: String? = null,
+    val trackId: Long? = null,
+    val fileId: Long? = null,
+    val folderId: Long? = null,
+)
+
+@Entity(tableName = "bili_import_intents", indices = [Index(value = ["batchId"], unique = true)])
+data class BiliImportIntentEntity(
+    @PrimaryKey val bvid: String,
+    val batchId: String,
+    val requestJson: String,
 )

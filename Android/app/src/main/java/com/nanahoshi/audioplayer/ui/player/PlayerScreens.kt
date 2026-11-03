@@ -75,6 +75,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nanahoshi.audioplayer.data.TrackSource
+import com.nanahoshi.audioplayer.data.DlsiteDownloadMode
+import com.nanahoshi.audioplayer.data.db.QueuedTrack
 import com.nanahoshi.audioplayer.data.effectiveWhisperBase
 import com.nanahoshi.audioplayer.data.isLocalNetworkAddress
 import com.nanahoshi.audioplayer.data.isOnDeviceWhisperModel
@@ -327,6 +329,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             val canDownload = row.source == TrackSource.ASMR || row.source == TrackSource.DLSITE || row.source == TrackSource.YOUTUBE
             val hasTarget = (row.trackId != null && row.trackId > 0L) || !row.remoteUrl.isNullOrBlank()
             if (canDownload && hasTarget) {
+                if (row.source == TrackSource.DLSITE && ((row.trackId ?: 0L) > 0L || !row.fileKey.isNullOrBlank())) {
+                    downloadAndGenerate(row, translate)
+                    return@launch
+                }
                 whisperPrompt = WhisperPrompt.NeedDownload
                 return@launch
             }
@@ -347,8 +353,21 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         val translate = generateWithTranslation
         viewModelScope.launch {
             val row = currentRow() ?: return@launch
-            report(graph.whisper.startAfterDownload(row, translate), translate)
+            downloadAndGenerate(row, translate)
         }
+    }
+
+    private suspend fun downloadAndGenerate(row: QueuedTrack, translate: Boolean) {
+        var mode = DlsiteDownloadMode.PARTIAL
+        val isPurchasedDlsite = row.source == TrackSource.DLSITE && ((row.trackId ?: 0L) > 0L || !row.fileKey.isNullOrBlank())
+        if (isPurchasedDlsite && graph.whisper.existingFile(row) == null) {
+            val track = row.trackId?.takeIf { it > 0L }?.let { graph.db.tracks().getById(it) }
+            mode = graph.dlsiteDownloadRequests.choose(
+                listOf(row.title),
+                allowPartial = if (track != null) !track.fileHash.isNullOrBlank() else !row.fileKey.isNullOrBlank(),
+            ) ?: return
+        }
+        report(graph.whisper.startAfterDownload(row, translate, mode), translate)
     }
 
     private suspend fun currentRow() =

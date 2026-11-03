@@ -82,22 +82,41 @@ class BiliBrowserViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 for (video in targets.distinctBy { it.bvid }) {
                     try {
-                        val parts = graph.bilibili.lookup(video.bvid).distinctBy { it.bvid to it.cid }
+                        val details = graph.bilibili.videoDetails(video.bvid)
+                        val parts = details.parts.distinctBy { it.bvid to it.cid }
                         ensureActive()
                         if (parts.isEmpty()) throw BilibiliException(0, "没有可播放的分 P")
-                        groups += BiliPartGroup(video, parts)
+                        groups += BiliPartGroup(details.video, parts)
                     } catch (cancelled: CancellationException) { throw cancelled }
                     catch (error: Exception) {
                         failed += "${video.title}：${if (error is BilibiliException) error.message else "分 P 读取失败"}"
                     }
                 }
                 if (token != partGeneration) return@launch
+                if (action != BiliAction.PLAY) {
+                    if (groups.isEmpty()) { graph.messages.value = failed.joinToString("\n"); return@launch }
+                    val requests = graph.biliImportRequests.choose(groups.map { BiliVideoDetails(it.video, it.parts) }, failed) ?: return@launch
+                    working = true
+                    try {
+                        if (action == BiliAction.SAVE) {
+                            requests.forEach { graph.library.importBili(it) }
+                            graph.messages.value = "已保存到音频库" + if (failed.isEmpty()) "" else "，${failed.size} 个视频读取失败"
+                        } else {
+                            val count = graph.downloads.enqueueBiliImports(requests)
+                            graph.messages.value = if (count > 0) "已加入 $count 个下载，完成后按所选方式入库" else "已有本地副本或下载任务"
+                        }
+                        selected = emptySet()
+                    } finally { working = false }
+                    return@launch
+                }
                 if (targets.size == 1 && groups.singleOrNull()?.parts?.size == 1) {
                     runAction(action, groups.single().parts)
                 } else {
                     choice = BiliPartChoice.create(action, groups, failed)
                 }
-            } finally { if (token == partGeneration) resolving = false }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) { graph.messages.value = failure.message ?: "B站操作失败，请稍后重试" }
+            finally { if (token == partGeneration) resolving = false }
         }
     }
     internal fun togglePart(part: BiliPart) {
@@ -130,14 +149,7 @@ class BiliBrowserViewModel(app: Application) : AndroidViewModel(app) {
                             )))
                         }
                     }
-                    BiliAction.SAVE -> {
-                        graph.library.importParts(parts)
-                        graph.messages.value = "已保存 ${parts.size} 首到音频库"
-                    }
-                    BiliAction.DOWNLOAD -> {
-                        val count = graph.downloads.enqueueBili(parts, autoImport = true)
-                        graph.messages.value = if (count > 0) "已加入 $count 个下载，完成后自动入库" else "已有缓存或下载任务，下载完成后会保存到音频库"
-                    }
+                    BiliAction.SAVE, BiliAction.DOWNLOAD -> error("请先选择入库方式")
                 }
                 selected = emptySet()
             } catch (cancelled: CancellationException) { throw cancelled }
