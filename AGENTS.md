@@ -187,6 +187,7 @@ export GRADLE_USER_HOME="$HOME/.gradle"
 ## 8. 关于与更新检查
 
 - 「设置 → 关于」通过 PackageManager 读取实际安装包的版本名和构建号，不使用界面常量代替。
-- `AppUpdateClient` 使用独立匿名请求读取固定仓库 `/releases/latest`，仅接受包含已上传 APK 的正式发布。版本按数字段及预发布规则比较，无法解析时不推断版本关系，本地版本较高时不提示降级。
+- `AppUpdateClient` 使用独立匿名请求读取固定仓库的 `/releases?per_page=100`，只接受 `tag_name` 以 `android-` 开头、非草稿/预发布且包含已上传 APK 的发布；桌面端发布不参与 Android 更新检查。版本按去掉 `android-` 前缀后的 tag 比较，无法解析时不推断版本关系，本地版本较高时不提示降级。
+- Android 发布标签统一为 `android-X.Y`（例如 `android-1.3`），桌面端使用自己的标签；历史 `v1.0`～`v1.2` 不带 `android-` 前缀，不会被新版检查识别。发布新 APK 时同步递增 `versionCode` 和 `versionName`。
 - 检查由用户手动触发；应用不自动检查、下载或安装更新。下载入口通过外部浏览器打开固定仓库的发布列表或 tag 页面，不使用附件下载地址、WebView 或下载管理服务。
 - `browser.invalid` 仅用于 PackageManager 查询浏览器，不发起网络请求。接口及发布要求见 `Android/docs/update-api.md`。

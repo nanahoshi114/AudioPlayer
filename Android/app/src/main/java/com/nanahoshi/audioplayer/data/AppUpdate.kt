@@ -11,7 +11,8 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 internal const val APP_RELEASES_URL = "https://github.com/nanahoshi114/AudioPlayer/releases"
-internal const val APP_LATEST_RELEASE_API = "https://api.github.com/repos/nanahoshi114/AudioPlayer/releases/latest"
+internal const val APP_RELEASES_API = "https://api.github.com/repos/nanahoshi114/AudioPlayer/releases?per_page=100"
+internal const val ANDROID_RELEASE_PREFIX = "android-"
 
 internal data class AppRelease(val tag: String, val versionName: String?) {
     // 发布页由固定仓库和 tag 生成，不使用附件下载地址。
@@ -64,20 +65,25 @@ internal fun updateRelation(currentVersion: String, release: AppRelease): Update
     }
 }
 
-internal fun parseAppRelease(raw: String): AppRelease {
-    val root = try { Json.parseToJsonElement(raw) as? JsonObject } catch (_: Exception) { null }
+internal fun parseAndroidRelease(raw: String): AppRelease {
+    val releases = try { Json.parseToJsonElement(raw) as? JsonArray } catch (_: Exception) { null }
         ?: throw AppUpdateException("发布信息无法读取，请稍后重试或打开发布页")
+    val root = releases.mapNotNull { it as? JsonObject }.firstOrNull { release ->
+        val tag = (release["tag_name"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+        tag.startsWith(ANDROID_RELEASE_PREFIX) &&
+            (release["draft"] as? JsonPrimitive)?.contentOrNull != "true" &&
+            (release["prerelease"] as? JsonPrimitive)?.contentOrNull != "true"
+    } ?: throw AppUpdateException("没有找到 Android 发布，请打开发布页查看")
     fun value(key: String) = (root[key] as? JsonPrimitive)?.contentOrNull.orEmpty()
-    if (value("draft") == "true" || value("prerelease") == "true") throw AppUpdateException("尚未读到可用的正式版本，请打开发布页查看")
     val apk = (root["assets"] as? JsonArray).orEmpty().any { item ->
         val asset = item as? JsonObject ?: return@any false
         (asset["name"] as? JsonPrimitive)?.contentOrNull?.endsWith(".apk", true) == true &&
             (asset["state"] as? JsonPrimitive)?.contentOrNull == "uploaded"
     }
-    if (!apk) throw AppUpdateException("最新发布尚未提供 APK，请打开发布页查看")
-    val tag = value("tag_name").trim().takeIf { it.isNotEmpty() }
-        ?: throw AppUpdateException("发布信息缺少版本标签，请打开发布页查看")
-    val version = listOf(tag, value("name")).firstOrNull { AppVersionNumber.parse(it) != null }
+    if (!apk) throw AppUpdateException("最新 Android 发布尚未提供 APK，请打开发布页查看")
+    val tag = value("tag_name").trim()
+    val version = listOf(tag.removePrefix(ANDROID_RELEASE_PREFIX), value("name"))
+        .firstOrNull { AppVersionNumber.parse(it) != null }
     return AppRelease(tag, version)
 }
 
@@ -86,7 +92,7 @@ internal class AppUpdateClient(http: OkHttpClient = OkHttpClient()) {
     private val http = http.newBuilder().connectTimeout(10, TimeUnit.SECONDS).readTimeout(15, TimeUnit.SECONDS)
         .callTimeout(20, TimeUnit.SECONDS).followRedirects(false).followSslRedirects(false).build()
     suspend fun latest(): AppRelease = suspendCancellableCoroutine { continuation ->
-        val request = Request.Builder().url(APP_LATEST_RELEASE_API)
+        val request = Request.Builder().url(APP_RELEASES_API)
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2026-03-10")
             .header("User-Agent", "AudioPlayer-Android-UpdateCheck").build()
@@ -104,7 +110,7 @@ internal class AppUpdateClient(http: OkHttpClient = OkHttpClient()) {
                             it.code == 404 -> "未找到发布信息，请打开发布页查看"
                             else -> "检查更新失败，请稍后重试或打开发布页"
                         })
-                        parseAppRelease(it.body?.string().orEmpty())
+                        parseAndroidRelease(it.body?.string().orEmpty())
                     }
                     if (continuation.isActive) continuation.resume(release)
                 } catch (error: Exception) {
