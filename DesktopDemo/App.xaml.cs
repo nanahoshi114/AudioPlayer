@@ -15,6 +15,14 @@ public partial class App : Application
             return;
         }
 
+        if (Has(e.Args, "--dlnatest"))
+        {
+            var error = Playback.DlnaTest.Run();
+            Console.WriteLine(error == null ? "DLNA ok" : "DLNA " + error);
+            Shutdown(error == null ? 0 : 1);
+            return;
+        }
+
         if (Has(e.Args, "--subtest"))
         {
             var error = Subtitles.SubtitleFinder.SelfCheck() ?? Services.TranslateService.SelfCheck();

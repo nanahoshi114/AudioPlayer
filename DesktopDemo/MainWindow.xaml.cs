@@ -26,7 +26,7 @@ public partial class MainWindow : Window
     private List<AlbumItem> _albums = [];
     private AlbumItem? _openAlbum;
     private DateTime _openedAlbumAt;
-    private readonly ExclusivePlayer _player = new();
+    private readonly OutputSession _player = new();
     private readonly DispatcherTimer _clock;
     private TrackItem? _current;
     private TrackItem? _shownTrack;
@@ -73,6 +73,17 @@ public partial class MainWindow : Window
 
         _player.Ended += (_, _) => PlayRelative(1, fromEnd: true);
         _player.Failed += (_, message) => OutputText.Text = message;
+        _player.RenderersChanged += (_, _) =>
+        {
+            try
+            {
+                Dispatcher.BeginInvoke(ScheduleDeviceRefresh);
+            }
+            catch
+            {
+                // 窗口正在关。
+            }
+        };
 
         _clock = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
         _clock.Tick += (_, _) => RefreshClock();
@@ -194,7 +205,7 @@ public partial class MainWindow : Window
 
     private void ScheduleDeviceRefresh()
     {
-        if (!IsLoaded || _deviceWatcher == null)
+        if (!IsLoaded)
             return;
         _deviceRefresh.Stop();
         _deviceRefresh.Start();
@@ -203,19 +214,23 @@ public partial class MainWindow : Window
     private void RefreshDevices()
     {
         var selectedId = (DeviceBox.SelectedItem as OutputDevice)?.Id ?? _settings.DeviceId;
-        IReadOnlyList<(string Id, string Name)> devices;
-        try
-        {
-            devices = ExclusivePlayer.ListDevices();
-        }
-        catch
-        {
-            SetDeviceNote("没有播放设备");
-            return;
-        }
+        var devices = _player.ListDevices().ToList();
+        if (OutputSession.IsDlna(selectedId) && devices.TrueForAll(item => item.Id != selectedId))
+            devices.Add((selectedId, _player.MissingDlnaName));
 
         if (SameDevices(devices))
+        {
+            if (DeviceBox.SelectedItem is OutputDevice current && OutputSession.IsDlna(current.Id))
+            {
+                var before = _player.DeviceProblem;
+                var exclusiveNow = ExclusiveBox.IsChecked == true;
+                _player.UseDevice(current.Id, exclusiveNow);
+                if (_player.DeviceProblem != before)
+                    RefreshDeviceStatus(current.Id, exclusiveNow);
+            }
+
             return;
+        }
 
         _player.InvalidateDevice();
         _outputReady = false;
@@ -246,8 +261,13 @@ public partial class MainWindow : Window
         _outputReady = true;
         var now = DeviceBox.SelectedItem as OutputDevice;
         var exclusive = ExclusiveBox.IsChecked == true;
+        ShowOutputChoice(now != null && OutputSession.IsDlna(now.Id));
+        if (now != null)
+            DeviceBox.ToolTip = now.Name;
         if (now != null && now.Id == _appliedDeviceId && exclusive == _appliedExclusive)
         {
+            if (OutputSession.IsDlna(now.Id))
+                _player.UseDevice(now.Id, exclusive);
             RefreshDeviceStatus(now.Id, exclusive);
             return;
         }
@@ -275,13 +295,23 @@ public partial class MainWindow : Window
         if (_draggingVolume)
             return;
 
+        var dlna = OutputSession.IsDlna(deviceId);
+        ShowOutputChoice(dlna);
+        if (_player.DeviceProblem is string problem)
+        {
+            _volumeReady = true;
+            SetDeviceNote(problem, info: true);
+            return;
+        }
+
         try
         {
             _volumeReady = false;
-            _volumeScalar = ExclusivePlayer.ReadVolume(deviceId);
+            if (_player.ReadVolume() is double scalar)
+                _volumeScalar = scalar;
             PaintVolume();
             _volumeReady = true;
-            SetDeviceNote(OutputModeText(exclusive));
+            SetDeviceNote(dlna ? "DLNA 输出" : OutputModeText(exclusive), dlna);
         }
         catch
         {
@@ -293,11 +323,19 @@ public partial class MainWindow : Window
     private static string OutputModeText(bool exclusive) =>
         exclusive ? "这台声卡只给播放器" : "和其他程序一起出声";
 
-    private void SetDeviceNote(string text)
+    private void ShowOutputChoice(bool dlna)
     {
-        var error = text is "没有播放设备" or "读不了这台设备";
-        DeviceText.Text = error ? text : "";
-        DeviceText.Visibility = error ? Visibility.Visible : Visibility.Collapsed;
+        OutputModeBar.Visibility = dlna ? Visibility.Collapsed : Visibility.Visible;
+        SharedBox.IsEnabled = !dlna;
+        ExclusiveBox.IsEnabled = !dlna;
+    }
+
+    private void SetDeviceNote(string text, bool info = false)
+    {
+        var known = text is "没有播放设备" or "读不了这台设备" or "DLNA 设备不在网上" or "正在寻找 DLNA 设备";
+        var show = info || known;
+        DeviceText.Text = show ? text : "";
+        DeviceText.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void DeviceBox_SelectionChanged(object sender, SelectionChangedEventArgs e) => ApplyOutput(restart: true);
@@ -322,6 +360,7 @@ public partial class MainWindow : Window
         }
 
         var exclusive = ExclusiveBox.IsChecked == true;
+        var dlna = OutputSession.IsDlna(device.Id);
         var playing = restart && _player.IsPlaying;
         var paused = restart && _player.IsPaused;
         var position = playing || paused ? _player.Position : TimeSpan.Zero;
@@ -331,14 +370,25 @@ public partial class MainWindow : Window
         _settings.Save();
         _appliedDeviceId = device.Id;
         _appliedExclusive = exclusive;
+        ShowOutputChoice(dlna);
+        DeviceBox.ToolTip = device.Name;
         _player.UseDevice(device.Id, exclusive);
+        if (_player.DeviceProblem is string problem)
+        {
+            _volumeReady = true;
+            SetDeviceNote(problem, info: true);
+            OutputText.Text = StatusLine(problem);
+            return;
+        }
+
         try
         {
             _volumeReady = false;
-            _volumeScalar = ExclusivePlayer.ReadVolume(device.Id);
+            if (_player.ReadVolume() is double scalar)
+                _volumeScalar = scalar;
             PaintVolume();
             _volumeReady = true;
-            SetDeviceNote(OutputModeText(exclusive));
+            SetDeviceNote(dlna ? "DLNA 输出" : OutputModeText(exclusive), dlna);
         }
         catch
         {
@@ -348,15 +398,13 @@ public partial class MainWindow : Window
 
         if ((playing || paused) && track != null)
         {
-            PlayTrack(track);
-            if (_player.IsPlaying || _player.IsPaused)
-                _player.Position = position;
-            if (paused)
+            PlayTrack(track, position);
+            if (paused && (_player.IsPlaying || _player.IsPaused))
                 _player.Pause();
             return;
         }
 
-        OutputText.Text = StatusLine(OutputModeText(exclusive));
+        OutputText.Text = StatusLine(dlna ? "DLNA 输出" : OutputModeText(exclusive));
     }
 
     private string StatusLine(string message)
@@ -1021,11 +1069,11 @@ public partial class MainWindow : Window
         return -1;
     }
 
-    private void PlayTrack(TrackItem track)
+    private void PlayTrack(TrackItem track, TimeSpan? start = null)
     {
-        var pending = ReferenceEquals(_shownTrack, track) ? _pendingSeek : null;
+        var pending = start ?? (ReferenceEquals(_shownTrack, track) ? _pendingSeek : null);
         SetCurrent(track);
-        var result = _player.Play(track.FilePath);
+        var result = _player.Play(track.FilePath, track.Title, track.Artist, track.Duration, pending ?? TimeSpan.Zero);
         if (!result.Ok)
         {
             OutputText.Text = StatusLine(result.Message);
@@ -1036,7 +1084,6 @@ public partial class MainWindow : Window
         OutputText.Text = StatusLine(result.Message);
         if (pending is TimeSpan jump)
         {
-            _player.Position = jump;
             _pendingSeek = null;
             var duration = _player.Duration > TimeSpan.Zero ? _player.Duration : track.Duration;
             PaintSeek(jump, duration);

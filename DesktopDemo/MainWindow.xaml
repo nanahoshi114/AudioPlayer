@@ -546,7 +546,7 @@
               <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
             <ComboBox x:Name="DeviceBox" Width="220" VerticalAlignment="Center" SelectionChanged="DeviceBox_SelectionChanged"/>
-            <Border Grid.Column="1" Margin="12,0" VerticalAlignment="Center" Background="#F3EBE3" CornerRadius="999" Padding="3">
+            <Border x:Name="OutputModeBar" Grid.Column="1" Margin="12,0" VerticalAlignment="Center" Background="#F3EBE3" CornerRadius="999" Padding="3">
               <StackPanel Orientation="Horizontal">
                 <RadioButton x:Name="SharedBox" Content="共享" GroupName="OutputMode" Style="{StaticResource ModeChoice}"
                              IsChecked="True" ToolTip="和其他程序一起出声" Checked="OutputMode_Checked"/>
