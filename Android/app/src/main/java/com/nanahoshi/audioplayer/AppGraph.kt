@@ -49,9 +49,13 @@ class AppGraph(app: Application) {
     val appearance = AppearancePreferences(app)
     val cache = CacheStore(app) { app.imageLoader }
     val library = LibraryRepository(app, db, bilibili, asmr, dlsite)
-    val biliImportRequests = com.nanahoshi.audioplayer.data.BiliImportRequests { library.biliLibrary.mode(it) }
+    val biliCollections = com.nanahoshi.audioplayer.data.BiliCollectionRepository(app, db, bilibili)
+    val biliImportRequests = com.nanahoshi.audioplayer.data.BiliImportRequests(
+        { library.biliLibrary.mode(it) },
+        { messages.value = "请先完成当前的入库选择" },
+    )
     val dlsiteDownloadRequests = com.nanahoshi.audioplayer.data.DlsiteDownloadRequests()
-    val downloads = DownloadCenter(app, db, asmr, dlsite, bilibili, youtube, library)
+    val downloads = DownloadCenter(app, db, asmr, dlsite, bilibili, youtube, library) { messages.value = it }
     val subtitles = SubtitleSource(app, db, bilibili, asmr)
     val translator = TranslateCenter(app, db, credentials, subtitles)
     val senseVoice = SenseVoiceModelManager(app)

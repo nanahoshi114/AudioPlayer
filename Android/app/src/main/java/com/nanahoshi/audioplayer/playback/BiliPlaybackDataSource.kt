@@ -382,7 +382,23 @@ private class BrowserHttpDataSource(
             throw HttpDataSource.InvalidResponseCodeException(code, message, null, headers, dataSpec, body)
         }
         val responseBody = call.body ?: throw IOException("音频内容为空")
-        stream = responseBody.byteStream()
+        val input = responseBody.byteStream()
+        // 服务器忽略 Range 直接回 200 时，必须自己跳过前 position 字节，否则读到的是错位数据。
+        if (position > 0 && call.code == 200) {
+            var remaining = position
+            while (remaining > 0) {
+                val skipped = input.skip(remaining)
+                if (skipped > 0) {
+                    remaining -= skipped
+                } else if (input.read() < 0) {
+                    break
+                } else {
+                    remaining--
+                }
+            }
+            if (remaining > 0) throw IOException("无法定位到播放位置，请重试")
+        }
+        stream = input
         bytesRemaining = when {
             dataSpec.length != C.LENGTH_UNSET.toLong() -> dataSpec.length
             call.code == 206 -> responseBody.contentLength().takeIf { it >= 0 } ?: C.LENGTH_UNSET.toLong()

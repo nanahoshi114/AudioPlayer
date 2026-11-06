@@ -1,6 +1,7 @@
 package com.nanahoshi.audioplayer.playback
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class SubtitleCuesTest {
@@ -65,6 +66,14 @@ class SubtitleCuesTest {
         assertEquals(3400L, cues[0].endMs)
         assertEquals("こんにちは", cues[0].text)
         assertEquals(emptyList<SubtitleCue>(), parseGeneratedCues("""{"cues":[]}"""))
+    }
+
+    @Test
+    fun distinguishesCorruptGeneratedFileFromEmptyResult() {
+        assertNull(parseGeneratedCuesOrNull("""{"cues":["""))
+        assertNull(parseGeneratedCuesOrNull(""))
+        assertNull(parseGeneratedCuesOrNull("<html>"))
+        assertEquals(emptyList<SubtitleCue>(), parseGeneratedCuesOrNull("""{"cues":[]}"""))
     }
 
     @Test

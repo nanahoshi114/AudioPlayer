@@ -19,6 +19,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.HelpOutline
 import com.nanahoshi.audioplayer.ui.components.AppTopBar
+import com.nanahoshi.audioplayer.ui.components.ConfirmActionDialog
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenuItem
@@ -466,17 +467,29 @@ private fun SenseVoiceModelPanel(
                 Text("取消下载")
             }
         }
-        SenseVoiceModelState.Ready -> Row(
-            Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                "模型已下载，在本机运行，不需要填写地址和口令。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.weight(1f),
-            )
-            TextButton(onClick = onDelete) { Text("删除模型") }
+        SenseVoiceModelState.Ready -> {
+            var confirmDelete by remember { mutableStateOf(false) }
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "模型已下载，在本机运行，不需要填写地址和口令。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = { confirmDelete = true }) { Text("删除模型") }
+            }
+            if (confirmDelete) {
+                ConfirmActionDialog(
+                    title = "删除本机模型",
+                    message = "删除后需要重新下载约 160MB 的模型，才能继续离线听写。",
+                    confirmLabel = "删除",
+                    onConfirm = { confirmDelete = false; onDelete() },
+                    onDismiss = { confirmDelete = false },
+                )
+            }
         }
         is SenseVoiceModelState.Failed -> Column {
             Text(

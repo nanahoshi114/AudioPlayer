@@ -6,6 +6,16 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+private const val BILI_REFRESH_INTERVAL_MS = 20 * 60 * 60 * 1000L
+private const val BILI_REFRESH_RETRY_MS = 10 * 60 * 1000L
+
+/** 续期成功后 20 小时再查；失败后只冷却 10 分钟，避免会话失效却长期不重试。 */
+internal fun biliRefreshDueAt(checkedAt: Long, failedAt: Long, now: Long): Boolean {
+    if (failedAt > 0L && now - failedAt < BILI_REFRESH_RETRY_MS) return false
+    if (now - checkedAt >= BILI_REFRESH_INTERVAL_MS) return true
+    return failedAt > 0L
+}
+
 class CredentialStore(context: Context) {
     private val appContext = context.applicationContext
     private val plainPrefs: SharedPreferences =
@@ -13,7 +23,11 @@ class CredentialStore(context: Context) {
 
     private val secretPrefs: SharedPreferences by lazy { createSecretPrefs() }
 
+    val biliSession = kotlinx.coroutines.flow.MutableStateFlow(0L)
     val youtubeSession = kotlinx.coroutines.flow.MutableStateFlow(0L)
+    val biliRefreshFailure = kotlinx.coroutines.flow.MutableStateFlow(
+        plainPrefs.getLong(KEY_BILI_REFRESH_FAILED, 0L) > 0L,
+    )
 
     fun youtubeCookie(): String? = secretPrefs.getString("youtube_cookie", null)?.takeIf { it.isNotBlank() }
 
@@ -38,10 +52,15 @@ class CredentialStore(context: Context) {
         val edit = secretPrefs.edit().putString(KEY_COOKIE, value)
         if (changed) edit.remove(KEY_BILI_REFRESH)
         edit.apply()
-        if (changed) plainPrefs.edit().remove(KEY_BILI_REFRESH_CHECKED).apply()
+        if (changed) {
+            plainPrefs.edit().remove(KEY_BILI_REFRESH_CHECKED).remove(KEY_BILI_REFRESH_FAILED).apply()
+            biliRefreshFailure.value = false
+            biliSession.value += 1
+        }
     }
 
     fun saveBiliSession(cookie: String, refreshToken: String) {
+        val old = cookie().orEmpty()
         val value = cookie.trim()
         if (value.isEmpty()) {
             clearCookie()
@@ -51,25 +70,45 @@ class CredentialStore(context: Context) {
         val token = refreshToken.trim()
         if (token.isEmpty()) edit.remove(KEY_BILI_REFRESH) else edit.putString(KEY_BILI_REFRESH, token)
         edit.apply()
+        plainPrefs.edit().remove(KEY_BILI_REFRESH_FAILED).apply()
+        biliRefreshFailure.value = false
+        val oldMid = com.nanahoshi.audioplayer.bilibili.cookieField(old, "DedeUserID")
+        val newMid = com.nanahoshi.audioplayer.bilibili.cookieField(value, "DedeUserID")
+        if (oldMid != newMid || (newMid == null && old != value)) biliSession.value += 1
     }
 
     fun clearCookie() {
+        val changed = cookie() != null
         secretPrefs.edit().remove(KEY_COOKIE).remove(KEY_BILI_REFRESH).apply()
-        plainPrefs.edit().remove(KEY_BILI_REFRESH_CHECKED).apply()
+        plainPrefs.edit().remove(KEY_BILI_REFRESH_CHECKED).remove(KEY_BILI_REFRESH_FAILED).apply()
+        biliRefreshFailure.value = false
+        if (changed) biliSession.value += 1
     }
 
     fun biliRefreshToken(): String? = secretPrefs.getString(KEY_BILI_REFRESH, null)?.takeIf { it.isNotBlank() }
 
     fun hasBiliRefresh(): Boolean = biliRefreshToken() != null
 
-    fun biliRefreshDue(): Boolean {
-        val checked = plainPrefs.getLong(KEY_BILI_REFRESH_CHECKED, 0L)
-        return System.currentTimeMillis() - checked >= BILI_REFRESH_INTERVAL_MS
-    }
+    fun biliRefreshDue(): Boolean = biliRefreshDueAt(
+        plainPrefs.getLong(KEY_BILI_REFRESH_CHECKED, 0L),
+        plainPrefs.getLong(KEY_BILI_REFRESH_FAILED, 0L),
+        System.currentTimeMillis(),
+    )
 
     fun markBiliRefreshChecked() {
-        plainPrefs.edit().putLong(KEY_BILI_REFRESH_CHECKED, System.currentTimeMillis()).apply()
+        plainPrefs.edit()
+            .putLong(KEY_BILI_REFRESH_CHECKED, System.currentTimeMillis())
+            .remove(KEY_BILI_REFRESH_FAILED)
+            .apply()
+        biliRefreshFailure.value = false
     }
+
+    fun markBiliRefreshFailed() {
+        plainPrefs.edit().putLong(KEY_BILI_REFRESH_FAILED, System.currentTimeMillis()).apply()
+        biliRefreshFailure.value = true
+    }
+
+    fun biliRefreshFailed(): Boolean = plainPrefs.getLong(KEY_BILI_REFRESH_FAILED, 0L) > 0L
 
     fun hasCookie(): Boolean = cookie() != null
 
@@ -357,7 +396,7 @@ class CredentialStore(context: Context) {
         const val KEY_COOKIE = "bili_cookie"
         const val KEY_BILI_REFRESH = "bili_refresh_token"
         const val KEY_BILI_REFRESH_CHECKED = "bili_refresh_checked_at"
-        const val BILI_REFRESH_INTERVAL_MS = 20 * 60 * 60 * 1000L
+        const val KEY_BILI_REFRESH_FAILED = "bili_refresh_failed_at"
         const val KEY_DLSITE_COOKIE = "dlsite_cookie"
         const val KEY_WHISPER_BASE = "whisper_base_url"
         const val KEY_WHISPER_TOKEN = "whisper_token"

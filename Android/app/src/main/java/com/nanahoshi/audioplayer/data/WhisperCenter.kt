@@ -13,6 +13,7 @@ import com.nanahoshi.audioplayer.data.db.WhisperJobEntity
 import com.nanahoshi.audioplayer.dlsite.RemotePlayable
 import com.nanahoshi.audioplayer.playback.SubtitleCue
 import com.nanahoshi.audioplayer.playback.encodeGeneratedCues
+import com.nanahoshi.audioplayer.playback.writeTextAtomically
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -665,9 +666,8 @@ class WhisperCenter(
     }
 
     private suspend fun writeCues(fingerprint: String, cues: List<WhisperCue>) {
-        val file = cueFile(fingerprint)
-        file.parentFile?.mkdirs()
-        file.writeText(encodeGeneratedCues(cues.map { SubtitleCue(it.startMs, it.endMs, it.text) }))
+        val payload = encodeGeneratedCues(cues.map { SubtitleCue(it.startMs, it.endMs, it.text) })
+        cueFile(fingerprint).writeTextAtomically(payload)
     }
 
     private fun cueFile(fingerprint: String): File {

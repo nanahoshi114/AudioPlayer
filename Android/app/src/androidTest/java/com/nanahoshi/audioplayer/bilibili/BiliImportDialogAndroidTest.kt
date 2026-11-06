@@ -20,7 +20,7 @@ class BiliImportDialogAndroidTest {
         BiliPart(video.bvid, 42, 2, "two", "UP", 1000, ""))
 
     @Test fun splitModeExposesThePartChecklistAndRequiresOneSelection() {
-        val requests = BiliImportRequests { null }
+        val requests = BiliImportRequests({ null })
         var imported: List<BiliImportRequest>? = null
         compose.setContent { MaterialTheme {
             LaunchedEffect(Unit) { imported = requests.choose(listOf(BiliVideoDetails(video, parts))) }
@@ -36,7 +36,7 @@ class BiliImportDialogAndroidTest {
     }
 
     @Test fun groupedModeRequiresExplicitConversionConfirmationAndIncludesAllParts() {
-        val requests = BiliImportRequests { BiliImportMode.SPLIT }
+        val requests = BiliImportRequests({ BiliImportMode.SPLIT })
         var imported: List<BiliImportRequest>? = null
         compose.setContent { MaterialTheme {
             LaunchedEffect(Unit) { imported = requests.choose(listOf(BiliVideoDetails(video, parts))) }

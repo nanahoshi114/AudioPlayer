@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -42,6 +43,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
+import androidx.compose.material.icons.filled.CollectionsBookmark
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
@@ -221,8 +223,10 @@ fun NowPlayingScreen(
     onBack: () -> Unit,
     viewModel: PlayerViewModel = viewModel(),
     coverModifier: Modifier = Modifier,
+    onOpenCollection: (com.nanahoshi.audioplayer.bilibili.BiliCollection) -> Unit = {},
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val collectionLink by viewModel.collectionLink.collectAsStateWithLifecycle()
     val queue by viewModel.queue.collectAsStateWithLifecycle(emptyList())
     val remaining by viewModel.client.sleepRemainingMs.collectAsStateWithLifecycle()
     var sleepDialog by remember { mutableStateOf(false) }
@@ -454,6 +458,7 @@ fun NowPlayingScreen(
                             label = "队列",
                             onClick = { queueExpanded = true },
                         )
+                        PlayerCollectionAction(current, collectionLink, onOpenCollection)
                         if (viewModel.offerBiliCache) {
                             SecondaryAction(
                                 icon = { Icon(Icons.Default.Download, contentDescription = null) },
@@ -483,6 +488,7 @@ fun NowPlayingScreen(
                     onChinese = { viewModel.showChinese = true },
                     onJapanese = { viewModel.showChinese = false },
                     onTranslate = viewModel::requestTranslation,
+                    canTranslate = viewModel.canTranslateSubtitles,
                     onStop = viewModel::cancelTranslation,
                     polishing = viewModel.polishing,
                     onPolish = viewModel::requestPolish,
@@ -609,14 +615,32 @@ private fun PlayButton(playing: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
+internal fun PlayerCollectionAction(
+    row: com.nanahoshi.audioplayer.data.db.QueuedTrack?,
+    link: com.nanahoshi.audioplayer.playback.PlayingBiliCollectionLink?,
+    onOpen: (com.nanahoshi.audioplayer.bilibili.BiliCollection) -> Unit,
+) {
+    val collection = com.nanahoshi.audioplayer.playback.playingBiliCollection(row, link) ?: return
+    SecondaryAction(
+        icon = { Icon(Icons.Default.CollectionsBookmark, contentDescription = null) },
+        label = "合集：${collection.title}",
+        onClick = { onOpen(collection) },
+        modifier = Modifier.widthIn(max = 240.dp),
+        maxLines = 2,
+    )
+}
+
+@Composable
 private fun SecondaryAction(
     icon: @Composable () -> Unit,
     label: String,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    maxLines: Int = Int.MAX_VALUE,
 ) {
     val interaction = remember { MutableInteractionSource() }
     Column(
-        Modifier
+        modifier
             .pressScale(interaction)
             .clip(MaterialTheme.shapes.medium)
             .heightIn(min = 48.dp)
@@ -625,7 +649,8 @@ private fun SecondaryAction(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         icon()
-        Text(label, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 2.dp))
+        Text(label, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 2.dp),
+            maxLines = maxLines, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
     }
 }
 
@@ -648,6 +673,7 @@ internal fun SubtitleReader(
     onDelete: () -> Unit,
     onSeek: (Long) -> Unit,
     onBack: () -> Unit,
+    canTranslate: Boolean,
 ) {
     BackHandler(onBack = onBack)
     val listState = key(mediaId) { rememberLazyListState() }
@@ -680,7 +706,7 @@ internal fun SubtitleReader(
                     polishing -> TextButton(onClick = onStopPolish) { Text("中止") }
                     translating -> TextButton(onClick = onStop) { Text("中止") }
                     cues.hasTranslation() -> TextButton(onClick = onPolish) { Text("润色") }
-                    cues.isNotEmpty() -> TextButton(onClick = onTranslate) { Text("生成翻译") }
+                    cues.isNotEmpty() && canTranslate -> TextButton(onClick = onTranslate) { Text("生成翻译") }
                 }
                 if (canDelete) {
                     IconButton(onClick = { menu = true }) {

@@ -12,7 +12,7 @@ class BiliImportRequestsTest {
         BiliVideoHit(first.bvid, "video", "UP", "", 2000), parts)
 
     @Test fun splitRequiresExplicitChoiceAndOnlyImportsCheckedParts() = runBlocking {
-        val requests = BiliImportRequests { null }
+        val requests = BiliImportRequests({ null })
         val result = async(start = CoroutineStart.UNDISPATCHED) { requests.choose(listOf(details())) }
         val id = requests.prompt.value!!.id
         assertFalse(requests.prompt.value!!.ready)
@@ -25,7 +25,7 @@ class BiliImportRequestsTest {
     }
 
     @Test fun groupedAlwaysContainsAllPartsAndConversionNeedsASecondConfirmation() = runBlocking {
-        val requests = BiliImportRequests { BiliImportMode.SPLIT }
+        val requests = BiliImportRequests({ BiliImportMode.SPLIT })
         val result = async(start = CoroutineStart.UNDISPATCHED) { requests.choose(listOf(details())) }
         val id = requests.prompt.value!!.id
         requests.edit(id, 0) { it.copy(mode = BiliImportMode.GROUPED, selected = emptySet()) }
@@ -39,7 +39,7 @@ class BiliImportRequestsTest {
     }
 
     @Test fun cancellationCreatesNoRequestAndStaleButtonsCannotConfirmAnotherPrompt() = runBlocking {
-        val requests = BiliImportRequests { null }
+        val requests = BiliImportRequests({ null })
         val firstResult = async(start = CoroutineStart.UNDISPATCHED) { requests.choose(listOf(details())) }
         val old = requests.prompt.value!!.id
         requests.cancel(old)
@@ -52,10 +52,54 @@ class BiliImportRequestsTest {
     }
 
     @Test fun singlePartKeepsTheExistingDirectImportFlow() = runBlocking {
-        val requests = BiliImportRequests { null }
+        val requests = BiliImportRequests({ null })
         val result = requests.choose(listOf(details(listOf(first))))!!.single()
         assertEquals(BiliImportMode.SPLIT, result.mode)
         assertEquals(listOf(first), result.parts)
+        assertNull(requests.prompt.value)
+    }
+
+    @Test fun busyPromptRejectsSecondRequestWithoutQueueing() = runBlocking {
+        var busyCount = 0
+        val requests = BiliImportRequests({ null }, { busyCount++ })
+        val firstResult = async(start = CoroutineStart.UNDISPATCHED) { requests.choose(listOf(details())) }
+        val id = requests.prompt.value!!.id
+        assertNull(requests.choose(listOf(details())))
+        assertEquals(1, busyCount)
+        assertEquals(id, requests.prompt.value!!.id)
+        assertFalse(firstResult.isCompleted)
+        requests.edit(id, 0) { it.copy(mode = BiliImportMode.SPLIT, selected = setOf(42, 43)) }
+        requests.confirm(id)
+        assertNotNull(firstResult.await())
+        assertNull(requests.prompt.value)
+    }
+
+    @Test fun promptIsReusableAfterTheFirstRequestFinishes() = runBlocking {
+        val requests = BiliImportRequests({ null })
+        val firstResult = async(start = CoroutineStart.UNDISPATCHED) { requests.choose(listOf(details())) }
+        val firstId = requests.prompt.value!!.id
+        requests.edit(firstId, 0) { it.copy(mode = BiliImportMode.SPLIT, selected = setOf(42)) }
+        requests.confirm(firstId)
+        assertNotNull(firstResult.await())
+        assertNull(requests.prompt.value)
+        val secondResult = async(start = CoroutineStart.UNDISPATCHED) { requests.choose(listOf(details())) }
+        val secondId = requests.prompt.value!!.id
+        assertNotEquals(firstId, secondId)
+        requests.cancel(secondId)
+        assertNull(secondResult.await())
+        assertNull(requests.prompt.value)
+    }
+
+    @Test fun cancellingTheCallerStillClearsThePrompt() = runBlocking {
+        val requests = BiliImportRequests({ null })
+        val job = launch(start = CoroutineStart.UNDISPATCHED) { requests.choose(listOf(details())) }
+        assertNotNull(requests.prompt.value)
+        job.cancelAndJoin()
+        assertNull(requests.prompt.value)
+        val next = async(start = CoroutineStart.UNDISPATCHED) { requests.choose(listOf(details())) }
+        assertNotNull(requests.prompt.value)
+        requests.cancel(requests.prompt.value!!.id)
+        assertNull(next.await())
         assertNull(requests.prompt.value)
     }
 

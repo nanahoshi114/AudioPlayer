@@ -10,6 +10,9 @@ internal const val QWEN_FILE_MODEL = "qwen-audio-3.1-asr-flash-filetrans"
 
 internal const val QWEN_TEMP_BYTES = 1024L * 1024L * 1024L
 
+/** 文件转写轮询的总上限；服务端长期 RUNNING 时不能让任务永久占住串行队列。 */
+internal const val QWEN_POLL_TIMEOUT_MS = 30 * 60 * 1000L
+
 internal const val QWEN_WHISPER_BASE = "https://dashscope.aliyuncs.com"
 
 internal fun whisperModelLabel(model: String): String = when (model) {

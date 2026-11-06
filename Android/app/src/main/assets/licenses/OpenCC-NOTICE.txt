@@ -1,0 +1,12 @@
+OpenCC 1.1.9 character dictionaries
+OpenCC authors and contributors
+https://github.com/BYVoid/OpenCC/tree/ver.1.1.9/data/dictionary
+Apache License 2.0; see OpenCC-LICENSE.txt.
+
+The bundled subtitles/simplified-only.txt and traditional-only.txt resources
+are derived from STCharacters.txt and TSCharacters.txt: retain single-code-point
+keys whose alternatives do not include the key, then remove the intersection
+of the two key sets. No text conversion is performed.
+
+STCharacters.txt SHA-256: ed1d268e0ad028511dcf5b0089faed0a980ad332449ec11d481ceefde6879f41
+TSCharacters.txt SHA-256: 6b5a0a799bea2bb22c001f635eaa3fc2904310f0c08addbff275477a80ecf09a

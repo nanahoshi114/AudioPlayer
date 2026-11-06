@@ -74,6 +74,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -85,6 +86,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.nanahoshi.audioplayer.ui.components.EmptyState
+import com.nanahoshi.audioplayer.ui.components.DeleteAudioDialog
 import com.nanahoshi.audioplayer.ui.components.LabelBadge
 import com.nanahoshi.audioplayer.ui.components.LoadingState
 import com.nanahoshi.audioplayer.ui.components.LocalTopBarOverride
@@ -130,6 +132,7 @@ fun LibraryScreen(
     val currentFolder by viewModel.currentFolder.collectAsStateWithLifecycle(null)
     val folderId by viewModel.currentFolderId.collectAsStateWithLifecycle()
     val cachePrompt by viewModel.cachePrompt.collectAsStateWithLifecycle()
+    val pendingAudioDelete by viewModel.pendingAudioDelete.collectAsStateWithLifecycle()
     val selectedTracks by viewModel.selectedTrackIds.collectAsStateWithLifecycle()
     val selectedFolders by viewModel.selectedFolderIds.collectAsStateWithLifecycle()
     val selecting = selectedTracks.isNotEmpty() || selectedFolders.isNotEmpty()
@@ -148,7 +151,7 @@ fun LibraryScreen(
     val fabExpanded by remember(listState) {
         derivedStateOf { listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset < 48 }
     }
-    var trail by remember { mutableStateOf(listOf<LibraryCrumb>()) }
+    var trail by rememberSaveable(stateSaver = LibraryTrailSaver) { mutableStateOf(listOf<LibraryCrumb>()) }
     val climb = rememberLibraryClimb(
         currentFolderId = { viewModel.currentFolderId.value },
         up = viewModel::up,
@@ -483,6 +486,15 @@ fun LibraryScreen(
                 viewModel.deleteFolder(id)
             },
             onDismiss = { confirmFolderDelete = null },
+        )
+    }
+
+    pendingAudioDelete?.let { pending ->
+        DeleteAudioDialog(
+            itemCount = pending.tracks.size,
+            subtitleCount = pending.subtitles,
+            onConfirm = viewModel::confirmAudioDelete,
+            onCancel = viewModel::cancelAudioDelete,
         )
     }
 }

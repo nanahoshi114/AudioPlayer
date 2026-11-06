@@ -45,7 +45,8 @@ internal fun clipboardImportTarget(raw: String): ClipboardTarget? {
         if (video != null && youtubeId.matches(video)) return ClipboardTarget(ClipboardSource.YOUTUBE, video)
     }
     val bv = clipboardBv.find(text)
-    val rj = clipboardRj.findAll(text).firstOrNull { (it.groupValues[1].toLongOrNull() ?: 0) > 0 }
+    val rj = clipboardRj.findAll(text).firstOrNull { match -> match.groupValues[1].any { it != '0' } }
     if (bv != null && (rj == null || bv.range.first < rj.range.first)) return ClipboardTarget(ClipboardSource.BILIBILI, bv.value)
-    return rj?.let { ClipboardTarget(ClipboardSource.ASMR, "RJ" + it.groupValues[1].toLong().toString().padStart(6, '0')) }
+    // RJ 是作品标识，前导零属于编号；只给不足六位的旧式简写补零，不做数值转换。
+    return rj?.let { ClipboardTarget(ClipboardSource.ASMR, "RJ" + it.groupValues[1].padStart(6, '0')) }
 }

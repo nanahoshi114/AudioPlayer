@@ -34,6 +34,7 @@ import com.nanahoshi.audioplayer.data.CACHE_LIMIT_OPTIONS
 import com.nanahoshi.audioplayer.data.cacheLimitLabel
 import com.nanahoshi.audioplayer.data.formatCacheBytes
 import com.nanahoshi.audioplayer.graph
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -106,7 +107,8 @@ fun CacheScreen(
 }
 
 class CacheViewModel(app: Application) : AndroidViewModel(app) {
-    private val cache = app.graph().cache
+    private val graph = app.graph()
+    private val cache = graph.cache
     val limitBytes = cache.limitBytes
     var usedBytes by mutableStateOf(0L)
         private set
@@ -133,10 +135,17 @@ class CacheViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             clearing = true
             cleared = false
-            cache.clearAll()
-            usedBytes = withContext(Dispatchers.IO) { cache.usage() }
-            clearing = false
-            cleared = true
+            try {
+                cache.clearAll()
+                usedBytes = withContext(Dispatchers.IO) { cache.usage() }
+                cleared = true
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                graph.messages.value = failure.message?.takeIf { it.isNotBlank() } ?: "清理缓存失败，请重试"
+            } finally {
+                clearing = false
+            }
         }
     }
 }

@@ -10,6 +10,7 @@ import com.nanahoshi.audioplayer.data.LocalAudio
 import com.nanahoshi.audioplayer.data.db.AppDatabase
 import com.nanahoshi.audioplayer.data.TrackSource
 import com.nanahoshi.audioplayer.data.readBiliSubtitle
+import com.nanahoshi.audioplayer.data.biliSubtitleLanguage
 import com.nanahoshi.audioplayer.data.writeBiliSubtitle
 import com.nanahoshi.audioplayer.data.db.DownloadStatus
 import com.nanahoshi.audioplayer.data.db.QueuedTrack
@@ -28,12 +29,16 @@ data class LoadedSubtitles(
     val generatedEmpty: Boolean,
     val generated: Boolean,
     val notice: String? = null,
-)
+    val language: String? = null,
+) {
+    val canTranslate: Boolean = canGenerateTranslation(cues, language)
+}
 
 /** 一首曲目的字幕，以及取不到时需要告诉用户的原因。 */
 data class TrackSubtitles(
     val cues: List<SubtitleCue>,
     val notice: String? = null,
+    val language: String? = null,
 )
 
 class SubtitleSource(
@@ -44,13 +49,19 @@ class SubtitleSource(
 ) {
     suspend fun load(row: QueuedTrack): LoadedSubtitles = withContext(Dispatchers.IO) {
         try {
-            val generated = generated(row)
-            if (generated != null) return@withContext LoadedSubtitles(generated, generated.isEmpty(), true)
+            when (val state = generatedState(row)) {
+                is GeneratedState.Ready ->
+                    return@withContext LoadedSubtitles(state.cues, state.cues.isEmpty(), true)
+                GeneratedState.Corrupt -> return@withContext LoadedSubtitles(
+                    emptyList(), false, false, "生成的字幕文件损坏，可在「更多」里删除后重新生成",
+                )
+                GeneratedState.Missing -> Unit
+            }
             val track = row.trackId?.takeIf { it > 0L }?.let { db.tracks().getById(it) }
                 ?: bilibiliRowTrack(row)
                 ?: return@withContext LoadedSubtitles(emptyList(), false, false)
             val trackSubtitles = cuesFor(track)
-            LoadedSubtitles(withOverlay(row, trackSubtitles.cues), false, false, trackSubtitles.notice)
+            LoadedSubtitles(withOverlay(row, trackSubtitles.cues), false, false, trackSubtitles.notice, trackSubtitles.language)
         } catch (error: CancellationException) {
             throw error
         } catch (_: Exception) {
@@ -65,6 +76,12 @@ class SubtitleSource(
 
     suspend fun discardStored(trackId: Long?, localPath: String?, remoteUrl: String?) = withContext(Dispatchers.IO) {
         removeGenerated(storedRow(trackId, localPath, remoteUrl))
+    }
+
+    /** 是否有可保留的生成字幕；删除音频前据此决定要不要询问。 */
+    suspend fun hasGenerated(trackId: Long?, localPath: String?, remoteUrl: String?): Boolean = withContext(Dispatchers.IO) {
+        val row = storedRow(trackId, localPath, remoteUrl)
+        overlayFile(row).isFile || generatedState(row) != GeneratedState.Missing
     }
 
     suspend fun cuesFor(track: TrackEntity): TrackSubtitles = withContext(Dispatchers.IO) {
@@ -87,19 +104,25 @@ class SubtitleSource(
         if (job != null) {
             val file = generatedFile(job.fingerprint)
             if (file.name == ".json") return@withContext
-            file.parentFile?.mkdirs()
-            file.writeText(encodeGeneratedCues(cues))
+            file.writeTextAtomically(encodeGeneratedCues(cues))
             db.whisper().markTranslated(job.id, System.currentTimeMillis())
         } else {
-            val file = overlayFile(row)
-            file.parentFile?.mkdirs()
-            file.writeText(encodeGeneratedCues(cues))
+            overlayFile(row).writeTextAtomically(encodeGeneratedCues(cues))
         }
     }
 
-    private suspend fun generated(row: QueuedTrack): List<SubtitleCue>? {
-        val job = findGeneratedJob(row) ?: return null
-        return readGenerated(job)
+    private suspend fun generatedState(row: QueuedTrack): GeneratedState {
+        val job = findGeneratedJob(row) ?: return GeneratedState.Missing
+        val file = generatedFile(job.fingerprint)
+        if (file.name == ".json" || !file.isFile) return GeneratedState.Missing
+        val cues = parseGeneratedCuesOrNull(file.readText()) ?: return GeneratedState.Corrupt
+        return GeneratedState.Ready(cues)
+    }
+
+    private sealed interface GeneratedState {
+        data class Ready(val cues: List<SubtitleCue>) : GeneratedState
+        data object Corrupt : GeneratedState
+        data object Missing : GeneratedState
     }
 
     private fun storedRow(trackId: Long?, localPath: String?, remoteUrl: String?) = QueuedTrack(
@@ -195,12 +218,6 @@ class SubtitleSource(
         return null
     }
 
-    private fun readGenerated(job: WhisperJobEntity): List<SubtitleCue>? {
-        val file = generatedFile(job.fingerprint)
-        if (file.name == ".json" || !file.isFile) return null
-        return parseGeneratedCues(file.readText())
-    }
-
     private fun generatedFile(fingerprint: String): File {
         val safe = fingerprint.lowercase().filter { it in '0'..'9' || it in 'a'..'f' }
         return File(File(context.filesDir, "subtitles"), "$safe.json")
@@ -215,16 +232,16 @@ class SubtitleSource(
         // 缓存音轨时顺带存下的字幕，播放时优先读本地，不再依赖登录和网络。
         readBiliSubtitle(context.filesDir, bvid, cid)?.let { document ->
             val cues = parseSubtitleDocument(document)
-            if (cues.isNotEmpty()) return TrackSubtitles(cues)
+            if (cues.isNotEmpty()) return TrackSubtitles(cues, language = biliSubtitleLanguage(document))
         }
         return when (val result = bilibili.subtitleDocument(bvid, cid)) {
             is BiliSubtitle.Ready -> {
                 val cues = parseSubtitleDocument(result.document)
                 // 音轨已经在本地时，顺手把这次拿到的字幕补存下来。
                 if (cues.isNotEmpty() && LocalAudio.hasStoredCopy(track.localUri)) {
-                    writeBiliSubtitle(context.filesDir, bvid, cid, result.document)
+                    writeBiliSubtitle(context.filesDir, bvid, cid, result.document, result.language)
                 }
-                TrackSubtitles(cues)
+                TrackSubtitles(cues, language = result.language)
             }
             BiliSubtitle.NeedsLogin -> TrackSubtitles(emptyList(), "B站字幕需要登录后显示，可在「我的」重新登录")
             BiliSubtitle.Failed -> TrackSubtitles(emptyList(), "B站字幕读取失败，可稍后再试")

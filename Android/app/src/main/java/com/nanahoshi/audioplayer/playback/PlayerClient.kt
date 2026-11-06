@@ -111,13 +111,7 @@ class PlayerClient(
         queueMutex.withLock {
             val existing = library.firstQueueItemId(track.id)
             if (existing != null) {
-                withController {
-                    val index = indexOfQueueItem(existing)
-                    if (index >= 0) {
-                        seekTo(index, 0)
-                        play()
-                    }
-                }
+                playQueueItemLocked(existing)
             } else if (track.id > 0L) {
                 appendLocked(listOf(track), startPlaying = true)
             }
@@ -125,14 +119,29 @@ class PlayerClient(
     }
 
     fun playQueueItem(queueItemId: Long) = scope.launch {
-        queueMutex.withLock {
-            withController {
-                val index = indexOfQueueItem(queueItemId)
-                if (index >= 0) {
-                    seekTo(index, 0)
-                    play()
-                }
+        queueMutex.withLock { playQueueItemLocked(queueItemId) }
+    }
+
+    /** 播放器与库不一致时按库快照重建，避免点了队列项没有任何反应。 */
+    private suspend fun playQueueItemLocked(queueItemId: Long) {
+        var found = false
+        withController {
+            val index = indexOfQueueItem(queueItemId)
+            if (index >= 0) {
+                seekTo(index, 0)
+                play()
+                found = true
             }
+        }
+        if (found) return
+        val rows = library.queueSnapshot()
+        val index = rows.indexOfFirst { it.queueItemId == queueItemId }
+        if (index < 0) return
+        val items = rows.map { it.toMediaItem() }
+        withController {
+            setMediaItems(items, index, 0)
+            prepare()
+            play()
         }
     }
 
@@ -144,13 +153,7 @@ class PlayerClient(
             if (existing == null) {
                 appendLocked(listOf(first), startPlaying = true)
             } else {
-                withController {
-                    val index = indexOfQueueItem(existing)
-                    if (index >= 0) {
-                        seekTo(index, 0)
-                        play()
-                    }
-                }
+                playQueueItemLocked(existing)
             }
             val missing = tracks.drop(1).filter { library.firstQueueItemId(it.id) == null }
             if (missing.isNotEmpty()) appendLocked(missing, startPlaying = false)
@@ -183,6 +186,55 @@ class PlayerClient(
     }
 
     fun clearQueue() = replaceAndPlay(emptyList())
+
+    fun replaceAndPlayItems(items: List<QueuePlayable>) = enqueueItems(items, replace = true)
+    fun appendItems(items: List<QueuePlayable>) = enqueueItems(items, replace = false)
+
+    private fun enqueueItems(items: List<QueuePlayable>, replace: Boolean) = scope.launch {
+        if (items.isEmpty()) return@launch
+        var committed = false
+        try {
+            queueMutex.withLock {
+                val ids = library.writeMixedQueue(items, replace)
+                committed = true
+                val media = ids.zip(items).map { (id, item) -> item.mediaItem(id) }
+                withController {
+                    if (replace) {
+                        setMediaItems(media, 0, 0)
+                        prepare()
+                        play()
+                    } else {
+                        val empty = mediaItemCount == 0
+                        addMediaItems(media)
+                        if (empty) { prepare(); playWhenReady = false }
+                    }
+                }
+            }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+        catch (_: Exception) {
+            // 库已提交但播放器没跟上：按库里的队列重建，避免队列页和播放器长期不一致。
+            val recovered = if (!committed) false else try {
+                queueMutex.withLock {
+                    if (replace) {
+                        val rows = library.queueSnapshot()
+                        val media = rows.map { it.toMediaItem() }
+                        withController {
+                            setMediaItems(media, 0, 0)
+                            if (media.isNotEmpty()) { prepare(); play() }
+                        }
+                    } else {
+                        rebuildPlayerFromQueue()
+                    }
+                }
+                true
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                false
+            }
+            if (!recovered) onRemovalRejected("播放队列准备失败，请重试")
+        }
+    }
 
     fun replaceAndPlayRemote(items: List<RemotePlayable>, startIndex: Int = 0) = scope.launch {
         queueMutex.withLock {

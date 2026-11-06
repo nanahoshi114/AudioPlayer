@@ -6,6 +6,23 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 enum class BiliSearchMode { VIDEO, UPLOADER }
 
+enum class BiliVideoOrder(val label: String, val value: String) {
+    TOTAL_RANK("综合排序", "totalrank"),
+    PLAY_COUNT("最多播放", "click"),
+    PUBLISHED("最新发布", "pubdate"),
+    DANMAKU("最多弹幕", "dm"),
+    FAVORITES("最多收藏", "stow"),
+    COMMENTS("最多评论", "scores"),
+}
+
+enum class BiliVideoDuration(val label: String, val value: String) {
+    ALL("全部时长", "0"),
+    UNDER_TEN("10 分钟以下", "1"),
+    TEN_TO_THIRTY("10–30 分钟", "2"),
+    THIRTY_TO_SIXTY("30–60 分钟", "3"),
+    OVER_SIXTY("60 分钟以上", "4"),
+}
+
 sealed interface BiliSearchInput {
     data class Video(val bvid: String) : BiliSearchInput
     data class Uploader(val mid: Long) : BiliSearchInput
@@ -68,7 +85,7 @@ internal fun biliSearchError(code: Int): String = when (code) {
 class BiliSearchApi(
     private val signedGet: suspend (path: String, params: Map<String, String>, referer: String, refreshKey: Boolean) -> String,
 ) {
-    private suspend fun data(path: String, params: Map<String, String>, referer: String): JsonElement {
+    internal suspend fun data(path: String, params: Map<String, String>, referer: String): JsonElement {
         for (attempt in 0..1) {
             try {
                 val raw = signedGet(path, params, referer, attempt == 1)
@@ -86,8 +103,12 @@ class BiliSearchApi(
         error("unreachable")
     }
 
-    suspend fun videos(keyword: String, page: Int): BiliPage<BiliVideoHit> {
-        val data = search("video", keyword, page)
+    suspend fun videos(
+        keyword: String, page: Int,
+        order: BiliVideoOrder = BiliVideoOrder.TOTAL_RANK,
+        duration: BiliVideoDuration = BiliVideoDuration.ALL,
+    ): BiliPage<BiliVideoHit> {
+        val data = search("video", keyword, page, order, duration)
         val items = results(data).mapNotNull { video(it) }.distinctBy { it.bvid }
         return BiliPage(items, page < (data.number("numPages") ?: 1))
     }
@@ -109,10 +130,16 @@ class BiliSearchApi(
         val count = data.field("page").number("count") ?: 0
         return BiliPage(items, page * 30L < count)
     }
-    private suspend fun search(type: String, keyword: String, page: Int): JsonElement {
+    private suspend fun search(
+        type: String, keyword: String, page: Int,
+        order: BiliVideoOrder = BiliVideoOrder.TOTAL_RANK,
+        duration: BiliVideoDuration = BiliVideoDuration.ALL,
+    ): JsonElement {
         require(page > 0)
-        return data("/x/web-interface/wbi/search/type", mapOf("search_type" to type, "keyword" to keyword,
-            "page" to "$page", "page_size" to "20", "order" to if (type == "video") "totalrank" else "0"), "https://search.bilibili.com/")
+        val params = mutableMapOf("search_type" to type, "keyword" to keyword,
+            "page" to "$page", "page_size" to "20", "order" to if (type == "video") order.value else "0")
+        if (type == "video") params["duration"] = duration.value
+        return data("/x/web-interface/wbi/search/type", params, "https://search.bilibili.com/")
     }
     private fun results(data: JsonElement): List<JsonElement> = when (val result = data.field("result")) {
         is JsonArray -> result

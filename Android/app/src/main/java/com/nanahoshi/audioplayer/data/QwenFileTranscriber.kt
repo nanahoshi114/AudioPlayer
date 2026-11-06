@@ -1,7 +1,9 @@
 package com.nanahoshi.audioplayer.data
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeout
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
@@ -32,7 +34,13 @@ internal class QwenFileTranscriber(
         val policy = policy(origin, ticket, token)
         val key = upload(policy, file, ticket)
         val taskId = submit(origin, "oss://$key", ticket, token)
-        val resultUrl = poll(origin, taskId, ticket, token)
+        val resultUrl = try {
+            withTimeout(QWEN_POLL_TIMEOUT_MS) { poll(origin, taskId, ticket, token) }
+        } catch (timeout: TimeoutCancellationException) {
+            // 超时后还要主动取消仍在阻塞的轮询请求，否则会继续等到 read 超时。
+            calls.cancel(ticket.key)
+            throw WhisperException("听写超时，请重试")
+        }
         val payload = download(resultUrl, ticket)
         return cuesFromQwenPayload(payload)
     }

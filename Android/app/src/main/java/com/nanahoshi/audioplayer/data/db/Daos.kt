@@ -246,6 +246,15 @@ interface DownloadDao {
     @Query("SELECT * FROM downloads WHERE status = 'DONE' AND source = :source AND workKey = :workKey")
     suspend fun finishedForWork(source: String, workKey: String): List<DownloadEntity>
 
+    @Query("SELECT * FROM downloads WHERE source = :source AND workKey = :workKey AND localPath IS NOT NULL")
+    suspend fun locatedForWork(source: String, workKey: String): List<DownloadEntity>
+
+    @Query("SELECT * FROM downloads WHERE kind = 'DLSITE_ARCHIVE'")
+    suspend fun archives(): List<DownloadEntity>
+
+    @Query("DELETE FROM downloads WHERE id = :id AND status = 'FAILED'")
+    suspend fun deleteFailed(id: Long): Int
+
     @Query(
         "SELECT * FROM downloads WHERE source = :source AND workKey = :workKey AND fileKey = :fileKey " +
             "AND status IN ('QUEUED', 'RUNNING') LIMIT 1",
@@ -518,6 +527,9 @@ interface PlaylistDao {
     @Query("SELECT * FROM playlists ORDER BY updatedAt DESC")
     fun observeAll(): Flow<List<PlaylistEntity>>
 
+    @Query("SELECT * FROM playlists WHERE id NOT IN (SELECT playlistId FROM bili_collections) ORDER BY updatedAt DESC")
+    fun observeEditable(): Flow<List<PlaylistEntity>>
+
     @Query("SELECT * FROM playlists WHERE id = :id")
     fun observe(id: Long): Flow<PlaylistEntity?>
 
@@ -572,7 +584,7 @@ interface PlaylistDao {
     @Insert
     suspend fun insertItem(item: PlaylistItemEntity): Long
 
-    @Query("DELETE FROM playlist_items WHERE id = :itemId")
+    @Query("DELETE FROM playlist_items WHERE id = :itemId AND playlistId NOT IN (SELECT playlistId FROM bili_collections)")
     suspend fun deleteItem(itemId: Long)
 
     @Query("SELECT * FROM playlist_items WHERE playlistId = :playlistId ORDER BY position ASC")

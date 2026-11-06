@@ -9,6 +9,56 @@ import kotlin.coroutines.suspendCoroutine
 
 class BiliSearchTest {
     private val bvid = "BV1234567890"
+    @Test fun videoFiltersMapToServerParametersAndDoNotAffectUploaderSearch() = runBlocking {
+        val requests = mutableListOf<Map<String, String>>()
+        val api = BiliSearchApi { _, params, _, _ ->
+            requests += params.toMap()
+            """{"code":0,"data":{"numPages":0,"result":[]}}"""
+        }
+        api.videos("x", 1)
+        assertEquals("totalrank", requests.last()["order"])
+        assertEquals("0", requests.last()["duration"])
+        val orders = listOf("totalrank", "click", "pubdate", "dm", "stow", "scores")
+        BiliVideoOrder.entries.forEachIndexed { index, order ->
+            BiliVideoDuration.entries.forEachIndexed { durationIndex, duration ->
+                api.videos("x", 2, order, duration)
+                assertEquals(orders[index], requests.last()["order"])
+                assertEquals("$durationIndex", requests.last()["duration"])
+                assertEquals("2", requests.last()["page"])
+            }
+        }
+        api.uploaders("UP", 1)
+        assertEquals("0", requests.last()["order"])
+        assertFalse(requests.last().containsKey("duration"))
+    }
+
+    @Test fun changedFilterResetsPagesAndIgnoresOldResultsWhileRetriesKeepTheSnapshot() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        try {
+            val state = BiliPagedState<String, String>(scope) { it }
+            lateinit var old: Continuation<BiliPage<String>>
+            state.start { suspendCoroutine { old = it } }
+            val revision = state.revision
+            val requests = mutableListOf<Triple<Int, BiliVideoOrder, BiliVideoDuration>>()
+            var failure = true
+            val order = BiliVideoOrder.FAVORITES
+            val duration = BiliVideoDuration.OVER_SIXTY
+            state.start { page ->
+                requests += Triple(page, order, duration)
+                if (page == 2 && failure) { failure = false; throw BilibiliException(-412, "受限") }
+                BiliPage(listOf("$page"), page < 2)
+            }
+            assertTrue(state.revision > revision)
+            old.resume(BiliPage(listOf("old"), false))
+            assertEquals(listOf("1"), state.items)
+            state.loadMore()
+            assertEquals(listOf("1"), state.items)
+            state.loadMore()
+            assertEquals(listOf("1", "2"), state.items)
+            assertEquals(listOf(1, 2, 2), requests.map { it.first })
+            assertTrue(requests.all { it.second == order && it.third == duration })
+        } finally { scope.cancel() }
+    }
     @Test fun structuredInputsTakePriorityAndNumbersDependOnMode() {
         for (mode in BiliSearchMode.entries) {
             assertEquals(BiliSearchInput.Video(bvid), biliInput("https://www.bilibili.com/video/$bvid?p=2", mode))

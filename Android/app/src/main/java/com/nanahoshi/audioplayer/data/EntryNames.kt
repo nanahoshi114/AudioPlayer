@@ -58,3 +58,14 @@ fun sanitizeEntryName(name: String): String =
         .trim()
         .take(120)
         .ifBlank { "未命名" }
+
+/** fileKey 的 8 位短哈希，用于把撞名的文件分到不同子目录。 */
+internal fun shortKeyHash(raw: String): String =
+    java.security.MessageDigest.getInstance("SHA-256")
+        .digest(raw.toByteArray())
+        .take(4)
+        .joinToString("") { "%02x".format(it) }
+
+/** 只有与别的 fileKey 撞名时才加哈希子目录，文件名本身保持可读。 */
+internal fun remoteRelativePath(name: String, fileKey: String?, occupied: Boolean): String =
+    if (occupied && !fileKey.isNullOrBlank()) "${shortKeyHash(fileKey)}/$name" else name

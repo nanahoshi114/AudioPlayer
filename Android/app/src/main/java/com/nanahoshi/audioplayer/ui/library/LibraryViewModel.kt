@@ -207,7 +207,12 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
                     viewModelScope.launch {
                         try {
                             graph.library.ensureWorkMeta(folder.id)
+                        } catch (cancelled: CancellationException) {
+                            metaRequested.remove(folder.id)
+                            throw cancelled
                         } catch (_: Exception) {
+                            // 失败后放回集合，下次列表刷新还能重试，否则作品标签会永久缺失。
+                            metaRequested.remove(folder.id)
                         }
                     }
                 }
@@ -460,14 +465,40 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         return count + graph.downloads.enqueue(tracks.filter { it.source != TrackSource.DLSITE })
     }
 
-    fun deleteDownloadedTrack(track: TrackEntity) = launch {
-        graph.messages.value = deleteDownloadedNotice(graph.downloads.deleteDownloaded(listOf(track)))
-    }
+    data class PendingAudioDelete(val tracks: List<TrackEntity>, val subtitles: Int)
+
+    val pendingAudioDelete = MutableStateFlow<PendingAudioDelete?>(null)
+
+    fun deleteDownloadedTrack(track: TrackEntity) = launch { requestDeleteDownloaded(listOf(track)) }
 
     fun deleteDownloadedSelection() = launch {
         val tracks = selectedTracks()
         clearSelection()
-        graph.messages.value = deleteDownloadedNotice(graph.downloads.deleteDownloaded(tracks))
+        requestDeleteDownloaded(tracks)
+    }
+
+    private suspend fun requestDeleteDownloaded(tracks: List<TrackEntity>) {
+        if (tracks.isEmpty()) return
+        val subtitles = tracks.count { graph.subtitles.hasGenerated(it.id, it.localUri, it.remoteUrl) }
+        if (subtitles > 0) {
+            pendingAudioDelete.value = PendingAudioDelete(tracks, subtitles)
+        } else {
+            graph.messages.value = deleteDownloadedNotice(graph.downloads.deleteDownloaded(tracks, deleteSubtitles = true))
+        }
+    }
+
+    fun confirmAudioDelete(deleteSubtitles: Boolean) {
+        val pending = pendingAudioDelete.value ?: return
+        pendingAudioDelete.value = null
+        launch {
+            graph.messages.value = deleteDownloadedNotice(
+                graph.downloads.deleteDownloaded(pending.tracks, deleteSubtitles),
+            )
+        }
+    }
+
+    fun cancelAudioDelete() {
+        pendingAudioDelete.value = null
     }
 
     val cachePrompt = MutableStateFlow<CachePrompt?>(null)

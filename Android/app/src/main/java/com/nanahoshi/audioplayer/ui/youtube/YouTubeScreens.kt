@@ -32,6 +32,7 @@ import com.nanahoshi.audioplayer.dlsite.RemotePlayable
 import com.nanahoshi.audioplayer.graph
 import com.nanahoshi.audioplayer.ui.CoverImage
 import com.nanahoshi.audioplayer.ui.components.AppTopBar
+import com.nanahoshi.audioplayer.ui.components.ConfirmActionDialog
 import com.nanahoshi.audioplayer.ui.components.EmptyState
 import com.nanahoshi.audioplayer.ui.formatDuration
 import com.nanahoshi.audioplayer.youtube.*
@@ -229,13 +230,14 @@ class YouTubeAccountViewModel(app: Application) : AndroidViewModel(app) {
 @Composable
 fun YouTubeAccountCard(onOpenList: (String) -> Unit, viewModel: YouTubeAccountViewModel = viewModel()) {
     var editing by rememberSaveable { mutableStateOf(false) }
+    var confirmClear by remember { mutableStateOf(false) }
     Surface(shape = MaterialTheme.shapes.large, tonalElevation = 1.dp, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
         Column(Modifier.padding(16.dp)) {
             Text("YouTube", style = MaterialTheme.typography.titleMedium)
             Text(viewModel.status, Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodyMedium)
             Row {
                 TextButton(onClick = { editing = true }) { Text(if (viewModel.saved) "更新 Cookie" else "保存 Cookie") }
-                TextButton(onClick = viewModel::clear, enabled = viewModel.saved) { Text("清除") }
+                TextButton(onClick = { confirmClear = true }, enabled = viewModel.saved) { Text("清除") }
             }
             Row {
                 TextButton(onClick = { onOpenList("LL") }) { Text("喜欢的视频") }
@@ -250,6 +252,15 @@ fun YouTubeAccountCard(onOpenList: (String) -> Unit, viewModel: YouTubeAccountVi
             text = { OutlinedTextField(draft, { draft = it }, label = { Text("整段 Cookie") }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth()) },
             confirmButton = { TextButton(onClick = { if (viewModel.save(draft)) editing = false }) { Text("保存") } },
             dismissButton = { TextButton(onClick = { editing = false }) { Text("取消") } },
+        )
+    }
+    if (confirmClear) {
+        ConfirmActionDialog(
+            title = "清除 YouTube 登录信息",
+            message = "「喜欢的视频」和「稍后观看」需要重新保存 Cookie 后才能读取。",
+            confirmLabel = "清除",
+            onConfirm = { confirmClear = false; viewModel.clear() },
+            onDismiss = { confirmClear = false },
         )
     }
 }

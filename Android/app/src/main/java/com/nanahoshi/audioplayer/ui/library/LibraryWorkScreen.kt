@@ -34,6 +34,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -71,11 +72,12 @@ fun LibraryWorkScreen(
     val workSources by viewModel.workSources.collectAsStateWithLifecycle()
     val busy by viewModel.busy.collectAsStateWithLifecycle()
     val cachePrompt by viewModel.cachePrompt.collectAsStateWithLifecycle()
+    val pendingAudioDelete by viewModel.pendingAudioDelete.collectAsStateWithLifecycle()
     val playlists by viewModel.playlists.collectAsStateWithLifecycle(emptyList())
     val selectedTracks by viewModel.selectedTrackIds.collectAsStateWithLifecycle()
     val selectedFolders by viewModel.selectedFolderIds.collectAsStateWithLifecycle()
     val selecting = selectedTracks.isNotEmpty() || selectedFolders.isNotEmpty()
-    var trail by remember { mutableStateOf(listOf<LibraryCrumb>()) }
+    var trail by rememberSaveable(stateSaver = LibraryTrailSaver) { mutableStateOf(listOf<LibraryCrumb>()) }
     var menu by remember { mutableStateOf(false) }
     var pickingPlaylist by remember { mutableStateOf(false) }
     var confirmRemoveWork by remember { mutableStateOf(false) }
@@ -312,6 +314,14 @@ fun LibraryWorkScreen(
                 onBack()
             },
             onDismiss = { confirmRemoveWork = false },
+        )
+    }
+    pendingAudioDelete?.let { pending ->
+        com.nanahoshi.audioplayer.ui.components.DeleteAudioDialog(
+            itemCount = pending.tracks.size,
+            subtitleCount = pending.subtitles,
+            onConfirm = viewModel::confirmAudioDelete,
+            onCancel = viewModel::cancelAudioDelete,
         )
     }
 }

@@ -477,7 +477,7 @@ class DlsiteClient(private val credentials: CredentialStore) {
         return embeds.flatMap { embed ->
             val referer = embed.substringBefore('?')
             val page = try {
-                get(embed, "https://chobit.cc/", acceptJson = false)
+                get(embed, "https://chobit.cc/", acceptJson = false, cookieOverride = ADULT_ONLY_COOKIE)
             } catch (_: DlsiteException) {
                 return@flatMap emptyList()
             }
@@ -488,7 +488,8 @@ class DlsiteClient(private val credentials: CredentialStore) {
     private fun chobitEmbeds(workno: String): List<String> {
         for (id in worknoCandidates(workno)) {
             val body = try {
-                get("https://chobit.cc/api/v1/dlsite/embed?workno=$id", "https://chobit.cc/", acceptJson = true)
+                get("https://chobit.cc/api/v1/dlsite/embed?workno=$id", "https://chobit.cc/",
+                    acceptJson = true, cookieOverride = ADULT_ONLY_COOKIE)
             } catch (_: DlsiteException) {
                 continue
             }
@@ -617,6 +618,9 @@ class DlsiteClient(private val credentials: CredentialStore) {
             URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
 
         private fun withAdult(cookie: String): String = mergeDlsiteCookies(cookie, "adultchecked=1")
+
+        /** 试听走第三方主机，只带成年确认，不带 DLsite 登录会话。 */
+        private const val ADULT_ONLY_COOKIE = "adultchecked=1"
 
         internal fun playAccessCookie(session: String?, extras: List<String>): String {
             var merged = session.orEmpty()

@@ -16,10 +16,19 @@ class BiliBrowserViewModel(app: Application) : AndroidViewModel(app) {
     var mode by mutableStateOf(BiliSearchMode.VIDEO); private set
     private var videoQuery by mutableStateOf("")
     private var upQuery by mutableStateOf("")
+    var videoOrder by mutableStateOf(BiliVideoOrder.TOTAL_RANK); private set
+    var videoDuration by mutableStateOf(BiliVideoDuration.ALL); private set
     val query get() = if (mode == BiliSearchMode.VIDEO) videoQuery else upQuery
     internal val videos = BiliPagedState<BiliVideoHit, String>(viewModelScope) { it.bvid }
     internal val uploaders = BiliPagedState<BiliUploader, Long>(viewModelScope) { it.mid }
     internal val uploads = BiliPagedState<BiliVideoHit, String>(viewModelScope) { it.bvid }
+    internal var collections by mutableStateOf(BiliPagedState<BiliCollection, String>(viewModelScope) { it.key }); private set
+    var showingCollections by mutableStateOf(false); private set
+    fun showCollections(value: Boolean) {
+        if (showingCollections == value) return
+        selected = emptySet(); cancelParts(); showingCollections = value
+        if (value && !collections.searched) uploader?.let { user -> collections.start { graph.bilibili.collections.catalogue(user.mid, it) } }
+    }
     var uploader by mutableStateOf<BiliUploader?>(null); private set
     var selected by mutableStateOf<Set<String>>(emptySet()); private set
     var resolving by mutableStateOf(false); private set
@@ -27,6 +36,13 @@ class BiliBrowserViewModel(app: Application) : AndroidViewModel(app) {
     internal var choice by mutableStateOf<BiliPartChoice?>(null); private set
     private var partJob: Job? = null
     private var partGeneration = 0L
+    init {
+        viewModelScope.launch {
+            graph.credentials.biliSession.collect { version ->
+                if (version > 0) { cancelSearch(); cancelParts(); if (uploader != null) refreshUploader() }
+            }
+        }
+    }
     val tracks = graph.db.tracks().observeAll()
     val downloads = graph.downloads.observe()
     internal val shownVideos get() = if (uploader != null) uploads else videos
@@ -39,7 +55,21 @@ class BiliBrowserViewModel(app: Application) : AndroidViewModel(app) {
         if (mode == value) return
         cancelSearch(); cancelParts(); selected = emptySet(); mode = value
     }
-    fun cancelSearch() { videos.cancel(); uploaders.cancel(); uploads.cancel() }
+    fun updateVideoOrder(value: BiliVideoOrder) {
+        if (videoOrder == value) return
+        videoOrder = value
+        refreshVideoFilters()
+    }
+    fun updateVideoDuration(value: BiliVideoDuration) {
+        if (videoDuration == value) return
+        videoDuration = value
+        refreshVideoFilters()
+    }
+    private fun refreshVideoFilters() {
+        if (mode != BiliSearchMode.VIDEO || uploader != null) return
+        if (videoQuery.isNotBlank()) search()
+    }
+    fun cancelSearch() { videos.cancel(); uploaders.cancel(); uploads.cancel(); collections.cancel() }
     fun search() {
         cancelSearch(); cancelParts(); selected = emptySet()
         try {
@@ -55,17 +85,26 @@ class BiliBrowserViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
                 is BiliSearchInput.Keyword -> if (input.mode == BiliSearchMode.VIDEO) {
-                    videos.start { graph.bilibili.searchVideos(input.text, it) }
+                    // 本次查询及所有后续页固定使用提交时的筛选，不读取变化中的界面状态。
+                    val order = videoOrder
+                    val duration = videoDuration
+                    videos.start { graph.bilibili.searchVideos(input.text, it, order, duration) }
                 } else uploaders.start { graph.bilibili.searchUploaders(input.text, it) }
             }
         } catch (error: BilibiliException) { graph.messages.value = error.message }
     }
     fun openUploader(value: BiliUploader) {
-        cancelSearch(); cancelParts(); selected = emptySet(); uploader = value
+        cancelSearch(); cancelParts(); selected = emptySet(); uploader = value; showingCollections = false
+        collections.cancel()
+        collections = BiliPagedState(viewModelScope) { it.key }
         uploads.start { graph.bilibili.uploaderVideos(value.mid, it) }
     }
-    fun closeUploader() { uploads.cancel(); cancelParts(); uploader = null; selected = emptySet() }
-    fun refreshUploader() { uploader?.let(::openUploader) }
+    fun closeUploader() { collections.cancel(); uploads.cancel(); cancelParts(); uploader = null; selected = emptySet() }
+    fun refreshUploader() {
+        val user = uploader ?: return
+        if (showingCollections) collections.start { graph.bilibili.collections.catalogue(user.mid, it) }
+        else uploads.start { graph.bilibili.uploaderVideos(user.mid, it) }
+    }
     fun toggle(id: String) { selected = if (id in selected) selected - id else selected + id }
     fun clearSelection() { selected = emptySet() }
     fun selectAll() { selected = if (selected.size == shownVideos.items.size) emptySet() else shownVideos.items.map { it.bvid }.toSet() }

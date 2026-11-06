@@ -14,17 +14,19 @@ import com.nanahoshi.audioplayer.dlsite.RemotePlayable
 import java.io.File
 
 fun TrackEntity.toPlayableItem(queueItemId: Long): MediaItem {
-    val cached = if (source == TrackSource.BILIBILI) {
-        val local = localUri
-        if (!local.isNullOrBlank() && local.startsWith("/") && File(local).isFile) File(local) else null
-    } else {
-        null
-    }
+    val cached = if (source == TrackSource.BILIBILI) localUri?.let { local ->
+        when {
+            local.startsWith("/") && File(local).let { it.isFile && it.length() > 0 } -> Uri.fromFile(File(local))
+            local.startsWith("content:") -> local.toUri()
+            local.startsWith("file:") && File(local.toUri().path.orEmpty()).isFile -> local.toUri()
+            else -> null
+        }
+    } else null
     val uri = when (source) {
         // 始终保留视频身份，数据源打开时决定读本地还是在线；删缓存后队列也能恢复在线。
         TrackSource.YOUTUBE -> Uri.Builder().scheme("youtube").authority("audio").appendQueryParameter("videoId", youtubeVideoId).build()
         TrackSource.LOCAL -> localUri?.toUri() ?: Uri.EMPTY
-        TrackSource.BILIBILI -> cached?.let(Uri::fromFile) ?: "bilibili://audio?bvid=$bvid&cid=$cid".toUri()
+        TrackSource.BILIBILI -> cached ?: "bilibili://audio?bvid=$bvid&cid=$cid".toUri()
         TrackSource.ASMR -> "asmr://audio?trackId=$id".toUri()
         TrackSource.DLSITE -> "dlsite://audio?trackId=$id".toUri()
     }

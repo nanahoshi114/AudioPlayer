@@ -5,6 +5,7 @@ import kotlinx.serialization.json.double
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import java.io.File
 
 data class SubtitleCue(
     val startMs: Long,
@@ -30,14 +31,17 @@ fun List<SubtitleCue>.textAt(positionMs: Long, chinese: Boolean): String =
 fun List<SubtitleCue>.indexAt(positionMs: Long): Int =
     indexOfLast { positionMs in it.startMs until it.endMs }
 
-fun parseGeneratedCues(raw: String): List<SubtitleCue> {
+fun parseGeneratedCues(raw: String): List<SubtitleCue> = parseGeneratedCuesOrNull(raw).orEmpty()
+
+/** 解析失败返回 null，用来区分「文件损坏」和「解析成功但没有句子」。 */
+fun parseGeneratedCuesOrNull(raw: String): List<SubtitleCue>? {
     val text = raw.trim().removePrefix("\uFEFF")
-    if (text.isEmpty() || !text.startsWith("{")) return emptyList()
+    if (text.isEmpty() || !text.startsWith("{")) return null
     val array = try {
         Json.parseToJsonElement(text).jsonObject["cues"]?.jsonArray
     } catch (_: Exception) {
         null
-    } ?: return emptyList()
+    } ?: return null
     return array.mapNotNull { element ->
         val item = try {
             element.jsonObject
@@ -52,6 +56,17 @@ fun parseGeneratedCues(raw: String): List<SubtitleCue> {
         val translation = item["translation"]?.jsonPrimitive?.content?.trim()?.takeIf { it.isNotEmpty() }
         SubtitleCue(start, end, line, translation)
     }.sortedBy { it.startMs }
+}
+
+/** 先写同目录临时文件再替换，避免中断留下半个 JSON。 */
+internal fun File.writeTextAtomically(text: String) {
+    parentFile?.mkdirs()
+    val temp = File(parentFile, "$name.tmp")
+    temp.writeText(text)
+    if (!temp.renameTo(this)) {
+        writeText(text)
+        temp.delete()
+    }
 }
 
 fun encodeGeneratedCues(cues: List<SubtitleCue>): String = buildString {

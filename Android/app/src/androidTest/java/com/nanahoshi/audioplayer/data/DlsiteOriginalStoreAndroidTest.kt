@@ -99,4 +99,51 @@ class DlsiteOriginalStoreAndroidTest {
             directory.deleteRecursively()
         }
     }
+
+    @Test
+    fun conflictingFileIsSkippedAndKeepsItsExistingOwner() = runBlocking {
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        val directory = File(context.filesDir, "original-store-conflict/${UUID.randomUUID()}").apply { mkdirs() }
+        try {
+            val credentials = CredentialStore(context)
+            val dlsite = DlsiteClient(credentials)
+            val library = LibraryRepository(context, db, BilibiliClient(credentials), AsmrClient(), dlsite)
+            val facts = WorkFacts("fixture", "circle", emptyList(), emptyList(), "", "RJ123456")
+            val root = db.folders().insert(FolderEntity(name = "fixture", position = 0,
+                asmrWorkId = 123456, asmrSourceId = "RJ123456", workMeta = facts.toJson()))
+            val wav = db.folders().insert(FolderEntity(parentId = root, name = "WAV", position = 0,
+                asmrWorkId = 123456, contentSource = TrackSource.DLSITE.name))
+            val generation = File(directory, "gen").apply {
+                File(this, "original/WAV").mkdirs()
+                File(this, "original/WAV/voice.wav").writeBytes(ByteArray(32))
+                File(this, "original/bonus.flac").writeBytes(ByteArray(32))
+            }
+            val occupied = File(generation, "original/WAV/voice.wav").absolutePath
+            val owner = db.tracks().insert(TrackEntity(source = TrackSource.DLSITE, title = "kept.wav",
+                artist = "circle", durationMs = 1000, coverUri = null, localUri = occupied,
+                bvid = null, cid = null, page = null, addedAt = 0, folderId = wav, asmrWorkId = 123456,
+                fileHash = null, remoteUrl = null))
+            val selected = db.tracks().insert(TrackEntity(source = TrackSource.DLSITE, title = "voice.wav",
+                artist = "circle", durationMs = 1000, coverUri = null, localUri = null,
+                bvid = null, cid = null, page = null, addedAt = 0, folderId = wav, asmrWorkId = 123456,
+                fileHash = "dlsite:play.mp3", remoteUrl = "https://example.invalid/play.mp3"))
+            val play = listOf(PlayEntry("WAV", listOf(PlayEntry("voice.wav", emptyList(),
+                RemotePlayable("voice.wav", "circle", null, "https://example.invalid/play.mp3", TrackSource.DLSITE,
+                    DlsiteClient.PLAY_REFERER, workno = "RJ123456", fileKey = "play.mp3"), null)), null, null))
+            val store = DlsiteOriginalStore(context, db, dlsite, library) { _, _, _ -> play }
+
+            val result = store.importDirectory("RJ123456", generation, "gen")
+
+            assertEquals(listOf("original/WAV/voice.wav"), result.skipped)
+            val entries = db.dlsiteOriginals().entries("RJ123456")
+            assertEquals(owner, entries.single { it.relativePath == "original/WAV/voice.wav" }.trackId)
+            assertEquals(occupied, db.tracks().getById(owner)!!.localUri)
+            assertNull(db.tracks().getById(selected)!!.localUri)
+            assertNotNull(entries.single { it.relativePath == "original/bonus.flac" }.trackId)
+            assertEquals("gen", db.dlsiteOriginals().work("RJ123456")!!.generation)
+        } finally {
+            db.close()
+            directory.deleteRecursively()
+        }
+    }
 }

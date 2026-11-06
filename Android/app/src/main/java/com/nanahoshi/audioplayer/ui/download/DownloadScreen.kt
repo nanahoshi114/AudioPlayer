@@ -4,6 +4,9 @@ import android.app.Application
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.ui.Alignment
+import com.nanahoshi.audioplayer.ui.components.ConfirmActionDialog
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -61,6 +64,10 @@ class DownloadViewModel(app: Application) : AndroidViewModel(app) {
 
     fun retry(id: Long) {
         graph.downloads.retry(id)
+    }
+
+    fun delete(id: Long) {
+        viewModelScope.launch { graph.downloads.deleteFailed(id) }
     }
 
     fun retryWhisper(id: Long) {
@@ -159,6 +166,7 @@ fun DownloadScreen(
                             job,
                             onRetry = { viewModel.retry(job.id) },
                             onCancel = { viewModel.cancelDownload(job.id) },
+                            onDelete = { viewModel.delete(job.id) },
                             onPlay = if (job.kind != "DLSITE_ARCHIVE" && job.status == DownloadStatus.DONE && !job.localPath.isNullOrBlank()) {
                                 { viewModel.play(job) }
                             } else {
@@ -189,7 +197,14 @@ fun DownloadScreen(
 }
 
 @Composable
-private fun DownloadRow(job: DownloadEntity, onRetry: () -> Unit, onCancel: () -> Unit, onPlay: (() -> Unit)?) {
+private fun DownloadRow(
+    job: DownloadEntity,
+    onRetry: () -> Unit,
+    onCancel: () -> Unit,
+    onDelete: () -> Unit,
+    onPlay: (() -> Unit)?,
+) {
+    var confirming by remember { mutableStateOf(false) }
     val status = when (job.status) {
         DownloadStatus.QUEUED -> "排队"
         DownloadStatus.RUNNING -> if (job.kind == "DLSITE_ARCHIVE") {
@@ -226,10 +241,26 @@ private fun DownloadRow(job: DownloadEntity, onRetry: () -> Unit, onCancel: () -
             ) {
                 TextButton(onClick = onCancel) { Text("中止") }
             } else if (job.status == DownloadStatus.FAILED) {
-                FilledTonalButton(onClick = onRetry) { Text("重试") }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    FilledTonalButton(onClick = onRetry) { Text("重试") }
+                    TextButton(onClick = { confirming = true }) { Text("删除") }
+                }
             }
         },
     )
+    if (confirming) {
+        ConfirmActionDialog(
+            title = "删除下载任务",
+            message = if (job.kind == "DLSITE_ARCHIVE") {
+                "会一并删除已下载的压缩包暂存，之后重试需要从头下载。已发布的音频不受影响。"
+            } else {
+                "只删除这条失败记录，已下载的文件不受影响。"
+            },
+            confirmLabel = "删除",
+            onConfirm = { confirming = false; onDelete() },
+            onDismiss = { confirming = false },
+        )
+    }
 }
 
 @Composable

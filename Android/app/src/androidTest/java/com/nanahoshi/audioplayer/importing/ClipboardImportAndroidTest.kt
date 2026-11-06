@@ -53,8 +53,13 @@ class ClipboardImportAndroidTest {
         compose.onNodeWithText("视频标题").assertIsDisplayed()
         compose.onNodeWithContentDescription("导入内容封面").assertExists()
         compose.runOnIdle { assertEquals(0, imports) }
-        compose.onNodeWithText("选择入库方式").assertIsEnabled().performClick()
+        compose.onNodeWithText("选择入库方式").assertDoesNotExist()
+        compose.onNodeWithText("导入").assertIsEnabled().performClick()
         compose.runOnIdle { assertEquals(1, imports) }
+        compose.runOnIdle { state = state.copy(preview = state.preview!!.copy(alreadySaved = true)) }
+        compose.onNodeWithText("已在音频库").assertIsDisplayed()
+        compose.onNodeWithText("导入").assertIsEnabled()
+        compose.onNodeWithText("选择入库方式").assertDoesNotExist()
     }
 
     @Test fun multiPartPreviewDefersSelectionToTheSharedImportDialog() {

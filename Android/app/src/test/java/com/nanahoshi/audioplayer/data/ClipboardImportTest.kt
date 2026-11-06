@@ -19,12 +19,42 @@ class ClipboardImportTest {
     @Test fun recognizesIdsAndSharingTextWithoutTreatingOrdinaryTextAsIds() {
         assertEquals(bv, clipboardImportTarget("复制了 ${bv.id} 来听"))
         assertEquals(rj, clipboardImportTarget("作品 rj123456"))
-        assertEquals(ClipboardTarget(ClipboardSource.ASMR, "RJ000123"), clipboardImportTarget("RJ00000123"))
+        assertEquals(ClipboardTarget(ClipboardSource.ASMR, "RJ00000123"), clipboardImportTarget("RJ00000123"))
         assertEquals(rj, clipboardImportTarget("https://www.dlsite.com/maniax/work/=/product_id/RJ123456.html"))
         for (raw in listOf("hello", "123456", "jNQXAC9IVRw", "someBV1234567890text", "RJ000000", "RJ1234567890123", "prefixRJ123456", "BV12345678901")) {
             assertNull(raw, clipboardImportTarget(raw))
         }
         assertNull(clipboardImportTarget("x".repeat(MAX_IMPORT_CLIPBOARD_LENGTH) + " ${bv.id}"))
+    }
+    @Test fun rjIdentifiersPreserveLeadingZerosInTextAndProductLinks() {
+        for (id in listOf("RJ01234567", "RJ00123456", "RJ00000123", "RJ012345", "RJ012345678901")) {
+            val expected = ClipboardTarget(ClipboardSource.ASMR, id)
+            for (input in listOf(id, "分享作品 ${id.lowercase()}，请试听", "https://www.dlsite.com/maniax/work/=/product_id/$id.html")) {
+                assertEquals(input, expected, clipboardImportTarget(input))
+            }
+        }
+        assertEquals(ClipboardTarget(ClipboardSource.ASMR, "RJ000123"), clipboardImportTarget("RJ123"))
+        for (input in listOf("RJ0", "RJ00000000", "RJ000000000000", "RJ0123456789012")) {
+            assertNull(input, clipboardImportTarget(input))
+        }
+        val padded = ClipboardImportCandidate(clipboardImportTarget("RJ01234567")!!, 1)
+        val unpadded = ClipboardImportCandidate(clipboardImportTarget("RJ1234567")!!, 1)
+        assertNotEquals(padded.fingerprint, unpadded.fingerprint)
+    }
+
+    @Test fun rjIdentifierReachesPreviewAndConfirmedImportWithoutLosingZeros() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val expected = ClipboardTarget(ClipboardSource.ASMR, "RJ01234567")
+        val read = mutableListOf<ClipboardTarget>()
+        val saved = mutableListOf<ClipboardTarget>()
+        try {
+            val c = controller(scope, Memory(), { read += it; preview(it) }, { item, _ -> saved += item.target; "done" })
+            c.offer(ClipboardImportCandidate(clipboardImportTarget("分享 RJ01234567")!!, 1))
+            assertEquals(listOf(expected), read)
+            assertTrue(saved.isEmpty())
+            c.confirm()
+            assertEquals(listOf(expected), saved)
+        } finally { scope.cancel() }
     }
     @Test fun youtubeLinksAcceptOnlyKnownHostsAndAValidVideoId() {
         for (url in listOf("https://youtu.be/${yt.id}?si=test", "https://www.youtube.com/watch?v=${yt.id}&list=PL1234567890123",

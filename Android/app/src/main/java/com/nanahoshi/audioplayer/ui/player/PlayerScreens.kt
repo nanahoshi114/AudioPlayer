@@ -96,6 +96,10 @@ import kotlinx.coroutines.CancellationException
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import com.nanahoshi.audioplayer.playback.PlayingBiliCollection
+import com.nanahoshi.audioplayer.playback.PlayingBiliVideo
+import com.nanahoshi.audioplayer.playback.biliVideoId
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -108,6 +112,14 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     val state = graph.player.state
     val queue = graph.library.observeQueue()
     val client = graph.player
+    private val collectionTracker = PlayingBiliCollection(
+        viewModelScope,
+        combine(client.state.map { it.queueItemId }.distinctUntilChanged(), queue, graph.credentials.biliSession) { id, rows, session ->
+            PlayingBiliVideo(rows.firstOrNull { it.queueItemId == id }.biliVideoId(), id, session)
+        },
+        graph.bilibili.videoCollections,
+    ) { bvid -> graph.bilibili.videoDetails(bvid).collection }
+    internal val collectionLink = collectionTracker.link
     var subtitleCues by mutableStateOf<List<SubtitleCue>>(emptyList())
         private set
     var generatedEmpty by mutableStateOf(false)
@@ -117,6 +129,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     var subtitlesReady by mutableStateOf(false)
         private set
     var subtitleNotice by mutableStateOf<String?>(null)
+        private set
+    var subtitleLanguage by mutableStateOf<String?>(null)
+        private set
+    var canTranslateSubtitles by mutableStateOf(false)
         private set
     var showChinese by mutableStateOf(true)
     var offerBiliCache by mutableStateOf(false)
@@ -145,6 +161,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 fromGenerated = false
                 subtitlesReady = false
                 subtitleNotice = null
+                subtitleLanguage = null
+                canTranslateSubtitles = false
                 showChinese = true
                 reloadSubtitles(queueItemId)
                 offerBiliCache = biliNeedsCache(queueItemId)
@@ -184,6 +202,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun requestTranslation() {
+        if (!subtitlesReady || !canTranslateSubtitles) return
         viewModelScope.launch {
             if (!graph.credentials.hasTranslate()) {
                 translatePrompt = true
@@ -378,6 +397,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             fromGenerated = false
             subtitlesReady = true
             subtitleNotice = null
+            subtitleLanguage = null
+            canTranslateSubtitles = false
             return
         }
         val row = graph.library.queueSnapshot().find { it.queueItemId == queueItemId }
@@ -386,6 +407,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 fromGenerated = false
                 subtitlesReady = true
                 subtitleNotice = null
+                subtitleLanguage = null
+                canTranslateSubtitles = false
             }
             return
         }
@@ -395,6 +418,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         generatedEmpty = loaded.generatedEmpty
         fromGenerated = loaded.generated
         subtitleNotice = loaded.notice
+        subtitleLanguage = loaded.language
+        canTranslateSubtitles = loaded.canTranslate
         subtitlesReady = true
     }
 

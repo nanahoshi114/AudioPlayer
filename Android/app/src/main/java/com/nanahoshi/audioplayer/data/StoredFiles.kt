@@ -223,14 +223,20 @@ class StoredCatalog(
         storedSort(built + extra)
     }
 
-    suspend fun delete(items: List<StoredItem>) = withContext(Dispatchers.IO) {
-        val audios = items.filter { it.kind == StoredKind.AUDIO }
-        val rest = items.filter { it.kind != StoredKind.AUDIO }
-        for (item in rest) deleteOne(item)
-        for (item in audios) deleteOne(item)
+    /** 选中项里带有生成字幕的音频数量；删除前据此决定要不要询问是否一并删除字幕。 */
+    suspend fun generatedSubtitleCount(items: List<StoredItem>): Int = withContext(Dispatchers.IO) {
+        items.filter { it.kind == StoredKind.AUDIO }
+            .count { subtitles.hasGenerated(it.trackId, it.path, it.remoteUrl) }
     }
 
-    private suspend fun deleteOne(item: StoredItem) {
+    suspend fun delete(items: List<StoredItem>, deleteSubtitles: Boolean) = withContext(Dispatchers.IO) {
+        val audios = items.filter { it.kind == StoredKind.AUDIO }
+        val rest = items.filter { it.kind != StoredKind.AUDIO }
+        for (item in rest) deleteOne(item, deleteSubtitles)
+        for (item in audios) deleteOne(item, deleteSubtitles)
+    }
+
+    private suspend fun deleteOne(item: StoredItem, deleteSubtitles: Boolean) {
         val file = File(item.path)
         if (!owned(file)) return
         when (item.kind) {
@@ -241,13 +247,15 @@ class StoredCatalog(
             StoredKind.SUBTITLE -> {
                 if (file.isFile) file.delete()
             }
-            StoredKind.AUDIO -> deleteAudio(item, file)
+            StoredKind.AUDIO -> deleteAudio(item, file, deleteSubtitles)
         }
     }
 
-    private suspend fun deleteAudio(item: StoredItem, file: File) {
-        subtitles.discardStored(item.trackId, item.path, item.remoteUrl)
+    private suspend fun deleteAudio(item: StoredItem, file: File, deleteSubtitles: Boolean) {
+        // 删除失败就保留字幕与听写记录，不能出现音频还在、记录已清的状态。
         if (file.isFile && !file.delete()) return
+        // 选择保留字幕时保留听写和翻译记录，重新下载同一音频会自动匹配。
+        if (deleteSubtitles) subtitles.discardStored(item.trackId, item.path, item.remoteUrl)
         deleteBiliSubtitleBeside(file)
         val tracks = buildSet {
             item.trackId?.takeIf { it > 0L }?.let { add(it) }

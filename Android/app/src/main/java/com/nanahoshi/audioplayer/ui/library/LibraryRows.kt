@@ -43,6 +43,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -72,6 +74,16 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
 internal data class LibraryCrumb(val id: Long, val name: String)
+
+/** 面包屑必须跨旋转保留，否则作品页的「根目录」会因为层级丢失而失效。 */
+internal val LibraryTrailSaver: Saver<List<LibraryCrumb>, Any> = listSaver<List<LibraryCrumb>, String>(
+    save = { trail -> trail.flatMap { listOf(it.id.toString(), it.name) } },
+    restore = { flat ->
+        List(flat.size / 2) { index ->
+            LibraryCrumb(flat[index * 2].toLong(), flat[index * 2 + 1])
+        }
+    },
+)
 
 internal fun libraryTrail(trail: List<LibraryCrumb>, folder: FolderEntity?): List<LibraryCrumb> {
     if (folder == null) return emptyList()

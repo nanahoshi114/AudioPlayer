@@ -53,7 +53,7 @@ class YouTubeAndroidTest {
             old.execSQL("INSERT INTO whisper_jobs(title,fingerprint,trackId,status,progress,model) VALUES('old','fixture',1,'DONE',1,'SenseVoiceSmall')")
             old.version = 12
         }
-        val migrated = Room.databaseBuilder(context, AppDatabase::class.java, name).addMigrations(AppDatabase.MIGRATION_12_13, AppDatabase.MIGRATION_13_14, AppDatabase.MIGRATION_14_15, AppDatabase.MIGRATION_15_16).build()
+        val migrated = Room.databaseBuilder(context, AppDatabase::class.java, name).addMigrations(AppDatabase.MIGRATION_12_13, AppDatabase.MIGRATION_13_14, AppDatabase.MIGRATION_14_15, AppDatabase.MIGRATION_15_16, AppDatabase.MIGRATION_16_17).build()
         val fresh = Room.databaseBuilder(context, AppDatabase::class.java, freshName).build()
         try {
             assertEquals(4, migrated.tracks().inFolder(1).size)
@@ -61,7 +61,7 @@ class YouTubeAndroidTest {
             assertEquals(1, migrated.queue().snapshot().size)
             assertEquals(1234L, migrated.queue().playbackState()!!.positionMs)
             assertEquals("fixture", migrated.whisper().done().single().fingerprint)
-            assertEquals(16, migrated.openHelper.writableDatabase.version)
+            assertEquals(17, migrated.openHelper.writableDatabase.version)
             fun structure(db: AppDatabase): List<String> {
                 val result = mutableListOf<String>()
                 val database = db.openHelper.writableDatabase

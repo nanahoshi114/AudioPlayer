@@ -104,6 +104,16 @@ fun PlaylistDetailScreen(
     viewModel: PlaylistViewModel = viewModel(),
 ) {
     val playlist by viewModel.playlist(playlistId).collectAsStateWithLifecycle(null)
+    val sources by viewModel.collectionSources.collectAsStateWithLifecycle(null)
+    var online by remember(playlistId) { mutableStateOf<Boolean?>(null) }
+    androidx.compose.runtime.LaunchedEffect(sources, playlistId) {
+        if (online == null && sources != null) online = sources!!.any { it.playlistId == playlistId }
+    }
+    if (online == null) { com.nanahoshi.audioplayer.ui.components.LoadingState("正在读取列表…"); return }
+    if (online == true) {
+        com.nanahoshi.audioplayer.ui.bilibili.BiliCollectionScreen(playlistId = playlistId, onBack = onBack)
+        return
+    }
     val rows by viewModel.playlistTracks(playlistId).collectAsStateWithLifecycle(emptyList())
     var renaming by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
@@ -196,6 +206,12 @@ private fun PlaylistSummaryRow(
     viewModel: PlaylistViewModel,
     onClick: () -> Unit,
 ) {
+    val sources by viewModel.collectionSources.collectAsStateWithLifecycle(emptyList())
+    val source = sources.firstOrNull { it.playlistId == playlist.id }?.let(viewModel::collection)
+    if (source != null) {
+        OnlinePlaylistSummary(playlist.name, source, onClick)
+        return
+    }
     val rows by viewModel.playlistTracks(playlist.id).collectAsStateWithLifecycle(emptyList())
     ListItem(
         headlineContent = { Text(playlist.name) },
@@ -257,4 +273,11 @@ private fun NameDialog(
         confirmButton = { TextButton(onClick = { onConfirm(text.trim()) }, enabled = text.isNotBlank()) { Text("确定") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
+}
+
+@Composable
+internal fun OnlinePlaylistSummary(name: String, source: com.nanahoshi.audioplayer.bilibili.BiliCollection, onClick: () -> Unit) {
+    ListItem(headlineContent = { Text(name) },
+        supportingContent = { Text("${source.label} · ${source.total} 个视频") },
+        leadingContent = { CoverImage(source.coverUrl) }, modifier = Modifier.clickable(onClick = onClick))
 }

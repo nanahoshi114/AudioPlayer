@@ -54,6 +54,7 @@ class DownloadCenter(
     private val bilibili: BilibiliClient,
     private val youtube: YouTubeClient,
     private val library: LibraryRepository,
+    private val notice: (String) -> Unit = {},
 ) {
     private val appContext = context.applicationContext
     private val youtubeLock = Mutex()
@@ -98,7 +99,7 @@ class DownloadCenter(
                         }
                     }
                 if (needsRelink) {
-                    originals.importDirectory(key, File(saved.directory), saved.generation)
+                    reportSkipped(originals.importDirectory(key, File(saved.directory), saved.generation))
                 }
                 db.downloads().latestArchive(key)?.takeIf { it.status == DownloadStatus.DONE }?.let { return@withLock it.id }
             }
@@ -152,8 +153,8 @@ class DownloadCenter(
             com.nanahoshi.audioplayer.dlsite.DlsiteArchiveExtractor.extract(packages, directory) { self.ensureActive() }
             self.ensureActive()
             db.downloads().setPhase(job.id, "IMPORTING")
-            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
-                originals.importDirectory(workno, directory, generation,
+            val imported = kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                val result = originals.importDirectory(workno, directory, generation,
                     beforeCommit = {
                         self.ensureActive()
                         if (db.downloads().get(job.id)?.status != DownloadStatus.RUNNING) throw CancellationException()
@@ -163,7 +164,9 @@ class DownloadCenter(
                         db.downloads().finish(job.id, bytes, bytes)
                     })
                 published = true
+                result
             }
+            reportSkipped(imported)
             // 清单发布后不再响应中止；完整包只在发布成功后回收。
             staging.deleteRecursively()
             kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
@@ -177,6 +180,11 @@ class DownloadCenter(
             archiveRunners.remove(job.id, self)
             if (!published) directory.deleteRecursively()
         }
+    }
+
+    private fun reportSkipped(result: DlsiteOriginalImportResult) {
+        if (result.skipped.isEmpty()) return
+        notice("已发布原始文件；${result.skipped.size} 个文件已关联其他曲目，保持不变")
     }
 
     private suspend fun retireOriginalCopies(paths: List<Pair<Long, String>>, oldDirectory: String?) {
@@ -222,10 +230,20 @@ class DownloadCenter(
                 generation.deleteRecursively()
             }
         }
-        for (job in db.downloads().finished().filter { it.kind == "DLSITE_ARCHIVE" }) {
-            val workno = job.workKey ?: continue
-            if (!Regex("(?:RJ|BJ|VJ)[0-9]+").matches(workno)) continue
-            File(filesDir, "dlsite-archives/$workno/${job.id}").deleteRecursively()
+        // 未完成的任务保留暂存供断点续传；已完成和数据库里已无对应任务的孤儿目录一律回收。
+        val live = db.downloads().archives()
+            .filter { it.status != DownloadStatus.DONE }
+            .mapNotNull { job -> job.workKey?.let { "$it/${job.id}" } }
+            .toSet()
+        val archivesRoot = File(filesDir, "dlsite-archives")
+        for (workDirectory in archivesRoot.listFiles().orEmpty()) {
+            if (!workDirectory.isDirectory || !Regex("(?:RJ|BJ|VJ)[0-9]+").matches(workDirectory.name)) continue
+            for (jobDirectory in workDirectory.listFiles().orEmpty()) {
+                if (!jobDirectory.isDirectory || jobDirectory.name.toLongOrNull() == null) continue
+                if ("${workDirectory.name}/${jobDirectory.name}" in live) continue
+                jobDirectory.deleteRecursively()
+            }
+            if (workDirectory.listFiles().isNullOrEmpty()) workDirectory.delete()
         }
     }
 
@@ -256,34 +274,40 @@ class DownloadCenter(
         if (item.remoteUrl.isBlank()) return@withContext false
         val key = item.fileKey?.let(::rawFileKey)
         val storedKey = canonicalWorkKey(workKey)
-        if (!key.isNullOrBlank() && db.downloads().activeForFile(item.source.name, storedKey, key) != null) {
-            return@withContext false
-        }
         if (savedRemotePath(item.source, storedKey, key) != null) return@withContext false
-        if (db.downloads().activeForUrl(item.remoteUrl) != null) return@withContext false
-        db.downloads().insert(
-            DownloadEntity(
-                trackId = 0,
-                title = item.title,
-                bytesDone = 0,
-                bytesTotal = 0,
-                status = DownloadStatus.QUEUED,
-                error = null,
-                remoteUrl = item.remoteUrl,
-                referer = item.referer,
-                source = item.source.name,
-                workKey = storedKey,
-                fileKey = key ?: item.fileKey,
-            ),
-        )
+        // 去重查询与插入必须同一事务，否则并发调用会创建两个任务写同一个 .part。
+        val inserted = db.withTransaction {
+            if (!key.isNullOrBlank() && db.downloads().activeForFile(item.source.name, storedKey, key) != null) {
+                return@withTransaction false
+            }
+            if (db.downloads().activeForUrl(item.remoteUrl) != null) return@withTransaction false
+            db.downloads().insert(
+                DownloadEntity(
+                    trackId = 0,
+                    title = item.title,
+                    bytesDone = 0,
+                    bytesTotal = 0,
+                    status = DownloadStatus.QUEUED,
+                    error = null,
+                    remoteUrl = item.remoteUrl,
+                    referer = item.referer,
+                    source = item.source.name,
+                    workKey = storedKey,
+                    fileKey = key ?: item.fileKey,
+                ),
+            )
+            true
+        }
+        if (!inserted) return@withContext false
         kick.trySend(Unit)
         true
     }
 
     /** 删 App 下载的文件；识别得到的曲目（本地文件是用户自己的）只取消识别，不动磁盘上的文件。 */
-    suspend fun deleteDownloaded(tracks: List<TrackEntity>): DeleteResult = withContext(Dispatchers.IO) {
+    suspend fun deleteDownloaded(tracks: List<TrackEntity>, deleteSubtitles: Boolean): DeleteResult = withContext(Dispatchers.IO) {
         var deleted = 0
         var unlinked = 0
+        val subtitles = com.nanahoshi.audioplayer.playback.SubtitleSource(appContext, db, bilibili, asmr)
         for (track in tracks) {
             if (track.source != TrackSource.ASMR && track.source != TrackSource.DLSITE && track.source != TrackSource.BILIBILI && track.source != TrackSource.YOUTUBE) {
                 continue
@@ -292,11 +316,9 @@ class DownloadCenter(
             if (localFileReady(path)) {
                 val file = File(path!!)
                 if (file.exists() && !file.delete()) continue
-                if (track.source == TrackSource.YOUTUBE) {
-                    com.nanahoshi.audioplayer.playback.SubtitleSource(appContext, db, bilibili, asmr)
-                        .discardStored(track.id, path, track.remoteUrl)
-                    db.downloads().deleteFinishedForPath(path)
-                }
+                // 选择保留字幕时不动听写记录和字幕文件，重新下载同一音频会自动匹配。
+                if (deleteSubtitles) subtitles.discardStored(track.id, path, track.remoteUrl)
+                db.downloads().deleteFinishedForPath(path)
                 if (track.source == TrackSource.BILIBILI) {
                     deleteBiliSubtitle(filesDir, track.bvid, track.cid)
                 }
@@ -444,6 +466,15 @@ class DownloadCenter(
         }
     }
 
+    /** 删除失败任务并回收它的压缩包暂存；排队、下载中和已完成的任务不允许删。 */
+    suspend fun deleteFailed(id: Long) = withContext(Dispatchers.IO) {
+        val job = db.downloads().get(id) ?: return@withContext
+        if (db.downloads().deleteFailed(id) == 0) return@withContext
+        if (job.kind == "DLSITE_ARCHIVE") {
+            job.workKey?.let { File(filesDir, "dlsite-archives/$it/$id").deleteRecursively() }
+        }
+    }
+
     private suspend fun downloadOne(job: DownloadEntity) {
         if (db.downloads().startQueued(job.id) == 0) return
         try {
@@ -569,7 +600,7 @@ class DownloadCenter(
             }
         }
         val rootDir = if (job.source == TrackSource.ASMR.name) root else dlsiteRoot
-        val dest = File(rootDir, "$workKey/${fileName(job)}")
+        val dest = remoteDestination(job, rootDir, workKey)
         dest.parentFile?.mkdirs()
         val partial = File(dest.absolutePath + ".part")
         var url = job.remoteUrl ?: error("没有可下载的地址")
@@ -704,6 +735,31 @@ class DownloadCenter(
         return dlsite.signedPlayFileBlocking(workno, fileKey)
     }
 
+    /** 同一 fileKey 始终落同一路径；与别的 fileKey 撞名时才分到短哈希子目录，避免互相覆盖。 */
+    private suspend fun remoteDestination(job: DownloadEntity, rootDir: File, workKey: String): File {
+        val name = fileName(job)
+        val key = rawFileKey(job.fileKey)
+        val source = job.source.orEmpty()
+        val candidates = workKeys(workKey)
+        if (!key.isNullOrBlank()) {
+            val existing = candidates.firstNotNullOfOrNull { candidate ->
+                db.downloads().locatedForWork(source, candidate)
+                    .firstOrNull { rawFileKey(it.fileKey) == key && !it.localPath.isNullOrBlank() }
+            }
+            existing?.localPath?.let { return File(it) }
+        }
+        val flat = File(rootDir, "$workKey/$name")
+        val flatPath = runCatching { flat.canonicalPath }.getOrDefault(flat.absolutePath)
+        val occupied = flat.exists() || candidates.any { candidate ->
+            db.downloads().locatedForWork(source, candidate).any { row ->
+                val path = row.localPath ?: return@any false
+                val canonical = runCatching { File(path).canonicalPath }.getOrDefault(path)
+                canonical == flatPath && rawFileKey(row.fileKey) != key
+            }
+        }
+        return File(rootDir, "$workKey/${remoteRelativePath(name, key, occupied)}")
+    }
+
     private suspend fun localCopy(source: String, workKey: String, fileKey: String?): String? {
         if (fileKey.isNullOrBlank()) return null
         return db.downloads().finishedForWork(source, workKey)
@@ -818,7 +874,7 @@ class DownloadCenter(
                         when (val result = bilibili.subtitleDocument(bvid, cid)) {
                             is BiliSubtitle.Ready -> {
                                 if (readyBiliAudio(filesDir, bvid, cid) == null) return@withTimeoutOrNull
-                                val saved = writeBiliSubtitle(filesDir, bvid, cid, result.document)
+                                val saved = writeBiliSubtitle(filesDir, bvid, cid, result.document, result.language)
                                 Log.d(TAG, "bili subtitle cached bvid=$bvid cid=$cid saved=$saved")
                             }
                             else -> Log.d(

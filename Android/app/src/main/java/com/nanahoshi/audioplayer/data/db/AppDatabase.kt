@@ -41,6 +41,8 @@ class DownloadStatusConverter {
         BiliImportIntentEntity::class,
         TrackEntity::class,
         PlaylistEntity::class,
+        BiliCollectionEntity::class,
+        BiliCollectionVideoEntity::class,
         PlaylistItemEntity::class,
         QueueItemEntity::class,
         PlaybackStateEntity::class,
@@ -51,7 +53,7 @@ class DownloadStatusConverter {
         DlsiteOriginalWorkEntity::class,
         DlsiteOriginalEntryEntity::class,
     ],
-    version = 16,
+    version = 17,
     exportSchema = false,
 )
 @TypeConverters(TrackSourceConverter::class, FileKindConverter::class, DownloadStatusConverter::class)
@@ -60,6 +62,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun biliImports(): BiliImportDao
     abstract fun folders(): FolderDao
     abstract fun tracks(): TrackDao
+    abstract fun collections(): BiliCollectionDao
     abstract fun playlists(): PlaylistDao
     abstract fun queue(): QueueDao
     abstract fun files(): LibraryFileDao
@@ -86,8 +89,17 @@ abstract class AppDatabase : RoomDatabase() {
                     MIGRATION_13_14,
                     MIGRATION_14_15,
                     MIGRATION_15_16,
+                    MIGRATION_16_17,
                 )
                 .build()
+
+        internal val MIGRATION_16_17 = object : Migration(16, 17) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("CREATE TABLE bili_collections (playlistId INTEGER NOT NULL PRIMARY KEY, kind TEXT NOT NULL, remoteId INTEGER NOT NULL, metadata TEXT NOT NULL, revision INTEGER NOT NULL, refreshedAt INTEGER, FOREIGN KEY(playlistId) REFERENCES playlists(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                connection.execSQL("CREATE UNIQUE INDEX index_bili_collections_kind_remoteId ON bili_collections(kind, remoteId)")
+                connection.execSQL("CREATE TABLE bili_collection_videos (playlistId INTEGER NOT NULL, bvid TEXT NOT NULL, position INTEGER NOT NULL, video TEXT NOT NULL, parts TEXT, PRIMARY KEY(playlistId, bvid), FOREIGN KEY(playlistId) REFERENCES bili_collections(playlistId) ON UPDATE NO ACTION ON DELETE CASCADE)")
+            }
+        }
 
         internal val MIGRATION_15_16 = object : Migration(15, 16) {
             override fun migrate(connection: SQLiteConnection) {

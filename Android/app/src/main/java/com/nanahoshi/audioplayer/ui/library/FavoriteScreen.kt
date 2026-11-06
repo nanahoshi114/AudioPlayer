@@ -35,6 +35,8 @@ import com.nanahoshi.audioplayer.bilibili.FavVideo
 import com.nanahoshi.audioplayer.graph
 import com.nanahoshi.audioplayer.ui.CoverImage
 import android.util.Log
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
@@ -50,6 +52,8 @@ class FavoriteViewModel(app: Application) : AndroidViewModel(app) {
     val hasMore = MutableStateFlow(false)
     private var nextPage = 1
     private var paging = false
+    private var pagingJob: Job? = null
+    private var generation = 0L
 
     init {
         viewModelScope.launch {
@@ -66,6 +70,7 @@ class FavoriteViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun open(folder: FavFolder) {
+        stopPaging()
         opened.value = folder
         videos.value = emptyList()
         selected.value = emptySet()
@@ -75,32 +80,48 @@ class FavoriteViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun closeFolder() {
+        stopPaging()
         opened.value = null
         videos.value = emptyList()
         selected.value = emptySet()
         hasMore.value = false
     }
 
+    /** 换收藏夹时先作废旧分页，否则旧任务的 paging/loading 会盖住新文件夹的首次加载。 */
+    private fun stopPaging() {
+        generation++
+        pagingJob?.cancel()
+        pagingJob = null
+        if (paging) loading.value = false
+        paging = false
+    }
+
     fun loadMore() {
         val folder = opened.value ?: return
         if (!hasMore.value || paging) return
         val page = nextPage
+        val token = generation
         paging = true
         loading.value = true
-        viewModelScope.launch {
+        pagingJob = viewModelScope.launch {
             try {
                 val result = graph.bilibili.favoriteVideos(folder.id, page)
-                if (opened.value?.id != folder.id) return@launch
+                if (token != generation) return@launch
                 videos.value = videos.value + result.videos
                 hasMore.value = result.hasMore
                 nextPage = page + 1
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (error: Exception) {
+                if (token != generation) return@launch
                 hasMore.value = false
                 Log.w("Favorites", "videos ${error.javaClass.simpleName}")
                 graph.messages.value = error.message?.takeIf { it.isNotBlank() } ?: "无法读取收藏夹"
             } finally {
-                paging = false
-                loading.value = false
+                if (token == generation) {
+                    paging = false
+                    loading.value = false
+                }
             }
         }
     }
@@ -147,19 +168,24 @@ class FavoriteViewModel(app: Application) : AndroidViewModel(app) {
             caching.value = true
             var cached = 0
             var failed = 0
-            for (bvid in bvids) {
-                try {
-                    val parts = graph.library.lookupBvid(bvid)
-                    cached += graph.downloads.enqueueBili(parts)
-                } catch (_: Exception) {
-                    failed += 1
+            try {
+                for (bvid in bvids) {
+                    try {
+                        val parts = graph.library.lookupBvid(bvid)
+                        cached += graph.downloads.enqueueBili(parts)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        failed += 1
+                    }
                 }
-            }
-            caching.value = false
-            graph.messages.value = when {
-                failed == 0 && cached == 0 -> "已经在本地或正在缓存"
-                failed == 0 -> "已加入 $cached 个缓存"
-                else -> "已加入 $cached 个缓存，失败 $failed 个"
+                graph.messages.value = when {
+                    failed == 0 && cached == 0 -> "已经在本地或正在缓存"
+                    failed == 0 -> "已加入 $cached 个缓存"
+                    else -> "已加入 $cached 个缓存，失败 $failed 个"
+                }
+            } finally {
+                caching.value = false
             }
         }
     }

@@ -34,6 +34,8 @@ data class DlsiteOriginalImportResult(
     val rootFolderId: Long,
     val audioCount: Int,
     val linkedCount: Int,
+    /** 已关联其他曲目而保持不变的相对路径。 */
+    val skipped: List<String> = emptyList(),
 )
 
 /** Publishes an already extracted generation without rebuilding existing track identities. */
@@ -119,6 +121,7 @@ class DlsiteOriginalStore(
             val usedFileIds = mutableSetOf<Long>()
             val entries = mutableListOf<DlsiteOriginalEntryEntity>()
             var linked = 0
+            val skipped = mutableListOf<String>()
             for (item in disk) {
                 currentCoroutineContext().ensureActive()
                 val parentPath = item.path.substringBeforeLast('/', "")
@@ -168,7 +171,14 @@ class DlsiteOriginalStore(
                         fileHash = playKey?.let { scopedFileHash(TrackSource.DLSITE, it) },
                     )
                     val owner = db.tracks().findByLocalUri(item.file.absolutePath)
-                    check(owner == null || owner.id == track.id) { "原始文件已关联到其他曲目" }
+                    if (owner != null && owner.id != track.id) {
+                        // 文件已被别的曲目占用：保留原关联并跳过本条，不让整个发布回滚。
+                        skipped += item.path
+                        usedTrackIds += owner.id
+                        entries += item.entry(code, trackId = owner.id, playFileKey = playKey
+                            ?: rawFileKey(track.fileHash) ?: previous?.playFileKey)
+                        continue
+                    }
                     val id = if (track.id > 0) {
                         db.tracks().update(track)
                         linked++
@@ -204,7 +214,7 @@ class DlsiteOriginalStore(
             db.dlsiteOriginals().upsertWork(DlsiteOriginalWorkEntity(code, root.id, rootDirectory.absolutePath, generation))
             beforeCommit()
             onPublish()
-            DlsiteOriginalImportResult(code, root.id, usedTrackIds.size, linked)
+            DlsiteOriginalImportResult(code, root.id, usedTrackIds.size, linked, skipped)
         }
     }
 

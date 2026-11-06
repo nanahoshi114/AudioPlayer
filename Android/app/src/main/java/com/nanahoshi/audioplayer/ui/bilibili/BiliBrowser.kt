@@ -32,11 +32,13 @@ import java.io.File
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun BiliBrowser(viewModel: BiliBrowserViewModel = viewModel()) {
+fun BiliBrowser(onOpenCollection: (BiliCollection) -> Unit = {}, viewModel: BiliBrowserViewModel = viewModel()) {
     val tracks by viewModel.tracks.collectAsStateWithLifecycle(emptyList())
     val jobs by viewModel.downloads.collectAsStateWithLifecycle(emptyList())
     val videoState = rememberLazyListState()
     val userState = rememberLazyListState()
+    val collectionState = key(viewModel.uploader?.mid) { rememberLazyListState() }
+    ResetOnNewSearch(collectionState, viewModel.collections.revision)
     val uploadState = key(viewModel.uploader?.mid) { rememberLazyListState() }
     val uploader = viewModel.uploader
     val users = uploader == null && viewModel.mode == BiliSearchMode.UPLOADER
@@ -75,6 +77,13 @@ fun BiliBrowser(viewModel: BiliBrowserViewModel = viewModel()) {
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 keyboardActions = KeyboardActions(onSearch = { viewModel.search() }),
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp))
+            if (!users) BiliSearchFilters(
+                order = viewModel.videoOrder,
+                duration = viewModel.videoDuration,
+                onOrder = viewModel::updateVideoOrder,
+                onDuration = viewModel::updateVideoDuration,
+                enabled = !viewModel.working,
+            )
         } else {
             Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = viewModel::closeUploader) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回搜索结果") }
@@ -85,6 +94,13 @@ fun BiliBrowser(viewModel: BiliBrowserViewModel = viewModel()) {
                 TextButton(onClick = viewModel::refreshUploader) { Text("刷新") }
             }
         }
+        if (uploader != null) Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(!viewModel.showingCollections, { viewModel.showCollections(false) }, label = { Text("投稿") })
+            FilterChip(viewModel.showingCollections, { viewModel.showCollections(true) }, label = { Text("合集·系列") })
+        }
+        if (uploader != null && viewModel.showingCollections) {
+            CollectionCatalogue(viewModel, onOpenCollection, collectionState, Modifier.weight(1f))
+        } else {
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(if (loading) "正在读取…" else "$count ${if (users) "位 UP 主" else "个视频"}", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
             if (loading) TextButton(onClick = viewModel::cancelSearch) { Text("中止") }
@@ -163,6 +179,7 @@ fun BiliBrowser(viewModel: BiliBrowserViewModel = viewModel()) {
             } else if (hasMore && !loading) item(key = "more") { TextButton(onClick = more, modifier = Modifier.fillMaxWidth()) { Text("加载更多") } }
         }
     }
+    }
     viewModel.choice?.let { choice ->
         AlertDialog(onDismissRequest = viewModel::cancelParts, title = { Text("选择分 P · ${choice.action.label}") },
             text = { Column {
@@ -187,6 +204,42 @@ fun BiliBrowser(viewModel: BiliBrowserViewModel = viewModel()) {
                 }
             } }, confirmButton = { TextButton(onClick = viewModel::confirmParts, enabled = choice.selected.isNotEmpty()) { Text(choice.action.label) } },
             dismissButton = { TextButton(onClick = viewModel::cancelParts) { Text("取消") } })
+    }
+}
+
+@Composable
+internal fun BiliSearchFilters(
+    order: BiliVideoOrder,
+    duration: BiliVideoDuration,
+    onOrder: (BiliVideoOrder) -> Unit,
+    onDuration: (BiliVideoDuration) -> Unit,
+    enabled: Boolean = true,
+) {
+    var orderMenu by remember { mutableStateOf(false) }
+    var durationMenu by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+        Box(Modifier.weight(1f)) {
+            TextButton(onClick = { orderMenu = true }, enabled = enabled) { Text(order.label) }
+            DropdownMenu(expanded = orderMenu, onDismissRequest = { orderMenu = false }) {
+                BiliVideoOrder.entries.forEach { option ->
+                    DropdownMenuItem(text = { Text(option.label) }, onClick = {
+                        orderMenu = false
+                        onOrder(option)
+                    })
+                }
+            }
+        }
+        Box(Modifier.weight(1f)) {
+            TextButton(onClick = { durationMenu = true }, enabled = enabled) { Text(duration.label) }
+            DropdownMenu(expanded = durationMenu, onDismissRequest = { durationMenu = false }) {
+                BiliVideoDuration.entries.forEach { option ->
+                    DropdownMenuItem(text = { Text(option.label) }, onClick = {
+                        durationMenu = false
+                        onDuration(option)
+                    })
+                }
+            }
+        }
     }
 }
 

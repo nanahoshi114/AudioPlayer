@@ -97,27 +97,40 @@ class TranslateCenter(
         return try {
             val cues = readGenerated(fingerprint) ?: return "没有读到日文字幕"
             if (cues.isEmpty() || cues.hasTranslation()) return "没有需要翻译的日文"
-            if (db.whisper().get(jobId)?.translateStatus != TranslateMark.RUNNING) throw CancellationException()
+            if (!whisperTranslating(jobId)) throw CancellationException()
             val translated = translateAll(cues, ticket)
             val lines = translated.cues ?: return translated.detail
-            if (db.whisper().get(jobId)?.translateStatus != TranslateMark.RUNNING) throw CancellationException()
-            generatedFile(fingerprint).writeText(encodeGeneratedCues(lines))
-            val finished = finishWithPolish(lines, ticket) {
-                db.whisper().get(jobId)?.translateStatus == TranslateMark.RUNNING
-            }
-            if (finished !== lines) {
-                if (db.whisper().get(jobId)?.translateStatus != TranslateMark.RUNNING) throw CancellationException()
-                generatedFile(fingerprint).writeText(encodeGeneratedCues(finished))
-            }
-            if (db.whisper().markTranslatedIfRunning(jobId, System.currentTimeMillis()) == 0) {
-                throw CancellationException()
-            }
+            if (!whisperTranslating(jobId)) throw CancellationException()
+            val finished = finishWithPolish(lines, ticket) { whisperTranslating(jobId) }
+            if (!whisperTranslating(jobId)) throw CancellationException()
+            commitTranslated(jobId, fingerprint, finished)
             updatesFlow.tryEmit(Unit)
             null
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
             error.message ?: "翻译失败"
+        }
+    }
+
+    private suspend fun whisperTranslating(jobId: Long): Boolean =
+        db.whisper().get(jobId)?.translateStatus == TranslateMark.RUNNING
+
+    /** 先写临时文件并标记任务，成功后再替换正式字幕，避免「任务已中止但文件里已有译文」。 */
+    private suspend fun commitTranslated(jobId: Long, fingerprint: String, cues: List<SubtitleCue>) {
+        val target = generatedFile(fingerprint)
+        val payload = encodeGeneratedCues(cues)
+        target.parentFile?.mkdirs()
+        val temp = File(target.parentFile, "${target.name}.tmp")
+        temp.writeText(payload)
+        if (db.whisper().markTranslatedIfRunning(jobId, System.currentTimeMillis()) == 0) {
+            temp.delete()
+            throw CancellationException()
+        }
+        if (!temp.renameTo(target)) {
+            // 同目录重命名极少失败；任务已标记完成，退回直接写入保持两者一致。
+            target.writeText(payload)
+            temp.delete()
         }
     }
 
@@ -144,8 +157,9 @@ class TranslateCenter(
 
     private suspend fun runRow(row: QueuedTrack): Boolean {
         if (!credentials.hasTranslate()) return false
-        val cues = subtitles.load(row).cues
-        if (cues.isEmpty() || cues.hasTranslation()) return false
+        val loaded = subtitles.load(row)
+        if (!loaded.canTranslate) return false
+        val cues = loaded.cues
         val jobId = openJob(row)
         if (!translationActive(jobId)) throw CancellationException()
         val ticket = calls.prepare("row-$jobId")

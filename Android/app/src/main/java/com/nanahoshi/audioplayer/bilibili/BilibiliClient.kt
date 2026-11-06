@@ -37,7 +37,7 @@ data class BiliPart(
     val coverUrl: String,
 )
 
-data class BiliVideoDetails(val video: BiliVideoHit, val parts: List<BiliPart>)
+data class BiliVideoDetails(val video: BiliVideoHit, val parts: List<BiliPart>, val collection: BiliCollection? = null)
 
 class BilibiliException(val code: Int, message: String) : Exception(message)
 
@@ -70,7 +70,7 @@ data class FavVideoPage(
 
 /** B站字幕的取用结果。空列表不等于出错，要区分没字幕、需要登录和读取失败。 */
 sealed interface BiliSubtitle {
-    data class Ready(val document: String) : BiliSubtitle
+    data class Ready(val document: String, val language: String? = null) : BiliSubtitle
     data object NeedsLogin : BiliSubtitle
     data object Missing : BiliSubtitle
     data object Failed : BiliSubtitle
@@ -117,7 +117,14 @@ class BilibiliClient(
         browseGet(url.toString(), referer)
     }
 
-    suspend fun searchVideos(keyword: String, page: Int = 1) = searchApi.videos(keyword, page)
+    val videoCollections = BiliVideoCollectionCache()
+    val collections = BiliCollectionApi(searchApi::data)
+
+    suspend fun searchVideos(
+        keyword: String, page: Int = 1,
+        order: BiliVideoOrder = BiliVideoOrder.TOTAL_RANK,
+        duration: BiliVideoDuration = BiliVideoDuration.ALL,
+    ) = searchApi.videos(keyword, page, order, duration)
     suspend fun searchUploaders(keyword: String, page: Int = 1) = searchApi.uploaders(keyword, page)
     suspend fun uploaderVideos(mid: Long, page: Int = 1) = searchApi.uploads(mid, page)
 
@@ -286,19 +293,20 @@ class BilibiliClient(
                         BiliSubtitle.Missing
                     }
                 }
-                val url = pickSubtitleUrl(list)
-                if (url == null) {
+                val selected = pickSubtitle(list)
+                if (selected == null) {
                     Log.w(TAG, "subtitle url missing bvid=$bvid cid=$cid tracks=$count")
                     return BiliSubtitle.Failed
                 }
-                val document = get(url, referer = "https://www.bilibili.com/video/$bvid")
+                // 字幕正文在 CDN 上，不需要登录态，不带 SESSDATA。
+                val document = get(selected.first, referer = "https://www.bilibili.com/video/$bvid", guestOnly = true)
                 val body = try {
                     JSONObject(document).optJSONArray("body")?.length() ?: 0
                 } catch (_: Exception) {
                     0
                 }
                 Log.d(TAG, "subtitle loaded bvid=$bvid cid=$cid tracks=$count body=$body")
-                if (body == 0) BiliSubtitle.Failed else BiliSubtitle.Ready(document)
+                if (body == 0) BiliSubtitle.Failed else BiliSubtitle.Ready(document, selected.second)
             }
         } catch (error: CancellationException) {
             throw error
@@ -331,9 +339,9 @@ class BilibiliClient(
         return JSONObject(get(url.toString(), referer = "https://www.bilibili.com/video/$bvid"))
     }
 
-    private fun pickSubtitleUrl(list: JSONArray?): String? {
+    private fun pickSubtitle(list: JSONArray?): Pair<String, String?>? {
         if (list == null || list.length() == 0) return null
-        var chosenUrl: String? = null
+        var chosen: Pair<String, String?>? = null
         var chosenRank = Int.MAX_VALUE
         for (index in 0 until list.length()) {
             val item = list.optJSONObject(index) ?: continue
@@ -349,10 +357,10 @@ class BilibiliClient(
             val rank = subtitleLanguageRank(item.optString("lan"))
             if (rank < chosenRank) {
                 chosenRank = rank
-                chosenUrl = url
+                chosen = url to item.optString("lan").takeIf { it.isNotBlank() }
             }
         }
-        return chosenUrl
+        return chosen
     }
 
     private fun subtitleLanguageRank(language: String): Int {
@@ -390,32 +398,9 @@ class BilibiliClient(
         val bvid = BV_REGEX.find(input)?.value
             ?: throw BilibiliException(0, "请输入正确的 BV 号")
         val body = browseGet("https://api.bilibili.com/x/web-interface/view?bvid=$bvid", "https://www.bilibili.com/video/$bvid")
-        val response = json.decodeFromString<ApiResponse<ViewData>>(body)
-        val data = response.data
-        if (response.code != 0 || data == null) {
-            throw BilibiliException(response.code, if (response.code != 0) biliSearchError(response.code) else "没有读到这个视频的信息")
+        return parseBiliVideoDetails(body, bvid).also { details ->
+            videoCollections.record(details.video.bvid, details.collection)
         }
-        val pages = data.pages.ifEmpty {
-            listOf(PageInfo(cid = data.cid, page = 1, part = "", duration = data.duration))
-        }
-        val parts = pages.map { page ->
-            val title = if (pages.size > 1 && page.part.isNotBlank()) {
-                "${data.title} - ${page.part}"
-            } else {
-                data.title
-            }
-            BiliPart(
-                bvid = data.bvid.ifBlank { bvid },
-                cid = page.cid,
-                page = page.page,
-                title = title,
-                artist = data.owner.name,
-                durationMs = page.duration * 1000,
-                coverUrl = data.pic.toHttps(),
-            )
-        }
-        return BiliVideoDetails(BiliVideoHit(data.bvid.ifBlank { bvid }, data.title, data.owner.name,
-            data.pic.toHttps(), data.duration * 1000), parts)
     }
 
     fun resolveAudioBlocking(bvid: String, cid: Long): BiliAudio =
@@ -501,10 +486,14 @@ class BilibiliClient(
         return key
     }
 
-    private suspend fun get(url: String, referer: String = "https://www.bilibili.com"): String =
+    private suspend fun get(
+        url: String,
+        referer: String = "https://www.bilibili.com",
+        guestOnly: Boolean = false,
+    ): String =
         withContext(Dispatchers.IO) {
             prepareIdentity()
-            execute(Request.Builder().url(url).get(), referer)
+            execute(Request.Builder().url(url).get(), referer, guestOnly)
         }
 
     private fun prepareIdentity() {
@@ -550,27 +539,32 @@ class BilibiliClient(
                 json.decodeFromString<ApiResponse<CookieInfoData>>(body)
             } catch (error: Exception) {
                 Log.w(TAG, "session check skipped: ${error.javaClass.simpleName}")
+                credentials.markBiliRefreshFailed()
                 return
             }
             val needsRefresh = info.code == -101 || info.data?.refresh == true
             try {
-                if (needsRefresh) refreshSession(token, info.data?.timestamp ?: 0L)
-                credentials.markBiliRefreshChecked()
+                if (!needsRefresh || refreshSession(token, info.data?.timestamp ?: 0L)) {
+                    credentials.markBiliRefreshChecked()
+                } else {
+                    credentials.markBiliRefreshFailed()
+                }
             } catch (error: Exception) {
                 Log.w(TAG, "session refresh skipped: ${error.javaClass.simpleName}")
+                credentials.markBiliRefreshFailed()
             }
         }
     }
 
-    private fun refreshSession(oldToken: String, timestamp: Long) {
-        val csrf = cookieField(credentials.cookie().orEmpty(), "bili_jct") ?: return
+    private fun refreshSession(oldToken: String, timestamp: Long): Boolean {
+        val csrf = cookieField(credentials.cookie().orEmpty(), "bili_jct") ?: return false
         val stamp = timestamp.takeIf { it > 0L } ?: System.currentTimeMillis()
         val page = exchange(
             Request.Builder().url("https://www.bilibili.com/correspond/1/${correspondPath(stamp)}").get(),
             "https://www.bilibili.com",
             allowHtml = true,
         )
-        val refreshCsrf = refreshCsrf(page.body) ?: return
+        val refreshCsrf = refreshCsrf(page.body) ?: return false
         val refreshed = exchange(
             Request.Builder()
                 .url("https://passport.bilibili.com/x/passport-login/web/cookie/refresh")
@@ -592,10 +586,11 @@ class BilibiliClient(
         )
         if (response.code != 0 || newToken.isBlank() || cookieField(newCookie, "SESSDATA") == null) {
             Log.w(TAG, "session refresh rejected code=${response.code}")
-            return
+            return false
         }
         credentials.saveBiliSession(newCookie, newToken)
-        val newCsrf = cookieField(newCookie, "bili_jct") ?: return
+        // 新会话已保存即视为续期成功；作废旧 token 只是尽力而为。
+        val newCsrf = cookieField(newCookie, "bili_jct") ?: return true
         val confirmed = execute(
             Request.Builder()
                 .url("https://passport.bilibili.com/x/passport-login/web/confirm/refresh")
@@ -609,6 +604,7 @@ class BilibiliClient(
         )
         val confirmCode = JSONObject(confirmed).optInt("code", -1)
         if (confirmCode != 0) Log.w(TAG, "session confirm code=$confirmCode")
+        return true
     }
 
     private fun fetchTicket() {
@@ -765,10 +761,11 @@ private data class ViewData(
     val cid: Long = 0,
     val owner: Owner = Owner(),
     val pages: List<PageInfo> = emptyList(),
+    @SerialName("ugc_season") val ugcSeason: kotlinx.serialization.json.JsonElement? = null,
 )
 
 @Serializable
-private data class Owner(val name: String = "")
+private data class Owner(val name: String = "", val mid: Long = 0)
 
 @Serializable
 private data class PageInfo(
@@ -855,3 +852,38 @@ private data class SegmentBase(
     val indexRange: String? = null,
     @SerialName("index_range") val indexRangeAlt: String? = null,
 )
+
+private val biliVideoJson = Json { ignoreUnknownKeys = true; coerceInputValues = true }
+
+/** 视频详情解析与 Android 请求环境分离。 */
+internal fun parseBiliVideoDetails(body: String, bvid: String): BiliVideoDetails {
+    val response = try { biliVideoJson.decodeFromString<ApiResponse<ViewData>>(body) }
+    catch (_: kotlinx.serialization.SerializationException) { throw BilibiliException(0, "B站视频详情无法读取，请重试") }
+    val data = response.data
+    if (response.code != 0 || data == null) {
+        throw BilibiliException(response.code, if (response.code != 0) biliSearchError(response.code) else "没有读到这个视频的信息")
+    }
+    if (data.bvid.isNotBlank() && data.bvid != bvid) throw BilibiliException(0, "B站返回的视频身份不匹配")
+    val pages = data.pages.ifEmpty {
+        listOf(PageInfo(cid = data.cid, page = 1, part = "", duration = data.duration))
+    }
+    val parts = pages.map { page ->
+        val title = if (pages.size > 1 && page.part.isNotBlank()) {
+            "${data.title} - ${page.part}"
+        } else {
+            data.title
+        }
+        BiliPart(
+            bvid = data.bvid.ifBlank { bvid },
+            cid = page.cid,
+            page = page.page,
+            title = title,
+            artist = data.owner.name,
+            durationMs = page.duration * 1000,
+            coverUrl = data.pic.toHttps(),
+        )
+    }
+    return BiliVideoDetails(BiliVideoHit(data.bvid.ifBlank { bvid }, data.title, data.owner.name,
+        data.pic.toHttps(), data.duration * 1000, data.owner.mid), parts,
+        biliVideoCollection(data.ugcSeason, data.owner.mid))
+}

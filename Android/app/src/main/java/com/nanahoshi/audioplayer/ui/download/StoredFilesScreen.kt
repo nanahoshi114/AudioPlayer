@@ -30,6 +30,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Icon
 import com.nanahoshi.audioplayer.ui.components.AppTopBar
+import com.nanahoshi.audioplayer.ui.components.DeleteAudioDialog
 import com.nanahoshi.audioplayer.ui.components.EmptyState
 import com.nanahoshi.audioplayer.ui.components.ErrorState
 import com.nanahoshi.audioplayer.ui.components.LoadingState
@@ -115,11 +116,41 @@ class StoredFilesViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun delete(selected: List<StoredItem>, onDone: () -> Unit) {
+    data class PendingDelete(val items: List<StoredItem>, val subtitles: Int)
+    var pendingDelete by mutableStateOf<PendingDelete?>(null)
+        private set
+
+    fun requestDelete(items: List<StoredItem>) {
+        if (items.isEmpty()) return
         viewModelScope.launch {
-            catalog.delete(selected)
-            items = catalog.list()
-            onDone()
+            try {
+                pendingDelete = PendingDelete(items, catalog.generatedSubtitleCount(items))
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                error = failure.message?.takeIf { it.isNotBlank() } ?: "无法读取字幕信息"
+            }
+        }
+    }
+
+    fun cancelDelete() {
+        pendingDelete = null
+    }
+
+    fun confirmDelete(deleteSubtitles: Boolean, onDone: () -> Unit) {
+        val pending = pendingDelete ?: return
+        pendingDelete = null
+        viewModelScope.launch {
+            try {
+                catalog.delete(pending.items, deleteSubtitles)
+                items = catalog.list()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                error = failure.message?.takeIf { it.isNotBlank() } ?: "删除失败，请重试"
+            } finally {
+                onDone()
+            }
         }
     }
 }
@@ -135,7 +166,6 @@ fun StoredFilesScreen(
     var query by remember { mutableStateOf("") }
     var selecting by remember { mutableStateOf(false) }
     var selected by remember { mutableStateOf(setOf<String>()) }
-    var confirmDelete by remember { mutableStateOf(false) }
     val visible = remember(viewModel.items, query) {
         viewModel.items.filter { storedItemMatches(it, query) }
     }
@@ -145,23 +175,17 @@ fun StoredFilesScreen(
         selecting = false
         selected = emptySet()
     }
-    if (confirmDelete) {
-        AlertDialog(
-            onDismissRequest = { confirmDelete = false },
-            text = { Text("删除选中的 ${chosen.size} 个文件？") },
-            confirmButton = {
-                TextButton(onClick = {
-                    confirmDelete = false
-                    val pending = chosen
-                    viewModel.delete(pending) {
-                        selecting = false
-                        selected = emptySet()
-                    }
-                }) { Text("删除") }
-            },
-            dismissButton = {
-                TextButton(onClick = { confirmDelete = false }) { Text("取消") }
-            },
+    val pendingDelete = viewModel.pendingDelete
+    if (pendingDelete != null) {
+        val onDone = {
+            selecting = false
+            selected = emptySet()
+        }
+        DeleteAudioDialog(
+            itemCount = pendingDelete.items.size,
+            subtitleCount = pendingDelete.subtitles,
+            onConfirm = { deleteSubtitles -> viewModel.confirmDelete(deleteSubtitles, onDone) },
+            onCancel = viewModel::cancelDelete,
         )
     }
     Column(Modifier.fillMaxSize()) {
@@ -188,7 +212,7 @@ fun StoredFilesScreen(
                         SelectionAction(
                             "删除",
                             Icons.Default.Delete,
-                            { if (chosen.isNotEmpty()) confirmDelete = true },
+                            { if (chosen.isNotEmpty()) viewModel.requestDelete(chosen) },
                             destructive = true,
                             enabled = chosen.isNotEmpty(),
                         ),

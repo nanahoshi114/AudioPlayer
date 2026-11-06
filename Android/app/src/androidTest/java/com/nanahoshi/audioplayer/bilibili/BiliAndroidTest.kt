@@ -52,7 +52,7 @@ class BiliAndroidTest {
             old.execSQL("INSERT INTO translation_jobs(title,trackId,status) VALUES('old',2,'DONE')")
             old.version=13
         }
-        val migrated=Room.databaseBuilder(context,AppDatabase::class.java,name).addMigrations(AppDatabase.MIGRATION_13_14,AppDatabase.MIGRATION_14_15, AppDatabase.MIGRATION_15_16).build()
+        val migrated=Room.databaseBuilder(context,AppDatabase::class.java,name).addMigrations(AppDatabase.MIGRATION_13_14,AppDatabase.MIGRATION_14_15, AppDatabase.MIGRATION_15_16, AppDatabase.MIGRATION_16_17).build()
         val fresh=Room.inMemoryDatabaseBuilder(context,AppDatabase::class.java).build()
         try {
             assertEquals(5,migrated.tracks().inFolder(1).size)
@@ -65,7 +65,7 @@ class BiliAndroidTest {
             assertEquals("jNQXAC9IVRw",migrated.tracks().getById(5)!!.youtubeVideoId)
             fun structure(db: AppDatabase): List<String> {
                 val result=mutableListOf<String>();val sql=db.openHelper.writableDatabase
-                assertEquals(16,sql.version)
+                assertEquals(17,sql.version)
                 for (table in listOf("folders","tracks","downloads","queue_items","playlists","playlist_items","whisper_jobs","translation_jobs")) {
                     sql.query("PRAGMA table_info($table)").use { rows ->
                         while(rows.moveToNext()) result += table+"|"+(1 until rows.columnCount).joinToString("|") { rows.getString(it).orEmpty() }

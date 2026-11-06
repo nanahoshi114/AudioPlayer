@@ -147,6 +147,7 @@ import com.nanahoshi.audioplayer.ui.EmptyHint
 import com.nanahoshi.audioplayer.ui.components.AppTopBar
 import com.nanahoshi.audioplayer.ui.components.BadgeItem
 import com.nanahoshi.audioplayer.ui.components.BadgeLine
+import com.nanahoshi.audioplayer.ui.components.ConfirmActionDialog
 import com.nanahoshi.audioplayer.ui.components.ErrorState
 import com.nanahoshi.audioplayer.ui.components.EmptyState
 import com.nanahoshi.audioplayer.ui.components.LabelBadge
@@ -1227,7 +1228,7 @@ private fun WorkSearchScreen(
 }
 
 @Composable
-fun OnlineSearchScreen(onOpenWork: (String) -> Unit) {
+fun OnlineSearchScreen(onOpenWork: (String) -> Unit, onOpenBiliCollection: (com.nanahoshi.audioplayer.bilibili.BiliCollection) -> Unit = {}) {
     var source by rememberSaveable { mutableStateOf("works") }
     val holder = androidx.compose.runtime.saveable.rememberSaveableStateHolder()
     Column(Modifier.fillMaxSize()) {
@@ -1239,7 +1240,7 @@ fun OnlineSearchScreen(onOpenWork: (String) -> Unit) {
         Box(Modifier.weight(1f)) {
             holder.SaveableStateProvider(source) {
                 when (source) {
-                    "bilibili" -> com.nanahoshi.audioplayer.ui.bilibili.BiliBrowser()
+                    "bilibili" -> com.nanahoshi.audioplayer.ui.bilibili.BiliBrowser(onOpenCollection = onOpenBiliCollection)
                     "youtube" -> com.nanahoshi.audioplayer.ui.youtube.YouTubeBrowser()
                     else -> WorkSearchScreen(onOpenWork)
                 }
@@ -1971,6 +1972,7 @@ class MineViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var biliCanRefresh by mutableStateOf(graph.credentials.hasBiliRefresh())
         private set
+    val biliRefreshFailure = graph.credentials.biliRefreshFailure
     var qrVisible by mutableStateOf(false)
         private set
     var qrImage by mutableStateOf<Bitmap?>(null)
@@ -2151,6 +2153,9 @@ fun MineScreen(
 ) {
     var biliHelp by remember { mutableStateOf(false) }
     var sessdataLogin by remember { mutableStateOf(false) }
+    var confirmDlsiteLogout by remember { mutableStateOf(false) }
+    var confirmBiliClear by remember { mutableStateOf(false) }
+    val biliRefreshFailed by viewModel.biliRefreshFailure.collectAsStateWithLifecycle()
     if (viewModel.qrVisible) {
         BiliQrDialog(
             image = viewModel.qrImage,
@@ -2222,7 +2227,7 @@ fun MineScreen(
                         modifier = Modifier.padding(top = 12.dp),
                     ) { Text("查看已购买作品") }
                     TextButton(onClick = viewModel::openWebLogin) { Text("重新登录") }
-                    TextButton(onClick = viewModel::logout) { Text("退出") }
+                    TextButton(onClick = { confirmDlsiteLogout = true }) { Text("退出") }
                 }
             }
         }
@@ -2240,6 +2245,7 @@ fun MineScreen(
                     Text(
                         when {
                             !viewModel.biliReady -> "还没有登录"
+                            viewModel.biliCanRefresh && biliRefreshFailed -> "自动续期失败，请重新登录"
                             viewModel.biliCanRefresh -> "已扫码登录，会在需要时自动更新"
                             else -> "已保存登录信息"
                         },
@@ -2258,9 +2264,27 @@ fun MineScreen(
                     TextButton(onClick = onOpenFavorites) { Text("查看收藏夹") }
                 }
                 TextButton(onClick = { sessdataLogin = true }) { Text("SESSDATA登录") }
-                TextButton(onClick = viewModel::clearBili) { Text("清除") }
+                TextButton(onClick = { confirmBiliClear = true }) { Text("清除") }
             }
         }
+    }
+    if (confirmDlsiteLogout) {
+        ConfirmActionDialog(
+            title = "退出 DLsite 登录",
+            message = "已保存的登录信息会被清除，已购买作品需要重新登录后才能查看。",
+            confirmLabel = "退出",
+            onConfirm = { confirmDlsiteLogout = false; viewModel.logout() },
+            onDismiss = { confirmDlsiteLogout = false },
+        )
+    }
+    if (confirmBiliClear) {
+        ConfirmActionDialog(
+            title = "清除 B站登录信息",
+            message = "扫码登录的自动续期也会停止，收藏夹和字幕需要重新登录后才能读取。",
+            confirmLabel = "清除",
+            onConfirm = { confirmBiliClear = false; viewModel.clearBili() },
+            onDismiss = { confirmBiliClear = false },
+        )
     }
 }
 

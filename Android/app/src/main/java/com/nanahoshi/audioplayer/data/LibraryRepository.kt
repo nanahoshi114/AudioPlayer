@@ -18,6 +18,7 @@ import com.nanahoshi.audioplayer.bilibili.BilibiliClient
 import com.nanahoshi.audioplayer.data.db.AppDatabase
 import com.nanahoshi.audioplayer.data.db.FolderEntity
 import com.nanahoshi.audioplayer.data.db.LibraryFileEntity
+import com.nanahoshi.audioplayer.playback.queueRow
 import com.nanahoshi.audioplayer.data.db.PlaylistEntity
 import com.nanahoshi.audioplayer.data.db.PlaylistItemEntity
 import com.nanahoshi.audioplayer.data.db.PlaylistTrack
@@ -29,6 +30,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 enum class WorkFill {
@@ -56,6 +58,9 @@ class LibraryRepository(
     suspend fun importBili(request: com.nanahoshi.audioplayer.bilibili.BiliImportRequest): List<TrackEntity> = biliLibrary.save(request)
 
     private val youtubeLock = kotlinx.coroutines.sync.Mutex()
+
+    /** 作品导入串行化：前置检查必须在拿锁后重新生效，否则两个入口会同时填充同一作品。 */
+    private val workImportLock = kotlinx.coroutines.sync.Mutex()
 
     suspend fun saveYouTube(video: YouTubeVideo, localPath: String? = null, downloadId: Long? = null): TrackEntity =
         withContext(Dispatchers.IO) {
@@ -126,7 +131,9 @@ class LibraryRepository(
         filterOriginalTracks(folderId, db.tracks().inFolder(folderId))
     }
 
-    suspend fun ensureWorkFiles(folderId: Long): WorkFill = withContext(Dispatchers.IO) {
+    suspend fun ensureWorkFiles(folderId: Long): WorkFill = workImportLock.withLock { fillWorkFiles(folderId) }
+
+    private suspend fun fillWorkFiles(folderId: Long): WorkFill = withContext(Dispatchers.IO) {
         val folder = db.folders().get(folderId) ?: return@withContext WorkFill.UNCHANGED
         val sourceId = folder.asmrSourceId ?: return@withContext WorkFill.UNCHANGED
         if (db.folders().childrenOf(folderId).isNotEmpty()) return@withContext WorkFill.UNCHANGED
@@ -155,7 +162,7 @@ class LibraryRepository(
                 emptyList()
             }
             if (nodes.isNotEmpty()) {
-                importPlayNodes(nodes, folderId, workId, facts, folder.coverUri, "")
+                db.withTransaction { importPlayNodes(nodes, folderId, workId, facts, folder.coverUri, "") }
                 return@withContext WorkFill.FILLED
             }
         }
@@ -165,7 +172,7 @@ class LibraryRepository(
             null
         }
         if (loaded != null && loaded.nodes.isNotEmpty()) {
-            importAsmrNodes(loaded.nodes, folderId, loaded, "")
+            db.withTransaction { importAsmrNodes(loaded.nodes, folderId, loaded, "") }
             return@withContext WorkFill.FILLED
         }
         WorkFill.EMPTY
@@ -196,7 +203,10 @@ class LibraryRepository(
         }
     }
 
-    suspend fun ensureWorkSource(folderId: Long, source: TrackSource): WorkFill = withContext(Dispatchers.IO) {
+    suspend fun ensureWorkSource(folderId: Long, source: TrackSource): WorkFill =
+        workImportLock.withLock { fillWorkSource(folderId, source) }
+
+    private suspend fun fillWorkSource(folderId: Long, source: TrackSource): WorkFill = withContext(Dispatchers.IO) {
         val folder = db.folders().get(folderId) ?: return@withContext WorkFill.UNCHANGED
         val sourceId = folder.asmrSourceId ?: return@withContext WorkFill.UNCHANGED
         val workId = workIdOf(folder)
@@ -226,12 +236,12 @@ class LibraryRepository(
                 emptyList()
             }
             if (nodes.isEmpty()) return@withContext WorkFill.EMPTY
-            importPlayNodes(nodes, folderId, workId, facts, folder.coverUri, "")
+            db.withTransaction { importPlayNodes(nodes, folderId, workId, facts, folder.coverUri, "") }
             return@withContext WorkFill.FILLED
         }
         val loaded = asmr.loadWork(sourceId)
         if (loaded.nodes.isEmpty()) return@withContext WorkFill.EMPTY
-        importAsmrNodes(loaded.nodes, folderId, loaded, "")
+        db.withTransaction { importAsmrNodes(loaded.nodes, folderId, loaded, "") }
         WorkFill.FILLED
     }
 
@@ -264,7 +274,7 @@ class LibraryRepository(
 
     fun observeQueue(): Flow<List<QueuedTrack>> = db.queue().observe()
 
-    fun observePlaylists(): Flow<List<PlaylistEntity>> = db.playlists().observeAll()
+    fun observePlaylists(): Flow<List<PlaylistEntity>> = db.playlists().observeEditable()
 
     fun observePlaylist(id: Long): Flow<PlaylistEntity?> = db.playlists().observe(id)
 
@@ -504,10 +514,19 @@ class LibraryRepository(
         }
 
     suspend fun importAsmr(input: String, parentId: Long?) = withContext(Dispatchers.IO) {
-        val work = asmr.loadWork(input)
-        if (db.folders().findBySourceId(work.sourceId) != null) error("已经在音频库")
-        insertAsmrWork(work, parentId)
-        restoreOriginalCopy(work.sourceId)
+        workImportLock.withLock {
+            try {
+                val work = asmr.loadWork(input)
+                if (db.folders().findBySourceId(work.sourceId) != null) error("已经在音频库")
+                insertAsmrWork(work, parentId)
+                restoreOriginalCopy(work.sourceId)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                if (failure.hasConstraint()) error("这部作品已经在音频库")
+                throw failure
+            }
+        }
     }
 
     suspend fun folderBySource(sourceId: String): FolderEntity? = withContext(Dispatchers.IO) {
@@ -521,22 +540,33 @@ class LibraryRepository(
 
     suspend fun importPlayWork(facts: WorkFacts, nodes: List<PlayEntry>, coverUrl: String?) =
         withContext(Dispatchers.IO) {
-            if (folderBySource(facts.sourceId) != null) error("已经在音频库")
-            val workId = facts.sourceId.filter { it.isDigit() }.toLongOrNull() ?: 0L
-            val rootId = db.folders().insert(
-                FolderEntity(
-                    parentId = null,
-                    name = sanitizeEntryName("${facts.sourceId} ${facts.title}"),
-                    position = db.folders().maxPosition(null) + 1,
-                    addedAt = System.currentTimeMillis(),
-                    asmrWorkId = workId,
-                    asmrSourceId = facts.sourceId,
-                    coverUri = coverUrl,
-                    workMeta = facts.toJson(),
-                ),
-            )
-            importPlayNodes(nodes, rootId, workId, facts, coverUrl, "")
-            restoreOriginalCopy(facts.sourceId)
+            workImportLock.withLock {
+                try {
+                    if (folderBySource(facts.sourceId) != null) error("已经在音频库")
+                    val workId = facts.sourceId.filter { it.isDigit() }.toLongOrNull() ?: 0L
+                    db.withTransaction {
+                        val rootId = db.folders().insert(
+                            FolderEntity(
+                                parentId = null,
+                                name = sanitizeEntryName("${facts.sourceId} ${facts.title}"),
+                                position = db.folders().maxPosition(null) + 1,
+                                addedAt = System.currentTimeMillis(),
+                                asmrWorkId = workId,
+                                asmrSourceId = facts.sourceId,
+                                coverUri = coverUrl,
+                                workMeta = facts.toJson(),
+                            ),
+                        )
+                        importPlayNodes(nodes, rootId, workId, facts, coverUrl, "")
+                    }
+                    restoreOriginalCopy(facts.sourceId)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failure: Exception) {
+                    if (failure.hasConstraint()) error("这部作品已经在音频库")
+                    throw failure
+                }
+            }
         }
 
     private suspend fun restoreOriginalCopy(sourceId: String) {
@@ -571,7 +601,7 @@ class LibraryRepository(
         id
     }
 
-    private suspend fun insertAsmrWork(work: AsmrWork, parentId: Long?): Long {
+    private suspend fun insertAsmrWork(work: AsmrWork, parentId: Long?): Long = db.withTransaction {
         val position = db.folders().maxPosition(parentId) + 1
         val rootId = db.folders().insert(
             FolderEntity(
@@ -586,7 +616,7 @@ class LibraryRepository(
             ),
         )
         importAsmrNodes(work.nodes, rootId, work, "")
-        return rootId
+        rootId
     }
 
     suspend fun asmrTracksInTree(folderId: Long): List<TrackEntity> = withContext(Dispatchers.IO) {
@@ -643,7 +673,20 @@ class LibraryRepository(
         db.playlists().insert(PlaylistEntity(name = name.trim(), createdAt = now, updatedAt = now))
     }
 
+    suspend fun publishBiliPlaylist(name: String, parts: List<BiliPart>): Long? = withContext(Dispatchers.IO) {
+        db.withTransaction {
+            val ids = parts.distinctBy { it.bvid to it.cid }.map { part ->
+                checkNotNull(db.tracks().findByBvid(part.bvid, part.cid)) { "复制所选分 P 时未找到曲目" }.id
+            }
+            if (ids.isEmpty()) return@withTransaction null
+            val id = createPlaylist(name)
+            addTracksToPlaylist(id, ids)
+            id
+        }
+    }
+
     suspend fun renamePlaylist(id: Long, name: String) = withContext(Dispatchers.IO) {
+        check(db.collections().get(id) == null) { "在线播放列表不能编辑，请先复制为自建列表" }
         db.playlists().rename(id, name.trim(), System.currentTimeMillis())
     }
 
@@ -652,28 +695,37 @@ class LibraryRepository(
     }
 
     suspend fun addTracksToPlaylist(playlistId: Long, trackIds: List<Long>) = withContext(Dispatchers.IO) {
-        val existing = db.playlists().trackIds(playlistId).toSet()
-        var position = db.playlists().maxPosition(playlistId)
-        trackIds.filterNot { it in existing }.forEach { trackId ->
-            position += 1
-            db.playlists().insertItem(
-                PlaylistItemEntity(playlistId = playlistId, trackId = trackId, position = position),
-            )
+        check(db.collections().get(playlistId) == null) { "在线播放列表不能编辑，请先复制为自建列表" }
+        db.withTransaction {
+            val existing = db.playlists().trackIds(playlistId).toSet()
+            var position = db.playlists().maxPosition(playlistId)
+            trackIds.filterNot { it in existing }.forEach { trackId ->
+                position += 1
+                db.playlists().insertItem(
+                    PlaylistItemEntity(playlistId = playlistId, trackId = trackId, position = position),
+                )
+            }
+            db.playlists().touch(playlistId, System.currentTimeMillis())
         }
-        db.playlists().touch(playlistId, System.currentTimeMillis())
     }
 
     suspend fun removePlaylistItem(playlistId: Long, itemId: Long) = withContext(Dispatchers.IO) {
-        db.playlists().deleteItem(itemId)
-        compactPlaylist(playlistId)
-        db.playlists().touch(playlistId, System.currentTimeMillis())
+        check(db.collections().get(playlistId) == null) { "在线播放列表不能编辑，请先复制为自建列表" }
+        db.withTransaction {
+            db.playlists().deleteItem(itemId)
+            compactPlaylist(playlistId)
+            db.playlists().touch(playlistId, System.currentTimeMillis())
+        }
     }
 
     suspend fun movePlaylistItem(playlistId: Long, from: Int, to: Int) = withContext(Dispatchers.IO) {
-        reorder(db.playlists().items(playlistId), from, to) { id, position ->
-            db.playlists().updatePosition(id, position)
+        check(db.collections().get(playlistId) == null) { "在线播放列表不能编辑，请先复制为自建列表" }
+        db.withTransaction {
+            reorder(db.playlists().items(playlistId), from, to) { id, position ->
+                db.playlists().updatePosition(id, position)
+            }
+            db.playlists().touch(playlistId, System.currentTimeMillis())
         }
-        db.playlists().touch(playlistId, System.currentTimeMillis())
     }
 
     suspend fun playlistTracks(playlistId: Long): List<TrackEntity> = withContext(Dispatchers.IO) {
@@ -683,49 +735,65 @@ class LibraryRepository(
     suspend fun insertQueueAfter(anchorQueueItemId: Long?, trackIds: List<Long>): Pair<Int, List<Long>> =
         withContext(Dispatchers.IO) {
             if (trackIds.isEmpty()) return@withContext 0 to emptyList()
-            val existing = db.queue().items()
-            val anchorIndex = existing.indexOfFirst { it.id == anchorQueueItemId }
-            val insertAt = if (anchorIndex < 0) 0 else anchorIndex + 1
-            val newIds = trackIds.map { trackId ->
-                db.queue().insert(QueueItemEntity(trackId = trackId, position = insertAt))
+            db.withTransaction {
+                val existing = db.queue().items()
+                val anchorIndex = existing.indexOfFirst { it.id == anchorQueueItemId }
+                val insertAt = if (anchorIndex < 0) 0 else anchorIndex + 1
+                val newIds = trackIds.mapIndexed { offset, trackId ->
+                    db.queue().insert(QueueItemEntity(trackId = trackId, position = insertAt + offset))
+                }
+                val ordered = existing.map { it.id }.toMutableList()
+                ordered.addAll(insertAt, newIds)
+                ordered.forEachIndexed { index, id -> db.queue().updatePosition(id, index) }
+                insertAt to newIds
             }
-            val ordered = existing.map { it.id }.toMutableList()
-            ordered.addAll(insertAt, newIds)
-            ordered.forEachIndexed { index, id -> db.queue().updatePosition(id, index) }
-            insertAt to newIds
         }
 
     suspend fun appendQueue(trackIds: List<Long>): List<Long> = withContext(Dispatchers.IO) {
-        var position = db.queue().maxPosition()
-        trackIds.map { trackId ->
-            position += 1
-            db.queue().insert(QueueItemEntity(trackId = trackId, position = position))
+        db.withTransaction {
+            var position = db.queue().maxPosition()
+            trackIds.map { trackId ->
+                position += 1
+                db.queue().insert(QueueItemEntity(trackId = trackId, position = position))
+            }
         }
     }
 
     suspend fun replaceQueue(trackIds: List<Long>): List<Long> = withContext(Dispatchers.IO) {
-        db.queue().clear()
-        trackIds.mapIndexed { index, trackId ->
-            db.queue().insert(QueueItemEntity(trackId = trackId, position = index))
+        db.withTransaction {
+            db.queue().clear()
+            trackIds.mapIndexed { index, trackId ->
+                db.queue().insert(QueueItemEntity(trackId = trackId, position = index))
+            }
+        }
+    }
+
+    suspend fun writeMixedQueue(items: List<com.nanahoshi.audioplayer.playback.QueuePlayable>, replace: Boolean): List<Long> = withContext(Dispatchers.IO) {
+        db.withTransaction {
+            if (replace) db.queue().clear()
+            val start = if (replace) 0 else db.queue().maxPosition() + 1
+            items.mapIndexed { index, item -> db.queue().insert(item.queueRow(start + index)) }
         }
     }
 
     suspend fun replaceRemoteQueue(items: List<RemotePlayable>): List<Long> = withContext(Dispatchers.IO) {
-        db.queue().clear()
-        items.mapIndexed { index, item ->
-            db.queue().insert(
-                QueueItemEntity(
-                    position = index,
-                    title = item.title,
-                    artist = item.artist,
-                    coverUri = item.coverUri,
-                    remoteUrl = item.remoteUrl,
-                    source = item.source.name,
-                    referer = item.referer,
-                    workno = item.workno,
-                    fileKey = item.fileKey,
-                ),
-            )
+        db.withTransaction {
+            db.queue().clear()
+            items.mapIndexed { index, item ->
+                db.queue().insert(
+                    QueueItemEntity(
+                        position = index,
+                        title = item.title,
+                        artist = item.artist,
+                        coverUri = item.coverUri,
+                        remoteUrl = item.remoteUrl,
+                        source = item.source.name,
+                        referer = item.referer,
+                        workno = item.workno,
+                        fileKey = item.fileKey,
+                    ),
+                )
+            }
         }
     }
 
@@ -738,14 +806,18 @@ class LibraryRepository(
     }
 
     suspend fun moveQueueItem(from: Int, to: Int) = withContext(Dispatchers.IO) {
-        reorder(db.queue().items(), from, to) { id, position ->
-            db.queue().updatePosition(id, position)
+        db.withTransaction {
+            reorder(db.queue().items(), from, to) { id, position ->
+                db.queue().updatePosition(id, position)
+            }
         }
     }
 
     suspend fun removeQueueItem(queueItemId: Long) = withContext(Dispatchers.IO) {
-        db.queue().delete(queueItemId)
-        compactQueue()
+        db.withTransaction {
+            db.queue().delete(queueItemId)
+            compactQueue()
+        }
     }
 
     private sealed class DlsiteCatalog {

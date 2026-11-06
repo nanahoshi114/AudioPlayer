@@ -172,6 +172,11 @@ class MainActivity : ComponentActivity() {
 
 private object Routes {
     const val Library = "library"
+    const val BiliCollection = "bilibili/collection?ref={ref}"
+    fun biliCollection(ref: com.nanahoshi.audioplayer.bilibili.BiliCollection): String {
+        val value = com.nanahoshi.audioplayer.bilibili.biliLibraryJson.encodeToString(com.nanahoshi.audioplayer.bilibili.BiliCollection.serializer(), ref)
+        return "bilibili/collection?ref=${android.net.Uri.encode(value)}"
+    }
     const val BiliVideo = "library/bilibili/{folderId}"
     fun biliVideo(id: Long) = "library/bilibili/$id"
     const val LibraryWork = "library/work/{folderId}"
@@ -315,7 +320,7 @@ private fun PlayerApp(clipboardImport: ClipboardImportViewModel) {
             }
         },
         bottomBar = {
-            AnimatedVisibility(visible = showBottomDock, enter = dockEnter, exit = dockExit) {
+            AnimatedVisibility(visible = showBottomDock || route == Routes.BiliCollection || route == Routes.Playlist, enter = dockEnter, exit = dockExit) {
                 val dockScope = this
                 Column {
                     MiniPlayer(
@@ -327,7 +332,7 @@ private fun PlayerApp(clipboardImport: ClipboardImportViewModel) {
                             )
                         },
                     )
-                    NavigationBar {
+                    if (showBottomDock) NavigationBar {
                         NavigationBarItem(
                             selected = highlight == Routes.Library,
                             onClick = {
@@ -473,11 +478,21 @@ private fun PlayerApp(clipboardImport: ClipboardImportViewModel) {
                 val id = entry.arguments?.getLong("folderId") ?: return@composable
                 com.nanahoshi.audioplayer.ui.bilibili.BiliVideoScreen(id, onBack = { navController.popBackStack() })
             }
+            composable(Routes.BiliCollection, arguments = listOf(navArgument("ref") { type = NavType.StringType })) { entry ->
+                val ref = runCatching {
+                    com.nanahoshi.audioplayer.bilibili.biliLibraryJson.decodeFromString(
+                        com.nanahoshi.audioplayer.bilibili.BiliCollection.serializer(), entry.arguments?.getString("ref").orEmpty())
+                }.getOrNull()
+                if (ref != null) com.nanahoshi.audioplayer.ui.bilibili.BiliCollectionScreen(initial = ref, onBack = { navController.popBackStack() })
+            }
             composable(Routes.Playlists) {
                 PlaylistListScreen(onOpen = { id -> navController.navigate(Routes.playlist(id)) })
             }
             composable(Routes.Online) {
-                OnlineSearchScreen(onOpenWork = { sourceId -> navController.navigate(Routes.onlineWork(sourceId)) })
+                OnlineSearchScreen(onOpenWork = { sourceId -> navController.navigate(Routes.onlineWork(sourceId)) },
+                    onOpenBiliCollection = { ref ->
+                        navController.navigate(Routes.biliCollection(ref))
+                    })
             }
             composable(
                 route = Routes.OnlineWork,
@@ -523,6 +538,7 @@ private fun PlayerApp(clipboardImport: ClipboardImportViewModel) {
                 val playingScope = this
                 NowPlayingScreen(
                     onBack = { navController.popBackStack() },
+                    onOpenCollection = { ref -> navController.navigate(Routes.biliCollection(ref)) { launchSingleTop = true } },
                     coverModifier = with(shared) {
                         Modifier.sharedElement(
                             rememberSharedContentState(key = "player-cover"),

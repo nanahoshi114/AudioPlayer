@@ -67,11 +67,29 @@ class BiliVideoViewModel(app: Application) : AndroidViewModel(app) {
         clear()
         graph.messages.value = if (added > 0) "已加入 $added 个下载" else "已有本地副本或下载任务"
     }
+    data class PendingDelete(val tracks: List<TrackEntity>, val subtitles: Int)
+    var pendingDelete by mutableStateOf<PendingDelete?>(null); private set
+
     fun deleteDownloads(items: List<TrackEntity> = chosen()) = action {
-        val result = graph.downloads.deleteDownloaded(items)
-        clear()
-        graph.messages.value = "已删除 ${result.deleted} 个已下载文件"
+        val subtitles = items.count { graph.subtitles.hasGenerated(it.id, it.localUri, it.remoteUrl) }
+        if (subtitles > 0) {
+            pendingDelete = PendingDelete(items, subtitles)
+        } else {
+            val result = graph.downloads.deleteDownloaded(items, deleteSubtitles = true)
+            clear()
+            graph.messages.value = "已删除 ${result.deleted} 个已下载文件"
+        }
     }
+    fun confirmDelete(deleteSubtitles: Boolean) {
+        val pending = pendingDelete ?: return
+        pendingDelete = null
+        action {
+            val result = graph.downloads.deleteDownloaded(pending.tracks, deleteSubtitles)
+            clear()
+            graph.messages.value = "已删除 ${result.deleted} 个已下载文件"
+        }
+    }
+    fun cancelDelete() { pendingDelete = null }
     fun addToPlaylist(id: Long) = action { graph.library.addTracksToPlaylist(id, chosen().map { it.id }); clear() }
     fun remove() { folder?.let { graph.player.removeFromLibrary(emptyList(), listOf(it.id)) } }
 }
@@ -140,4 +158,12 @@ fun BiliVideoScreen(folderId: Long, onBack: () -> Unit, viewModel: BiliVideoView
         text = { Text("移除整个视频及其分 P？已下载文件会保留。") },
         confirmButton = { TextButton(onClick = { removing = false; viewModel.remove() }) { Text("移除") } },
         dismissButton = { TextButton(onClick = { removing = false }) { Text("取消") } })
+    viewModel.pendingDelete?.let { pending ->
+        com.nanahoshi.audioplayer.ui.components.DeleteAudioDialog(
+            itemCount = pending.tracks.size,
+            subtitleCount = pending.subtitles,
+            onConfirm = viewModel::confirmDelete,
+            onCancel = viewModel::cancelDelete,
+        )
+    }
 }

@@ -14,6 +14,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.window.DialogProperties
 import com.nanahoshi.audioplayer.data.ClipboardImportState
+import com.nanahoshi.audioplayer.data.ClipboardSource
 import com.nanahoshi.audioplayer.ui.CoverImage
 import com.nanahoshi.audioplayer.ui.formatDuration
 
@@ -25,6 +26,7 @@ internal fun ClipboardImportDialog(
     onRetry: () -> Unit,
 ) {
     val preview = state.preview
+    val multiPartBili = preview?.target?.source == ClipboardSource.BILIBILI && preview.parts.size > 1
     AlertDialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(dismissOnBackPress = !state.saving, dismissOnClickOutside = !state.saving),
@@ -38,7 +40,7 @@ internal fun ClipboardImportDialog(
                     Text("${state.candidate.target.source.label} · ${state.candidate.target.id}", Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodySmall)
                 }
             }
-            if (preview?.alreadySaved == true) Text(if (preview.target.source == com.nanahoshi.audioplayer.data.ClipboardSource.BILIBILI) "已在音频库，可调整入库方式" else "已在音频库", Modifier.padding(top = 12.dp))
+            if (preview?.alreadySaved == true) Text(if (multiPartBili) "已在音频库，可调整入库方式" else "已在音频库", Modifier.padding(top = 12.dp))
             if (state.loading || state.saving) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 12.dp))
             if (state.saving) Text("正在导入…", Modifier.padding(top = 8.dp))
             state.error?.let { Text(it, Modifier.padding(top = 12.dp), color = MaterialTheme.colorScheme.error) }
@@ -46,7 +48,11 @@ internal fun ClipboardImportDialog(
         confirmButton = {
             if (preview == null && state.error != null) TextButton(onClick = onRetry, enabled = !state.loading) { Text("重试") }
             else TextButton(onClick = onConfirm, enabled = state.canImport) {
-                Text(if (preview?.target?.source == com.nanahoshi.audioplayer.data.ClipboardSource.BILIBILI) "选择入库方式" else if (preview?.alreadySaved == true) "已在音频库" else "导入")
+                Text(when {
+                    multiPartBili -> "选择入库方式"
+                    preview?.alreadySaved == true && preview.target.source != ClipboardSource.BILIBILI -> "已在音频库"
+                    else -> "导入"
+                })
             }
         },
         dismissButton = { TextButton(onClick = onDismiss, enabled = !state.saving) { Text("取消") } },
