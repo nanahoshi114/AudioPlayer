@@ -19,7 +19,7 @@ fun BiliImportDialog(requests: BiliImportRequests) {
     val prompt = current ?: return
     AlertDialog(
         onDismissRequest = { requests.cancel(prompt.id) },
-        title = { Text(if (prompt.confirming) "确认转换入库方式" else "选择入库方式") },
+        title = { Text(if (prompt.confirming) "更改导入方式？" else "选择导入方式") },
         text = {
             LazyColumn(Modifier.heightIn(max = 460.dp)) {
                 prompt.options.forEachIndexed { index, option ->
@@ -28,8 +28,8 @@ fun BiliImportDialog(requests: BiliImportRequests) {
                             modifier = Modifier.padding(vertical = 8.dp))
                         if (prompt.confirming) {
                             if (option.converts) Text(if (option.mode == BiliImportMode.GROUPED)
-                                "将这个视频已有的分 P 归为一个视频项，保留下载、字幕和播放列表关联。"
-                            else "原组内所有已入库分 P 都会保留为独立项，并放回原分组的父目录。勾选只控制新增内容，不删除未勾选的已有分 P。")
+                                "会把这个视频已有的分 P 合并为一个视频项；下载、字幕和播放列表关联不变。"
+                            else "原分 P 会保留为独立项并放回原目录；勾选只影响本次新增内容。")
                         } else if (option.details.parts.size > 1 || option.existing == BiliImportMode.GROUPED) {
                             SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                                 SegmentedButton(selected = option.mode == BiliImportMode.SPLIT,
@@ -39,15 +39,23 @@ fun BiliImportDialog(requests: BiliImportRequests) {
                                     onClick = { requests.edit(prompt.id, index) { it.copy(mode = BiliImportMode.GROUPED) } },
                                     shape = SegmentedButtonDefaults.itemShape(1, 2)) { Text("统一导入") }
                             }
-                            if (option.mode == BiliImportMode.GROUPED) Text("全部 ${option.details.parts.size} P 合为一个视频项", Modifier.padding(top = 8.dp))
+                            if (option.mode == BiliImportMode.GROUPED) Text("全部 ${option.details.parts.size} 个分 P 合并为一个视频项", Modifier.padding(top = 8.dp))
                         }
                     }
                     if (!prompt.confirming && option.mode == BiliImportMode.SPLIT && option.details.parts.size > 1) {
                         item(key = "select-$index") {
+                            val all = option.details.parts.map { it.cid }.toSet()
                             TextButton(onClick = { requests.edit(prompt.id, index) {
-                                val all = it.details.parts.map { part -> part.cid }.toSet()
                                 it.copy(selected = if (it.selected == all) emptySet() else all)
-                            } }) { Text("已选 ${option.selected.size} P · 全选 / 取消全选") }
+                            } }) {
+                                Text(
+                                    if (option.selected.size == option.details.parts.size) {
+                                        "已选 ${option.selected.size} 个分 P · 取消全选"
+                                    } else {
+                                        "已选 ${option.selected.size} 个分 P · 全选"
+                                    },
+                                )
+                            }
                         }
                         option.details.parts.forEach { part ->
                             item(key = "part-$index-${part.cid}") {
@@ -70,7 +78,7 @@ fun BiliImportDialog(requests: BiliImportRequests) {
             }
         },
         confirmButton = { TextButton(onClick = { requests.confirm(prompt.id) }, enabled = prompt.ready) {
-            Text(if (prompt.confirming) "确认转换并继续" else "继续")
+            Text(if (prompt.confirming) "确认更改并继续" else "按此方式导入")
         } },
         dismissButton = { TextButton(onClick = { requests.cancel(prompt.id) }) { Text("取消") } },
     )

@@ -37,7 +37,7 @@ internal class BiliPagedState<T, K>(private val scope: CoroutineScope, private v
                 items = merged.items; hasMore = merged.hasMore; nextPage = page + 1
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (failure: Exception) {
-                if (token == generation) error = if (failure is BilibiliException) failure.message else "B站读取失败，请检查网络后重试"
+                if (token == generation) error = if (failure is BilibiliException) failure.message else "B 站读取失败，请检查网络后重试"
             } finally { if (token == generation) loading = false }
         }
     }

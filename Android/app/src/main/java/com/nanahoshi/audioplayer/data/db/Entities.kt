@@ -258,6 +258,7 @@ data class PlaylistTrack(
     val cid: Long?,
     val page: Int?,
     val youtubeVideoId: String? = null,
+    val folderId: Long? = null,
 ) {
     fun toTrack() = TrackEntity(
         id = trackId,

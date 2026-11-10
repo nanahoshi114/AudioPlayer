@@ -7,11 +7,13 @@ import com.nanahoshi.audioplayer.graph
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.shareIn
 
 class PlaylistViewModel(app: Application) : AndroidViewModel(app) {
     private val graph = app.graph()
     val playlists = graph.db.playlists().observeAll()
+    internal val coverFolders = graph.library.observeAllFolders().map { folders -> folders.associateBy { it.id } }
     val collectionSources = graph.biliCollections.sources.shareIn(viewModelScope, SharingStarted.WhileSubscribed(5000), replay = 1)
     fun collection(row: com.nanahoshi.audioplayer.data.db.BiliCollectionEntity) = graph.biliCollections.decode(row)
     fun playlist(id: Long) = graph.library.observePlaylist(id)

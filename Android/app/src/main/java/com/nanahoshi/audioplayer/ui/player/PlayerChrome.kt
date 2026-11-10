@@ -259,7 +259,7 @@ fun NowPlayingScreen(
     if (fullTitle) {
         AlertDialog(
             onDismissRequest = { fullTitle = false },
-            title = { Text("音频信息") },
+            title = { Text("标题与作者") },
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
                     Text(state.title, style = MaterialTheme.typography.titleMedium)
@@ -308,7 +308,7 @@ fun NowPlayingScreen(
             Column(Modifier.fillMaxSize()) {
                 AppTopBar(title = "正在播放", onBack = onBack)
                 EmptyState(
-                    title = "当前没有在播的音频",
+                    title = "当前没有正在播放的音频",
                     message = "从音频库点一首，或播放一个列表。",
                     modifier = Modifier.fillMaxSize(),
                 )
@@ -380,7 +380,7 @@ fun NowPlayingScreen(
                                 cues.isNotEmpty() -> Unit
                                 viewModel.generatedEmpty -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                     Text(
-                                        "没有听出人声",
+                                        "未检测到人声",
                                         textAlign = TextAlign.Center,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
@@ -462,7 +462,7 @@ fun NowPlayingScreen(
                         if (viewModel.offerBiliCache) {
                             SecondaryAction(
                                 icon = { Icon(Icons.Default.Download, contentDescription = null) },
-                                label = "缓存音轨",
+                                label = "下载音轨",
                                 onClick = viewModel::cacheCurrent,
                             )
                         }
@@ -548,7 +548,7 @@ fun NowPlayingScreen(
                                 },
                                 trailingContent = {
                                     IconButton(onClick = { viewModel.client.remove(index, item.queueItemId) }) {
-                                        Icon(Icons.Default.Delete, contentDescription = "从当前列表移除")
+                                        Icon(Icons.Default.Delete, contentDescription = "从队列移除")
                                     }
                                 },
                                 modifier = Modifier.clickable { viewModel.client.playQueueItem(item.queueItemId) },
@@ -816,7 +816,7 @@ private fun SleepTimerDialog(onDismiss: () -> Unit, onStart: (Long) -> Unit) {
                 val secondValue = (seconds.toLongOrNull() ?: 0L).coerceIn(0L, 59L)
                 val totalMs = minuteValue * 60_000L + secondValue * 1000L
                 if (totalMs > 0L) onStart(totalMs)
-            }) { Text("开始") }
+            }) { Text("开始倒计时") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
@@ -827,21 +827,21 @@ private fun WhisperPromptDialog(viewModel: PlayerViewModel) {
     when (viewModel.whisperPrompt) {
         WhisperPrompt.NeedSettings -> AlertDialog(
             onDismissRequest = viewModel::dismissWhisperPrompt,
-            text = { Text("请先在「设置 → 听写和翻译」里保存听写设置。线上模型只需 API Key；自部署的模型还要填写地址和口令") },
+            text = { Text("请先在「设置 → 听写和翻译」保存听写设置（线上模型填 API Key，自部署模型填地址和 API Key）。") },
             confirmButton = {
                 TextButton(onClick = viewModel::dismissWhisperPrompt) { Text("知道了") }
             },
         )
         WhisperPrompt.NeedModelDownload -> AlertDialog(
             onDismissRequest = viewModel::dismissWhisperPrompt,
-            text = { Text("SenseVoiceSmall 模型还没有下载。请到「设置 → 听写和翻译」先下载模型") },
+            text = { Text("请先在「设置 → 听写和翻译」下载 SenseVoiceSmall 模型。") },
             confirmButton = {
                 TextButton(onClick = viewModel::dismissWhisperPrompt) { Text("知道了") }
             },
         )
         WhisperPrompt.NeedDownload -> AlertDialog(
             onDismissRequest = viewModel::dismissWhisperPrompt,
-            text = { Text("需要下载文件，是否下载") },
+            text = { Text("生成字幕需要先下载这首歌的音频，是否下载？") },
             confirmButton = {
                 TextButton(onClick = viewModel::confirmWhisperDownload) { Text("下载") }
             },
@@ -854,7 +854,7 @@ private fun WhisperPromptDialog(viewModel: PlayerViewModel) {
     if (viewModel.translatePrompt) {
         AlertDialog(
             onDismissRequest = viewModel::dismissTranslatePrompt,
-            text = { Text("请先在「设置 → 听写和翻译」里选择翻译平台并填写口令") },
+            text = { Text("请先在「设置 → 听写和翻译」选择翻译平台并填写 API Key。") },
             confirmButton = {
                 TextButton(onClick = viewModel::dismissTranslatePrompt) { Text("知道了") }
             },

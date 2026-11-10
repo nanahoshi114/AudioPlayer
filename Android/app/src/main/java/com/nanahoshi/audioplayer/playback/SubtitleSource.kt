@@ -229,7 +229,7 @@ class SubtitleSource(
     private suspend fun bilibiliCues(track: TrackEntity): TrackSubtitles {
         val bvid = track.bvid ?: return TrackSubtitles(emptyList())
         val cid = track.cid ?: return TrackSubtitles(emptyList())
-        // 缓存音轨时顺带存下的字幕，播放时优先读本地，不再依赖登录和网络。
+        // 下载音轨时顺带存下的字幕，播放时优先读本地，不再依赖登录和网络。
         readBiliSubtitle(context.filesDir, bvid, cid)?.let { document ->
             val cues = parseSubtitleDocument(document)
             if (cues.isNotEmpty()) return TrackSubtitles(cues, language = biliSubtitleLanguage(document))
@@ -243,8 +243,8 @@ class SubtitleSource(
                 }
                 TrackSubtitles(cues, language = result.language)
             }
-            BiliSubtitle.NeedsLogin -> TrackSubtitles(emptyList(), "B站字幕需要登录后显示，可在「我的」重新登录")
-            BiliSubtitle.Failed -> TrackSubtitles(emptyList(), "B站字幕读取失败，可稍后再试")
+            BiliSubtitle.NeedsLogin -> TrackSubtitles(emptyList(), "B 站字幕需要登录后显示，可在「我的」重新登录")
+            BiliSubtitle.Failed -> TrackSubtitles(emptyList(), "B 站字幕读取失败，可稍后再试")
             BiliSubtitle.Missing -> TrackSubtitles(emptyList())
         }
     }

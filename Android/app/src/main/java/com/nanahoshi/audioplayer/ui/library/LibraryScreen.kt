@@ -136,6 +136,10 @@ fun LibraryScreen(
     val selectedTracks by viewModel.selectedTrackIds.collectAsStateWithLifecycle()
     val selectedFolders by viewModel.selectedFolderIds.collectAsStateWithLifecycle()
     val selecting = selectedTracks.isNotEmpty() || selectedFolders.isNotEmpty()
+    val selectedLocalRemoval by viewModel.selectedLocalRemoval.collectAsStateWithLifecycle()
+    val workFileSource by viewModel.workFileSource.collectAsStateWithLifecycle()
+    val removalSelection = LibraryViewModel.LocalRemovalSelection(selectedTracks, selectedFolders, workFileSource)
+    val removalTargets = selectedLocalRemoval?.takeIf { it.first == removalSelection }?.second
     val context = LocalContext.current
     var menuOpen by remember { mutableStateOf(false) }
     var pickingPlaylist by remember { mutableStateOf(false) }
@@ -171,8 +175,8 @@ fun LibraryScreen(
                     onClose = viewModel::clearSelection,
                     actions = buildList {
                         if (!selectsWork) {
-                            add(SelectionAction("下一个播放", Icons.Default.SkipNext, viewModel::playNextSelection))
-                            add(SelectionAction("加到末尾", Icons.AutoMirrored.Filled.PlaylistAdd, viewModel::appendSelection))
+                            add(SelectionAction("接下来播放", Icons.Default.SkipNext, viewModel::playNextSelection))
+                            add(SelectionAction("加入播放队列", Icons.AutoMirrored.Filled.PlaylistAdd, viewModel::appendSelection))
                             add(SelectionAction("下载", Icons.Default.Download, viewModel::downloadSelection))
                             add(
                                 SelectionAction("加入播放列表", Icons.AutoMirrored.Filled.QueueMusic, {
@@ -180,7 +184,11 @@ fun LibraryScreen(
                                 }),
                             )
                         }
-                        add(SelectionAction("删除已下载的文件", Icons.Default.Delete, viewModel::deleteDownloadedSelection, destructive = true))
+                        if (removalTargets != null) {
+                            add(SelectionAction(removalTargets.label, Icons.Default.Delete, {
+                                viewModel.deleteDownloadedSelection(removalSelection, removalTargets)
+                            }, destructive = true))
+                        }
                         if (canRemoveSelection) add(SelectionAction("移除", Icons.Default.Delete, { confirmDelete = true }, destructive = true))
                     },
                 )
@@ -215,7 +223,7 @@ fun LibraryScreen(
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = viewModel::updateSearch,
-                placeholder = { Text(if (folderId == null) "搜索名称或 RJ 号" else "搜索当前目录及子目录") },
+                placeholder = { Text(if (folderId == null) "搜索名称、RJ 号或文件名" else "搜索当前目录及子目录的文件名") },
                 trailingIcon = if (folderId != null) ({ LibrarySortMenu(sort) { if (sort != it) viewModel.toggleSort() } }) else null,
                 leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
                 singleLine = true,
@@ -232,7 +240,7 @@ fun LibraryScreen(
                 ) {
                     listOf(
                         LibrarySourceFilter.ALL to "全部",
-                        LibrarySourceFilter.BILIBILI to "B站",
+                        LibrarySourceFilter.BILIBILI to "B 站",
                         LibrarySourceFilter.YOUTUBE to "YouTube",
                         LibrarySourceFilter.ASMR to "asmr.one",
                         LibrarySourceFilter.LOCAL to "本地",
@@ -259,7 +267,7 @@ fun LibraryScreen(
                     !listing.browsing -> EmptyState(title = "没有符合的内容")
                     currentFolder == null -> EmptyState(
                         title = "还没有音频",
-                        message = "点右下角导入本地文件、文件夹、BV 号或 RJ 号。",
+                        message = "点右下角导入本地文件或文件夹；也可以复制 BV 号、RJ 号或视频链接，用剪贴板导入。",
                     )
                     else -> EmptyState(title = "这个文件夹是空的")
                 }
@@ -394,7 +402,7 @@ fun LibraryScreen(
     pendingAsmr?.let { preview ->
         AlertDialog(
             onDismissRequest = viewModel::dismissAsmrPreview,
-            title = { Text("asmr.one查询结果") },
+            title = { Text("asmr.one 查询结果") },
             text = {
                 Column {
                     CoverImage(preview.coverUrl)
@@ -402,7 +410,7 @@ fun LibraryScreen(
                     Text("要加入音频库吗？", modifier = Modifier.padding(top = 8.dp))
                 }
             },
-            confirmButton = { TextButton(onClick = viewModel::confirmAsmrPreview) { Text("确认") } },
+            confirmButton = { TextButton(onClick = viewModel::confirmAsmrPreview) { Text("加入音频库") } },
             dismissButton = { TextButton(onClick = viewModel::dismissAsmrPreview) { Text("取消") } },
         )
     }
@@ -410,10 +418,10 @@ fun LibraryScreen(
     recognizeFolder?.let { folderIdToRecognize ->
         AlertDialog(
             onDismissRequest = { recognizeFolder = null },
-            title = { Text("识别为作品") },
+            title = { Text("关联为作品") },
             text = {
                 Column {
-                    Text("已购买的作品先对照 DLsite 的文件。对不上、没买过，或 DLsite 连不上，再对照 asmr.one。可以少一些文件或文件夹，但不能多出作品里没有的内容。")
+                    Text("已购买的作品会先对照 DLsite 的文件；对不上、没买过或 DLsite 连不上，再对照 asmr.one。可以少文件，但不能包含作品里没有的内容。")
                     OutlinedTextField(
                         value = recognizeCode,
                         onValueChange = { recognizeCode = it },
@@ -430,7 +438,7 @@ fun LibraryScreen(
                         viewModel.recognizeFolder(folderIdToRecognize, recognizeCode)
                     },
                     enabled = recognizeCode.isNotBlank(),
-                ) { Text("确定") }
+                ) { Text("确认关联") }
             },
             dismissButton = { TextButton(onClick = { recognizeFolder = null }) { Text("取消") } },
         )
@@ -469,7 +477,7 @@ fun LibraryScreen(
 
     if (confirmDelete) {
         ConfirmRemoveDialog(
-            message = "移除选中的内容？手机上的原文件会保留。",
+            message = "移除选中的内容？已下载文件和手机上的原文件都会保留。",
             onConfirm = {
                 confirmDelete = false
                 viewModel.deleteSelection()
@@ -480,7 +488,7 @@ fun LibraryScreen(
 
     confirmFolderDelete?.let { id ->
         ConfirmRemoveDialog(
-            message = "这个文件夹和里面的内容会从音频库移除。手机上的原文件会保留。",
+            message = "这个文件夹和里面的内容会从音频库移除。已下载文件和手机上的原文件都会保留。",
             onConfirm = {
                 confirmFolderDelete = null
                 viewModel.deleteFolder(id)
@@ -491,7 +499,8 @@ fun LibraryScreen(
 
     pendingAudioDelete?.let { pending ->
         DeleteAudioDialog(
-            itemCount = pending.tracks.size,
+            itemCount = pending.targets.downloads.size,
+            associationCount = pending.targets.associations.size,
             subtitleCount = pending.subtitles,
             onConfirm = viewModel::confirmAudioDelete,
             onCancel = viewModel::cancelAudioDelete,
@@ -525,11 +534,11 @@ private fun LibrarySortMenu(sort: LibrarySort, onChoose: (LibrarySort) -> Unit) 
     var expanded by remember { mutableStateOf(false) }
     Box {
         IconButton(onClick = { expanded = true }) {
-            Icon(Icons.AutoMirrored.Filled.Sort, contentDescription = if (sort == LibrarySort.NAME) "按名称" else "按时间")
+            Icon(Icons.AutoMirrored.Filled.Sort, contentDescription = if (sort == LibrarySort.NAME) "按名称" else "按加入时间")
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             DropdownMenuItem(text = { Text("按名称") }, onClick = { expanded = false; onChoose(LibrarySort.NAME) })
-            DropdownMenuItem(text = { Text("按时间") }, onClick = { expanded = false; onChoose(LibrarySort.ADDED) })
+            DropdownMenuItem(text = { Text("按加入时间") }, onClick = { expanded = false; onChoose(LibrarySort.ADDED) })
         }
     }
 }

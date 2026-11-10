@@ -93,7 +93,7 @@ fun AppearanceScreen(
                 Column {
                     AccentRow(
                         title = "跟随系统取色",
-                        summary = if (supportsSystemAccent) "使用系统壁纸生成的颜色" else "需要 Android 12 及以上，当前使用默认靛蓝",
+                        summary = if (supportsSystemAccent) "使用系统壁纸生成的颜色" else "当前系统不支持，暂用默认靛蓝（需要 Android 12 及以上）",
                         selected = appearance.accentMode == AccentMode.SYSTEM,
                         enabled = supportsSystemAccent,
                         onClick = viewModel::useSystemAccent,

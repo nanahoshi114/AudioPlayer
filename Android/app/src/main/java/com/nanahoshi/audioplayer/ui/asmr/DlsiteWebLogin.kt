@@ -114,7 +114,7 @@ internal fun DlsiteWebLoginDialog(
                                 localError = null
                                 val cookie = readDlsiteWebCookies()
                                 if (cookie.isBlank()) {
-                                    localError = "还没有读到登录信息，请先在页面里完成登录"
+                                    localError = "还没有读取到登录信息，请先在页面里完成登录"
                                 } else {
                                     onComplete(cookie)
                                 }

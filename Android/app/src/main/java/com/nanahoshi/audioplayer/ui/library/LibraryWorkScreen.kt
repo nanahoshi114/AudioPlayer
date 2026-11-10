@@ -34,7 +34,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -61,14 +60,14 @@ fun LibraryWorkScreen(
     viewModel: LibraryViewModel = viewModel(),
 ) {
     LaunchedEffect(folderId) { viewModel.openWork(folderId) }
-    val listing by viewModel.listing.collectAsStateWithLifecycle(LibraryListing(emptyList(), emptyList()))
-    val folders = listing.folders
-    val entries = listing.entries
-    val currentFolder by viewModel.currentFolder.collectAsStateWithLifecycle(null)
-    val currentId by viewModel.currentFolderId.collectAsStateWithLifecycle()
-    val root by viewModel.workRoot.collectAsStateWithLifecycle(null)
-    val rootId by viewModel.workRootId.collectAsStateWithLifecycle()
-    val workFileSource by viewModel.workFileSource.collectAsStateWithLifecycle()
+    val location by viewModel.workLocation.collectAsStateWithLifecycle()
+    val loaded by viewModel.workListing.collectAsStateWithLifecycle()
+    val workMissing by viewModel.workMissing.collectAsStateWithLifecycle()
+    val request = location?.request
+    val listing = loaded?.takeIf { it.request === request }?.listing
+    val folders = listing?.folders.orEmpty()
+    val entries = listing?.entries.orEmpty()
+    val workFileSource = request?.source
     val workSources by viewModel.workSources.collectAsStateWithLifecycle()
     val busy by viewModel.busy.collectAsStateWithLifecycle()
     val cachePrompt by viewModel.cachePrompt.collectAsStateWithLifecycle()
@@ -77,38 +76,30 @@ fun LibraryWorkScreen(
     val selectedTracks by viewModel.selectedTrackIds.collectAsStateWithLifecycle()
     val selectedFolders by viewModel.selectedFolderIds.collectAsStateWithLifecycle()
     val selecting = selectedTracks.isNotEmpty() || selectedFolders.isNotEmpty()
-    var trail by rememberSaveable(stateSaver = LibraryTrailSaver) { mutableStateOf(listOf<LibraryCrumb>()) }
+    val selectedLocalRemoval by viewModel.selectedLocalRemoval.collectAsStateWithLifecycle()
+    val removalSelection = LibraryViewModel.LocalRemovalSelection(selectedTracks, selectedFolders, workFileSource)
+    val removalTargets = selectedLocalRemoval?.takeIf { it.first == removalSelection }?.second
     var menu by remember { mutableStateOf(false) }
     var pickingPlaylist by remember { mutableStateOf(false) }
     var confirmRemoveWork by remember { mutableStateOf(false) }
-    val climb = rememberLibraryClimb(
-        currentFolderId = { viewModel.currentFolderId.value },
-        up = viewModel::up,
-        floorId = rootId,
-    )
-    val listState = viewModel.listState(currentId, true)
-    LaunchedEffect(currentFolder?.id, currentFolder?.name) {
-        trail = libraryTrail(trail, currentFolder)
-    }
+    val listState = viewModel.listState(request?.folderId, true)
+    val headerFolder = location?.path?.firstOrNull()
     val context = LocalContext.current
     val openTree = rememberLauncherForActivityResult(OpenPersistableTree()) { uri ->
         if (uri != null) {
             persistRead(context, uri)
-            viewModel.recognizeIntoWork(rootId ?: folderId, uri)
+            viewModel.recognizeIntoWork(folderId, uri)
         }
     }
     fun leaveOrUp() {
         if (selecting) {
             viewModel.clearSelection()
-        } else if (rootId != null && currentId != null && currentId != rootId) {
-            viewModel.up()
-        } else {
+        } else if (!viewModel.upInWork()) {
             onBack()
         }
     }
     BackHandler { leaveOrUp() }
 
-    val headerFolder = root ?: currentFolder
     val facts = headerFolder?.let { folder ->
         WorkFacts.fromJson(folder.workMeta) ?: WorkFacts(
             title = folder.name,
@@ -126,14 +117,18 @@ fun LibraryWorkScreen(
             SelectionTopBar(
                 count = selectedTracks.size + selectedFolders.size,
                 onClose = viewModel::clearSelection,
-                actions = listOf(
-                    SelectionAction("下一个播放", Icons.Default.SkipNext, viewModel::playNextSelection),
-                    SelectionAction("加到末尾", Icons.AutoMirrored.Filled.PlaylistAdd, viewModel::appendSelection),
+                actions = listOfNotNull(
+                    SelectionAction("接下来播放", Icons.Default.SkipNext, viewModel::playNextSelection),
+                    SelectionAction("加入播放队列", Icons.AutoMirrored.Filled.PlaylistAdd, viewModel::appendSelection),
                     SelectionAction("下载", Icons.Default.Download, viewModel::downloadSelection),
                     SelectionAction("加入播放列表", Icons.AutoMirrored.Filled.QueueMusic, {
                         if (playlists.isEmpty()) viewModel.note("请先新建播放列表") else pickingPlaylist = true
                     }),
-                    SelectionAction("删除已下载的文件", Icons.Default.Delete, viewModel::deleteDownloadedSelection, destructive = true),
+                    removalTargets?.let { targets ->
+                        SelectionAction(targets.label, Icons.Default.Delete, {
+                            viewModel.deleteDownloadedSelection(removalSelection, targets)
+                        }, destructive = true)
+                    },
                 ),
             )
         } else {
@@ -165,12 +160,15 @@ fun LibraryWorkScreen(
                 },
             )
         }
-        if (headerFolder == null || facts == null) {
+        if (workMissing) {
+            EmptyState("没有找到这部作品", modifier = Modifier.fillMaxSize(), actionLabel = "返回", onAction = onBack)
+        } else if (headerFolder == null || facts == null) {
             LoadingState("正在读取作品…")
         } else {
             com.nanahoshi.audioplayer.ui.components.WorkFileBrowser(
                 state = listState,
                 modifier = Modifier.weight(1f).fillMaxWidth(),
+                loading = listing == null || (busy && folders.isEmpty() && entries.isEmpty()),
                 header = {
                     WorkHeader(facts = facts, coverUrl = headerFolder.coverUri)
                     if (headerFolder.asmrWorkId != null) {
@@ -181,10 +179,10 @@ fun LibraryWorkScreen(
                         ) {
                 FilledTonalButton(
                     onClick = { viewModel.cacheFolder(headerFolder.id) },
-                ) { Text("缓存到本地") }
+                ) { Text("下载到本地") }
                 OutlinedButton(
                     onClick = { openTree.launch(null) },
-                ) { Text("识别本地文件夹") }
+                ) { Text("关联本地文件夹") }
             }
         }
     },
@@ -198,7 +196,7 @@ fun LibraryWorkScreen(
                     selected = workFileSource == TrackSource.DLSITE,
                     onClick = { viewModel.useWorkSource(TrackSource.DLSITE) },
                     shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-                ) { Text("DLSite Play") }
+                ) { Text("DLsite Play") }
                 SegmentedButton(
                     selected = workFileSource == TrackSource.ASMR,
                     onClick = { viewModel.useWorkSource(TrackSource.ASMR) },
@@ -206,22 +204,19 @@ fun LibraryWorkScreen(
                 ) { Text("asmr.one") }
             }
         }
-        val subfolderTrail = trail.drop(1)
+        val subfolderTrail = location?.path.orEmpty().drop(1).map { LibraryCrumb(it.id, it.name) }
         LibraryBreadcrumb(
             trail = subfolderTrail,
             rootLabel = "根目录",
-            onRoot = { climb(subfolderTrail.size) },
-            onCrumb = { index -> climb(subfolderTrail.lastIndex - index) },
+            onRoot = { viewModel.goToWorkAncestor(headerFolder.id) },
+            onCrumb = { index -> viewModel.goToWorkAncestor(subfolderTrail[index].id) },
+            revealCurrent = true,
         )
     },
 ) {
                 if (folders.isEmpty() && entries.isEmpty()) {
                     item(key = "empty") {
-                        if (busy) {
-                            LoadingState("正在读取文件…")
-                        } else {
-                            EmptyState(title = "这个文件夹是空的")
-                        }
+                        EmptyState(title = "这个文件夹是空的")
                     }
                 }
                 items(folders, key = { "folder-${it.id}" }) { folder ->
@@ -231,7 +226,7 @@ fun LibraryWorkScreen(
                         selected = folder.id in selectedFolders,
                         selecting = selecting,
                         onClick = {
-                            if (selecting) viewModel.toggleFolder(folder.id) else viewModel.openFolder(folder)
+                            if (selecting) viewModel.toggleFolder(folder.id) else viewModel.openWorkFolder(request, folder)
                         },
                         onLongClick = { viewModel.beginSelection(folderId = folder.id) },
                         onCache = null,
@@ -307,7 +302,7 @@ fun LibraryWorkScreen(
     }
     if (confirmRemoveWork) {
         ConfirmRemoveDialog(
-            message = "这个作品和里面的内容会从音频库移除。手机上的原文件会保留。",
+            message = "这个作品和里面的内容会从音频库移除。已下载文件和手机上的原文件都会保留。",
             onConfirm = {
                 confirmRemoveWork = false
                 viewModel.deleteFolder(headerFolder?.id ?: folderId)
@@ -318,7 +313,8 @@ fun LibraryWorkScreen(
     }
     pendingAudioDelete?.let { pending ->
         com.nanahoshi.audioplayer.ui.components.DeleteAudioDialog(
-            itemCount = pending.tracks.size,
+            itemCount = pending.targets.downloads.size,
+            associationCount = pending.targets.associations.size,
             subtitleCount = pending.subtitles,
             onConfirm = viewModel::confirmAudioDelete,
             onCancel = viewModel::cancelAudioDelete,

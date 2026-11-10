@@ -74,11 +74,11 @@ internal fun biliDuration(raw: String): Long {
 }
 
 internal fun biliSearchError(code: Int): String = when (code) {
-    -101, -111, 401 -> "B站登录信息无效，请在「我的」重新登录"
-    -352, -412, 412, 429 -> "B站暂时限制了访问，请稍后重试或更换网络"
-    -403 -> "B站请求验证失败，请重试"
+    -101, -111, 401 -> "B 站登录信息无效，请在「我的」重新登录"
+    -352, -412, 412, 429 -> "B 站暂时限制了访问，请稍后重试或更换网络"
+    -403 -> "B 站请求验证失败，请重试"
     -404, 404 -> "没有找到这个视频或 UP 主"
-    else -> "B站读取失败（$code），请稍后重试"
+    else -> "B 站读取失败，请稍后重试"
 }
 
 /** 只处理可脱敏测试的 JSON；请求和凭证由现有客户端提供。 */
@@ -90,11 +90,11 @@ class BiliSearchApi(
             try {
                 val raw = signedGet(path, params, referer, attempt == 1)
                 val root = try { Json.parseToJsonElement(raw) }
-                catch (_: Exception) { throw BilibiliException(0, "B站返回的数据无法读取") }
-                val code = root.number("code")?.toInt() ?: throw BilibiliException(0, "B站返回的数据无法读取")
+                catch (_: Exception) { throw BilibiliException(0, "B 站返回的数据无法读取，请重试") }
+                val code = root.number("code")?.toInt() ?: throw BilibiliException(0, "B 站返回的数据无法读取，请重试")
                 if (code != 0) throw BilibiliException(code, biliSearchError(code))
                 return root.field("data").takeUnless { it == JsonNull }
-                    ?: throw BilibiliException(0, "B站没有返回搜索数据")
+                    ?: throw BilibiliException(0, "B 站没有返回搜索数据，请重试")
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (error: BilibiliException) {
                 if (error.code != -403 || attempt == 1) throw error
@@ -125,7 +125,7 @@ class BiliSearchApi(
         require(mid > 0 && page > 0)
         val data = data("/x/space/wbi/arc/search", mapOf("mid" to "$mid", "pn" to "$page", "ps" to "30", "order" to "pubdate"), "https://space.bilibili.com/$mid/upload/video")
         val list = data.field("list").field("vlist") as? JsonArray
-            ?: throw BilibiliException(0, "B站没有返回投稿列表，请重试")
+            ?: throw BilibiliException(0, "B 站没有返回投稿列表，请重试")
         val items = list.mapNotNull { video(it, mid) }.distinctBy { it.bvid }
         val count = data.field("page").number("count") ?: 0
         return BiliPage(items, page * 30L < count)
@@ -143,7 +143,7 @@ class BiliSearchApi(
     }
     private fun results(data: JsonElement): List<JsonElement> = when (val result = data.field("result")) {
         is JsonArray -> result
-        else -> if (data.number("numResults") == 0L) emptyList() else throw BilibiliException(0, "B站没有返回搜索列表，请重试")
+        else -> if (data.number("numResults") == 0L) emptyList() else throw BilibiliException(0, "B 站没有返回搜索列表，请重试")
     }
     private fun video(item: JsonElement, owner: Long = 0): BiliVideoHit? {
         val bvid = item.text("bvid").takeIf { Regex("BV[0-9A-Za-z]{10}").matches(it) } ?: return null

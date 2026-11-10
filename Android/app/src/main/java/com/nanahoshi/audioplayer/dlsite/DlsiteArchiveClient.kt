@@ -62,10 +62,10 @@ class DlsiteArchiveClient internal constructor(
                 }
                 val id = workno.trim().uppercase()
                 if (!Regex("(?:RJ|BJ|VJ)[0-9]+").matches(id)) {
-                    throw DlsiteArchiveException("无效的 DLsite 作品编号")
+                    throw DlsiteArchiveException("DLsite 作品编号不正确")
                 }
                 if ((!stagingDir.isDirectory && !stagingDir.mkdirs()) || stagingDir.isFile) {
-                    throw DlsiteArchiveException("无法创建压缩包下载目录")
+                    throw DlsiteArchiveException("无法创建下载目录，请检查存储空间")
                 }
                 val jar = ArchiveCookies(originalSession)
                 val client = transport.newBuilder().followRedirects(false)
@@ -84,7 +84,7 @@ class DlsiteArchiveClient internal constructor(
                         access.resolve(root, candidate, consume = { part ->
                             foundPackage = true
                             if (!names.add(part.name)) {
-                                throw DlsiteArchiveException("DLsite 返回了重复的分卷文件名")
+                                throw DlsiteArchiveException("DLsite 返回了重复的文件，请重试")
                             }
                             val file = access.downloadPart(part, stagingDir) { bytes ->
                                 onProgress(complete + bytes, null)
@@ -102,7 +102,7 @@ class DlsiteArchiveClient internal constructor(
                     }
                 }
                 if (!resolved || files.isEmpty()) {
-                    throw DlsiteArchiveException("此作品没有可下载的原始压缩包")
+                    throw DlsiteArchiveException("此作品没有可下载的完整原始包")
                 }
                 onProgress(complete, complete)
                 files
@@ -113,7 +113,7 @@ class DlsiteArchiveClient internal constructor(
             throw error
         } catch (_: Exception) {
             currentCoroutineContext().ensureActive()
-            throw DlsiteArchiveException("DLsite 原始压缩包下载失败，请检查网络后重试")
+            throw DlsiteArchiveException("DLsite 完整原始包下载失败，请检查网络后重试")
         } finally {
             cancellation.cancel()
         }
@@ -151,7 +151,7 @@ class DlsiteArchiveClient internal constructor(
                             when (response.code) {
                                 401 -> throw DlsiteArchiveException("登录已失效，请重新登录")
                                 403 -> throw DlsiteArchiveException("DLsite 拒绝下载，请检查登录或稍后重试")
-                                404 -> throw DlsiteArchiveException("此作品没有可下载的原始压缩包", unavailable = true)
+                                404 -> throw DlsiteArchiveException("此作品没有可下载的完整原始包", unavailable = true)
                             }
                             if (!response.isSuccessful) {
                                 val stage = when {
@@ -192,12 +192,12 @@ class DlsiteArchiveClient internal constructor(
                     // the Play/store redirect chain again for probing file metadata.
                     return@request Resolution(part = Package(response.request.url, name, size))
                 }
-                val body = response.body ?: throw DlsiteArchiveException("DLsite 没有返回下载内容")
+                val body = response.body ?: throw DlsiteArchiveException("DLsite 没有返回下载内容，请重试")
                 val bytes = body.byteStream().use { it.readBounded(PAGE_LIMIT, checked) }
                 val html = bytes.toString(Charsets.UTF_8)
                 val links = parseDownloadLinks(response.request.url, html, workno)
                 if (links.isEmpty()) throw DlsiteArchiveException(
-                    if ("filelist" in response.request.url.pathSegments) "DLsite 返回了手机版文件列表，未提供原始压缩包地址"
+                    if ("filelist" in response.request.url.pathSegments) "DLsite 没有提供完整原始包地址，请稍后重试"
                     else downloadPageError(html),
                 )
                 Resolution(links = links)
@@ -225,15 +225,15 @@ class DlsiteArchiveClient internal constructor(
             }
             // Only this job's download staging files are touched. Unmarked unknown-length targets
             // cannot be trusted as complete (e.g. a process death between rename and marker write).
-            if (target.exists() && !target.delete()) throw DlsiteArchiveException("无法重置压缩包暂存文件")
-            if (completeMarker.exists() && !completeMarker.delete()) throw DlsiteArchiveException("无法重置压缩包完成标记")
+            if (target.exists() && !target.delete()) throw DlsiteArchiveException("无法继续上次的下载，请重试")
+            if (completeMarker.exists() && !completeMarker.delete()) throw DlsiteArchiveException("无法继续上次的下载，请重试")
             var failure: IOException? = null
             repeat(3) {
                 checked()
                 try {
                     var offset = partial.takeIf { it.isFile }?.length() ?: 0L
                     if (part.size != null && offset > part.size) {
-                        if (!partial.delete()) throw DlsiteArchiveException("无法重置压缩包暂存文件")
+                        if (!partial.delete()) throw DlsiteArchiveException("无法继续上次的下载，请重试")
                         offset = 0
                     }
                     if (part.size == null || offset != part.size) {
@@ -241,16 +241,16 @@ class DlsiteArchiveClient internal constructor(
                             if (isHtml(response)) throw DlsiteArchiveException("DLsite 返回了网页，请重新登录后重试")
                             val responseName = archiveName(response)
                             if (responseName != null && responseName != part.name) {
-                                throw DlsiteArchiveException("DLsite 返回的分卷文件不符，请重试")
+                                throw DlsiteArchiveException("DLsite 返回的文件不完整，请重试")
                             }
                             val length: Long?
                             val append: Boolean
                             if (response.code == 206) {
                                 val range = parseContentRange(response.header("Content-Range"))
-                                    ?: throw DlsiteArchiveException("DLsite 下载范围无效")
-                                if (range.first != offset) throw DlsiteArchiveException("DLsite 续传起点与暂存文件不符")
+                                    ?: throw DlsiteArchiveException("下载断点无效，请重试")
+                                if (range.first != offset) throw DlsiteArchiveException("续传位置不一致，请重试")
                                 if (part.size != null && range.third != part.size) {
-                                    throw DlsiteArchiveException("DLsite 返回的压缩包大小已变化，请重试")
+                                    throw DlsiteArchiveException("压缩包在下载过程中发生变化，请重试")
                                 }
                                 length = range.third
                                 append = offset > 0
@@ -270,13 +270,13 @@ class DlsiteArchiveClient internal constructor(
                                         val count = input.read(buffer)
                                         if (count < 0) break
                                         if (first && offset == 0L && looksLikeHtml(buffer, count)) {
-                                            throw DlsiteArchiveException("DLsite 返回了网页，无法下载原始压缩包")
+                                            throw DlsiteArchiveException("DLsite 返回了网页，无法下载完整原始包")
                                         }
                                         first = false
                                         output.write(buffer, 0, count)
                                         offset += count
                                         if (length != null && offset > length) {
-                                            throw DlsiteArchiveException("DLsite 压缩包大小校验失败")
+                                            throw DlsiteArchiveException("压缩包校验失败，请重新下载")
                                         }
                                         progress(offset)
                                     }
@@ -288,7 +288,7 @@ class DlsiteArchiveClient internal constructor(
                         }
                     }
                     if (!partial.isFile || partial.length() == 0L) throw IOException("Empty archive")
-                    if (!partial.renameTo(target)) throw DlsiteArchiveException("无法保存 DLsite 压缩包")
+                    if (!partial.renameTo(target)) throw DlsiteArchiveException("无法保存压缩包，请检查存储空间")
                     completeMarker.writeText(target.length().toString())
                     return target
                 } catch (error: DlsiteArchiveException) {
@@ -300,7 +300,7 @@ class DlsiteArchiveClient internal constructor(
             }
             // Keep the partial file for an explicit retry; never expose the transport's URL-bearing message.
             if (failure != null) throw DlsiteArchiveException("压缩包下载中断，可重试继续下载")
-            throw DlsiteArchiveException("原始压缩包下载失败")
+            throw DlsiteArchiveException("完整原始包下载失败，请重试")
         }
     }
 
@@ -344,7 +344,7 @@ class DlsiteArchiveClient internal constructor(
                 throw DlsiteArchiveException("登录已失效，请重新登录")
             }
             if (url.scheme != "https" || url.port != 443 || !domain || url.username.isNotBlank() || url.password.isNotBlank()) {
-                throw DlsiteArchiveException("DLsite 返回了不受支持的下载地址")
+                throw DlsiteArchiveException("DLsite 返回了无法使用的下载地址")
             }
         }
 
@@ -429,7 +429,7 @@ class DlsiteArchiveClient internal constructor(
                     "DLsite 返回了网站验证页面，请在网页登录中完成验证后重试"
                 Regex("<input[^>]+(?:type|name)\\s*=\\s*[\"'](?:password|login_id)[\"']", RegexOption.IGNORE_CASE).containsMatchIn(html) ->
                     "DLsite 商店登录尚未生效，请重新网页登录后重试"
-                else -> "DLsite 下载页面未识别到当前作品的压缩包链接，可能是页面格式变化"
+                else -> "没有找到完整原始包的下载地址，请稍后重试"
             }
         }
 
@@ -457,7 +457,7 @@ class DlsiteArchiveClient internal constructor(
             if (name.length > 240 || name.any { it == '/' || it == '\\' || it == '\u0000' || it.isISOControl() } ||
                 name == "." || name == ".." || name.contains(':') ||
                 !Regex(".*\\.(zip|rar|exe|[rR][0-9]{2,3}|[0-9]{3})", RegexOption.IGNORE_CASE).matches(name)) {
-                throw DlsiteArchiveException("不支持的 DLsite 压缩包文件名或格式")
+                throw DlsiteArchiveException("不支持这个压缩包的格式")
             }
         }
 

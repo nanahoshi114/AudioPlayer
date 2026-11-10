@@ -3,7 +3,7 @@ package com.nanahoshi.audioplayer.data
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.security.MessageDigest
 
-internal enum class ClipboardSource(val label: String) { BILIBILI("B站"), ASMR("asmr.one"), YOUTUBE("YouTube") }
+internal enum class ClipboardSource(val label: String) { BILIBILI("B 站"), ASMR("asmr.one"), YOUTUBE("YouTube") }
 internal data class ClipboardTarget(val source: ClipboardSource, val id: String)
 internal data class ClipboardImportCandidate(val target: ClipboardTarget, val timestamp: Long = 0) {
     // 只持久化内容身份和系统复制时间的摘要，不保存剪贴板原文或链接参数。

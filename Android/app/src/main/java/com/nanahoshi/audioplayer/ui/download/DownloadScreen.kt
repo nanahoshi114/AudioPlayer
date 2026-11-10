@@ -89,7 +89,7 @@ class DownloadViewModel(app: Application) : AndroidViewModel(app) {
     fun retryNeedsLocalNetwork(job: WhisperJobEntity): Boolean = graph.whisper.needsLocalNetwork(job)
 
     fun reportLocalNetworkDenied() {
-        graph.messages.value = "需要允许访问本地网络，才能连接这台设备"
+        graph.messages.value = "需要允许访问本地网络，才能连接你填写的听写服务"
     }
 
     fun cancelWhisper(id: Long) {
@@ -145,17 +145,17 @@ fun DownloadScreen(
     val audioState = rememberLazyListState()
     val subtitleState = rememberLazyListState()
     Column(Modifier.fillMaxSize()) {
-        AppTopBar(title = "下载", onBack = onBack)
+        AppTopBar(title = "下载与任务", onBack = onBack)
         SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
             SegmentedButton(selected = !subtitles, onClick = { subtitles = false },
                 shape = SegmentedButtonDefaults.itemShape(0, 2)) { Text("音频") }
             SegmentedButton(selected = subtitles, onClick = { subtitles = true },
-                shape = SegmentedButtonDefaults.itemShape(1, 2)) { Text("字幕") }
+                shape = SegmentedButtonDefaults.itemShape(1, 2)) { Text("字幕任务") }
         }
         if (if (subtitles) whisperJobs.isEmpty() && translationJobs.isEmpty() else jobs.isEmpty()) {
             EmptyState(
                 title = if (subtitles) "还没有字幕任务" else "还没有下载",
-                message = if (subtitles) "在播放页可以生成字幕或翻译字幕。" else "在作品里可以选择单个音频，或缓存整个文件夹。",
+                message = if (subtitles) "在播放页可以生成字幕或翻译字幕。" else "在作品、音频库或播放页选择音频下载。",
                 modifier = Modifier.fillMaxSize(),
             )
         } else {
@@ -209,9 +209,9 @@ private fun DownloadRow(
         DownloadStatus.QUEUED -> "排队"
         DownloadStatus.RUNNING -> if (job.kind == "DLSITE_ARCHIVE") {
             when (job.phase) {
-                "RESOLVING" -> "获取下载信息"
+                "RESOLVING" -> "解析下载地址"
                 "EXTRACTING" -> "解压中"
-                "IMPORTING" -> "关联文件"
+                "IMPORTING" -> "整理入库"
                 else -> "下载中"
             }
         } else "下载中"
@@ -252,9 +252,9 @@ private fun DownloadRow(
         ConfirmActionDialog(
             title = "删除下载任务",
             message = if (job.kind == "DLSITE_ARCHIVE") {
-                "会一并删除已下载的压缩包暂存，之后重试需要从头下载。已发布的音频不受影响。"
+                "会一并删除已下载的压缩包暂存，之后重试需要从头下载。已解压并加入作品的音频不受影响。"
             } else {
-                "只删除这条失败记录，已下载的文件不受影响。"
+                "只删除任务记录，已下载文件会保留。"
             },
             confirmLabel = "删除",
             onConfirm = { confirming = false; onDelete() },
@@ -298,7 +298,7 @@ private fun WhisperJobRow(job: WhisperJobEntity, onRetry: () -> Unit, onCancel: 
             when {
                 canStop -> TextButton(onClick = onCancel) { Text("中止") }
                 job.status == DownloadStatus.FAILED -> TextButton(onClick = onRetry) { Text("重试") }
-                reply != null -> TextButton(onClick = { shownReply = reply }) { Text("查看返回") }
+                reply != null -> TextButton(onClick = { shownReply = reply }) { Text("查看错误详情") }
             }
         },
     )
@@ -340,7 +340,7 @@ private fun TranslationJobRow(job: TranslationJobEntity, onCancel: () -> Unit) {
         trailingContent = {
             when {
                 running -> TextButton(onClick = onCancel) { Text("中止") }
-                reply != null -> TextButton(onClick = { shownReply = reply }) { Text("查看返回") }
+                reply != null -> TextButton(onClick = { shownReply = reply }) { Text("查看错误详情") }
             }
         },
     )

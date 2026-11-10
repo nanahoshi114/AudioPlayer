@@ -50,7 +50,7 @@ fun CacheScreen(
     Column(Modifier.fillMaxSize()) {
         AppTopBar(title = "清理缓存", onBack = onBack)
         Text(
-            "当前占用 ${formatCacheBytes(viewModel.usedBytes)}",
+            "当前缓存占用 ${formatCacheBytes(viewModel.usedBytes)}",
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
         )
         ListItem(
@@ -64,10 +64,10 @@ fun CacheScreen(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
         ) { Text("清理缓存") }
         if (viewModel.cleared) {
-            Text("已清理", modifier = Modifier.padding(horizontal = 16.dp))
+            Text("缓存已清理", modifier = Modifier.padding(horizontal = 16.dp))
         }
         Text(
-            "只清理封面图片等临时缓存。下载的音频、B 站缓存音轨和字幕请到「下载管理」处理。",
+            "只清理封面图片等临时缓存。下载的音频、B 站下载音轨和字幕请到「下载管理」处理。",
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
         )

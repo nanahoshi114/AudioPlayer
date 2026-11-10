@@ -91,7 +91,7 @@ class BiliCollectionRepository(
                 }
             }
             throw BilibiliException((error as? BilibiliException)?.code ?: 0,
-                (error as? BilibiliException)?.message ?: "无法读取分 P；离线播放需要已缓存的分 P 信息和本地音轨")
+                (error as? BilibiliException)?.message ?: "无法读取分 P；离线播放需要之前读取过的分 P 信息和本地音轨")
         }
     }
 

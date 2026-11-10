@@ -81,7 +81,7 @@ class WhisperCenter(
         val track = row.trackId?.let { db.tracks().getById(it) }
         materialize(track?.localUri)?.let { return@withContext it }
         materialize(row.localUri)?.let { return@withContext it }
-        // 从下载管理播放的缓存音轨没有 trackId，本地路径放在 remoteUrl。
+        // 从下载管理播放的 B 站下载音轨没有 trackId，本地路径放在 remoteUrl。
         materialize(row.remoteUrl?.takeIf { it.startsWith("/") })?.let { return@withContext it }
         if (row.source == TrackSource.YOUTUBE) {
             readyYouTubeAudio(appContext.filesDir, row.youtubeVideoId ?: row.workno)?.let { return@withContext it }
@@ -242,7 +242,7 @@ class WhisperCenter(
                 (track?.source == TrackSource.DLSITE && track.fileHash.isNullOrBlank())
             if (needsArchive) {
                 val workno = track?.let { downloads.requestWorkno(it) } ?: oldDownload?.workKey
-                if (workno == null) { db.whisper().fail(job.id, "没有作品编号"); return@launch }
+                if (workno == null) { db.whisper().fail(job.id, "这个作品缺少编号"); return@launch }
                 val id = downloads.enqueueDlsiteArchive(workno, job.title)
                 db.whisper().setAwaitDownload(job.id, id, job.awaitFileKey ?: oldDownload?.fileKey ?: track?.fileHash?.let(::rawFileKey))
                 db.whisper().requeueForDownload(job.id)
@@ -469,7 +469,7 @@ class WhisperCenter(
     private suspend fun downloadError(job: WhisperJobEntity): String? {
         job.awaitDownloadId?.let { id ->
             val row = db.downloads().get(id)
-            return if (row?.status == DownloadStatus.DONE) "原始压缩包中未找到这条音频" else row?.error ?: "下载任务已不存在"
+            return if (row?.status == DownloadStatus.DONE) "完整原始包中未找到这条音频" else row?.error ?: "下载任务已不存在"
         }
         val trackId = job.trackId
         val latest = if (trackId != null && trackId > 0L) {

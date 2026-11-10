@@ -38,13 +38,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -75,7 +76,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 internal data class LibraryCrumb(val id: Long, val name: String)
 
-/** 面包屑必须跨旋转保留，否则作品页的「根目录」会因为层级丢失而失效。 */
+/** 音频库普通目录的路径栏跨旋转保留。 */
 internal val LibraryTrailSaver: Saver<List<LibraryCrumb>, Any> = listSaver<List<LibraryCrumb>, String>(
     save = { trail -> trail.flatMap { listOf(it.id.toString(), it.name) } },
     restore = { flat ->
@@ -96,11 +97,9 @@ internal fun libraryTrail(trail: List<LibraryCrumb>, folder: FolderEntity?): Lis
 internal fun rememberLibraryClimb(
     currentFolderId: () -> Long?,
     up: () -> Unit,
-    floorId: Long? = null,
 ): (Int) -> Unit {
     val scope = rememberCoroutineScope()
     var climbing by remember { mutableStateOf(false) }
-    val floor by rememberUpdatedState(floorId)
     val climb: (Int) -> Unit = climb@{ steps ->
         if (steps <= 0 || climbing) return@climb
         climbing = true
@@ -108,7 +107,7 @@ internal fun rememberLibraryClimb(
             try {
                 repeat(steps) {
                     val before = currentFolderId()
-                    if (before == null || before == floor) return@launch
+                    if (before == null) return@launch
                     up()
                     withTimeoutOrNull(2000) {
                         snapshotFlow { currentFolderId() }.first { it != before }
@@ -128,9 +127,21 @@ internal fun LibraryBreadcrumb(
     onRoot: () -> Unit,
     onCrumb: (Int) -> Unit,
     rootLabel: String = "音频库",
+    revealCurrent: Boolean = false,
 ) {
+    val scroll = rememberScrollState()
+    if (revealCurrent) {
+        val pathKey = trail.joinToString("/") { it.id.toString() }
+        var shownPath by rememberSaveable { mutableStateOf(pathKey) }
+        LaunchedEffect(pathKey) {
+            if (shownPath != pathKey) {
+                scroll.scrollTo(0)
+                shownPath = pathKey
+            }
+        }
+    }
     Row(
-        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 4.dp),
+        Modifier.fillMaxWidth().horizontalScroll(scroll, reverseScrolling = revealCurrent).padding(horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         TextButton(onClick = onRoot) { Text(rootLabel) }
@@ -273,10 +284,10 @@ internal fun FolderRow(
                 }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     if (onCache != null) {
-                        DropdownMenuItem(text = { Text("缓存到本地") }, onClick = { menu = false; onCache() })
+                        DropdownMenuItem(text = { Text("下载到本地") }, onClick = { menu = false; onCache() })
                     }
                     if (onRecognize != null) {
-                        DropdownMenuItem(text = { Text("识别为作品") }, onClick = { menu = false; onRecognize() })
+                        DropdownMenuItem(text = { Text("关联为作品") }, onClick = { menu = false; onRecognize() })
                     }
                     if (onDelete != null) DropdownMenuItem(text = { Text("从音频库移除") }, onClick = { menu = false; onDelete() })
                 }
@@ -331,8 +342,8 @@ private fun BiliVideoPreviewRow(
                 modifier = Modifier.padding(top = 2.dp),
             )
             BadgeLine(
-                leading = listOf(BadgeItem("B站", LocalSourceColors.current.bilibili),
-                    BadgeItem("多P", MaterialTheme.colorScheme.secondary)),
+                leading = listOf(BadgeItem("B 站", LocalSourceColors.current.bilibili),
+                    BadgeItem("多 P", MaterialTheme.colorScheme.secondary)),
                 tags = listOf(BadgeItem(folder.biliBvid.orEmpty(), MaterialTheme.colorScheme.onSurfaceVariant)),
                 modifier = Modifier.padding(top = 6.dp),
             )
@@ -422,7 +433,7 @@ private fun WorkPreviewRow(
                 }
                 DropdownMenu(expanded = menu, onDismissRequest = { onMenu(false) }) {
                     if (onCache != null) {
-                        DropdownMenuItem(text = { Text("缓存到本地") }, onClick = { onMenu(false); onCache() })
+                        DropdownMenuItem(text = { Text("下载到本地") }, onClick = { onMenu(false); onCache() })
                     }
                     if (onDelete != null) DropdownMenuItem(text = { Text("从音频库移除") }, onClick = { onMenu(false); onDelete() })
                 }
@@ -430,6 +441,9 @@ private fun WorkPreviewRow(
         }
     }
 }
+
+/** App 自己下载到 filesDir 的副本；关联的用户文件是 content: / file: URI。 */
+internal fun TrackEntity.isAppCopy(): Boolean = localUri?.startsWith("/") == true
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -455,7 +469,7 @@ internal fun TrackRow(
             com.nanahoshi.audioplayer.data.LocalAudio.hasStoredCopy(track.localUri)
         else -> false
     }
-    val appCopy = track.localUri?.startsWith("/") == true
+    val appCopy = track.isAppCopy()
     ListItem(
         headlineContent = { ItemName(track.title, selected) },
         supportingContent = {
@@ -468,10 +482,7 @@ internal fun TrackRow(
                     SourceBadge(track.source)
                     Text(formatDuration(track.durationMs), style = MaterialTheme.typography.labelMedium)
                     if (downloaded) {
-                        LabelBadge(
-                            if (track.source == TrackSource.BILIBILI) "已缓存" else "已下载",
-                            MaterialTheme.colorScheme.tertiary,
-                        )
+                        LabelBadge("已下载", MaterialTheme.colorScheme.tertiary)
                     }
                     if (hasSubtitle) {
                         LabelBadge("有字幕", MaterialTheme.colorScheme.primary)
@@ -494,18 +505,13 @@ internal fun TrackRow(
                     Icon(Icons.Default.MoreVert, contentDescription = "更多")
                 }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    DropdownMenuItem(text = { Text("下一个播放") }, onClick = { menu = false; onPlayNext() })
-                    DropdownMenuItem(text = { Text("加入当前列表末尾") }, onClick = { menu = false; onAppend() })
+                    DropdownMenuItem(text = { Text("接下来播放") }, onClick = { menu = false; onPlayNext() })
+                    DropdownMenuItem(text = { Text("加入播放队列") }, onClick = { menu = false; onAppend() })
                     if (!downloaded && onDownload != null) {
-                        val label = if (track.source == TrackSource.BILIBILI) "缓存音轨" else "下载"
-                        DropdownMenuItem(text = { Text(label) }, onClick = { menu = false; onDownload() })
+                        DropdownMenuItem(text = { Text("下载音轨") }, onClick = { menu = false; onDownload() })
                     }
                     if (downloaded && onDeleteDownloaded != null) {
-                        val label = when {
-                            track.source == TrackSource.BILIBILI -> "删除已缓存的音轨"
-                            !appCopy -> "取消识别"
-                            else -> "删除已下载的文件"
-                        }
+                        val label = if (!appCopy) "取消本地关联" else "删除已下载文件"
                         DropdownMenuItem(
                             text = { Text(label) },
                             onClick = { menu = false; onDeleteDownloaded() },
@@ -566,8 +572,8 @@ internal fun CachePromptDialog(
     when (prompt) {
         null -> Unit
         is CachePrompt.Source -> CachePickDialog(
-            title = "缓存哪个来源？",
-            message = "这部作品已购买，asmr.one 上也有收录。",
+            title = "从哪个来源下载？",
+            message = "这部作品已购买，asmr.one 上也有收录。请选择要下载的来源。",
             options = listOf(TrackSource.DLSITE to "DLsite（已购买）", TrackSource.ASMR to "asmr.one"),
             onPick = onAnswer,
             onDismiss = { onAnswer(null) },

@@ -63,12 +63,12 @@ class ClipboardImportViewModel(app: Application) : AndroidViewModel(app) {
                     val details = com.nanahoshi.audioplayer.bilibili.BiliVideoDetails(checkNotNull(preview.biliVideo), preview.parts)
                     val requests = graph.biliImportRequests.choose(listOf(details)) ?: return null
                     requests.forEach { graph.library.importBili(it) }
-                    return "已导入音频库"
+                    return "已加入音频库"
                 }
                 ClipboardSource.ASMR -> graph.library.ensureAsmrWork(graph.asmr.loadWork(preview.target.id))
                 ClipboardSource.YOUTUBE -> graph.library.saveYouTube(checkNotNull(preview.youtubeVideo))
             }
-            return "已导入音频库"
+            return "已加入音频库"
         }
     }, lastHandled = { preferences.getString("last_handled", null) },
         rememberHandled = { preferences.edit().putString("last_handled", it).apply() }, message = { graph.messages.value = it })

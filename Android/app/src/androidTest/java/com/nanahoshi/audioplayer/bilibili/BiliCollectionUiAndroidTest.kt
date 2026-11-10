@@ -35,13 +35,13 @@ class BiliCollectionUiAndroidTest {
                 CollectionPlaybackActions(selecting.value, enabled = true, onAction = { action = it })
             }
         }
-        compose.onNodeWithText("顺序播放全部").assertIsDisplayed().performClick()
+        compose.onNodeWithText("按当前排序播放全部").assertIsDisplayed().performClick()
         compose.runOnIdle { assertEquals(CollectionAction.PLAY, action); selecting.value = true }
-        compose.onNodeWithText("顺序播放全部").assertDoesNotExist()
-        compose.onNodeWithText("加到末尾").assertDoesNotExist()
+        compose.onNodeWithText("按当前排序播放全部").assertDoesNotExist()
+        compose.onNodeWithText("加入播放队列").assertDoesNotExist()
         compose.runOnIdle { selecting.value = false }
-        compose.onNodeWithText("顺序播放全部").assertIsDisplayed()
-        compose.onNodeWithText("加到末尾").assertIsDisplayed().performClick()
+        compose.onNodeWithText("按当前排序播放全部").assertIsDisplayed()
+        compose.onNodeWithText("加入播放队列").assertIsDisplayed().performClick()
         compose.runOnIdle { assertEquals(CollectionAction.APPEND, action) }
     }
 

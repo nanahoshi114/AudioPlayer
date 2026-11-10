@@ -139,10 +139,10 @@ class BiliBrowserViewModel(app: Application) : AndroidViewModel(app) {
                     try {
                         if (action == BiliAction.SAVE) {
                             requests.forEach { graph.library.importBili(it) }
-                            graph.messages.value = "已保存到音频库" + if (failed.isEmpty()) "" else "，${failed.size} 个视频读取失败"
+                            graph.messages.value = "已加入音频库" + if (failed.isEmpty()) "" else "，${failed.size} 个视频读取失败"
                         } else {
                             val count = graph.downloads.enqueueBiliImports(requests)
-                            graph.messages.value = if (count > 0) "已加入 $count 个下载，完成后按所选方式入库" else "已有本地副本或下载任务"
+                            graph.messages.value = if (count > 0) "已加入 $count 个下载任务，完成后按所选方式导入" else "已有本地文件或下载任务"
                         }
                         selected = emptySet()
                     } finally { working = false }
@@ -154,7 +154,7 @@ class BiliBrowserViewModel(app: Application) : AndroidViewModel(app) {
                     choice = BiliPartChoice.create(action, groups, failed)
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (failure: Exception) { graph.messages.value = failure.message ?: "B站操作失败，请稍后重试" }
+            catch (failure: Exception) { graph.messages.value = failure.message ?: "B 站操作失败，请稍后重试" }
             finally { if (token == partGeneration) resolving = false }
         }
     }
@@ -188,11 +188,11 @@ class BiliBrowserViewModel(app: Application) : AndroidViewModel(app) {
                             )))
                         }
                     }
-                    BiliAction.SAVE, BiliAction.DOWNLOAD -> error("请先选择入库方式")
+                    BiliAction.SAVE, BiliAction.DOWNLOAD -> error("请先选择导入方式")
                 }
                 selected = emptySet()
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { graph.messages.value = "B站操作失败，请稍后重试" }
+            catch (_: Exception) { graph.messages.value = "B 站操作失败，请稍后重试" }
             finally { working = false }
         }
     }

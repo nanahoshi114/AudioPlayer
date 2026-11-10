@@ -66,7 +66,7 @@ fun SettingsScreen(
             SettingsGroup {
                 SettingsRow(
                     icon = { Icon(Icons.Default.Palette, contentDescription = null) },
-                    title = "外观",
+                    title = "主题与颜色",
                     summary = appearanceSummary(appearance),
                     onClick = onOpenAppearance,
                 )
@@ -80,7 +80,7 @@ fun SettingsScreen(
                 SettingsRow(
                     icon = { Icon(Icons.Default.DownloadDone, contentDescription = null) },
                     title = "下载管理",
-                    summary = "已下载的音频和字幕，可搜索、导出、删除",
+                    summary = "手机中已下载或生成的文件，可搜索、分享、删除",
                     onClick = onOpenStored,
                 )
                 HorizontalDivider()

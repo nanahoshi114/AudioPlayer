@@ -31,9 +31,9 @@ object DlsiteArchiveExtractor {
     ): List<DlsiteArchiveEntry> {
         if (archives.isEmpty() || archives.any { !it.isFile }) throw DlsiteArchiveException("压缩包文件不完整，请重试")
         if (destination.exists() && (!destination.isDirectory || destination.listFiles()?.isNotEmpty() != false)) {
-            throw DlsiteArchiveException("解压暂存目录不是空目录")
+            throw DlsiteArchiveException("解压目录不可用，请重试")
         }
-        if (!destination.exists() && !destination.mkdirs()) throw DlsiteArchiveException("无法创建解压暂存目录")
+        if (!destination.exists() && !destination.mkdirs()) throw DlsiteArchiveException("无法创建解压目录，请检查存储空间")
         val root = destination.canonicalFile
         val state = Extraction(root, checkCancelled)
         try {
@@ -60,8 +60,8 @@ object DlsiteArchiveExtractor {
             if (generateSequence<Throwable>(error) { it.cause }.take(8).any {
                 it is java.util.zip.ZipException || it is CrcErrorException ||
                     it is CorruptHeaderException || it is BadRarArchiveException || it is NotRarArchiveException
-            }) throw DlsiteArchiveIntegrityException("原始压缩包校验失败，请重新下载")
-            throw DlsiteArchiveException("原始压缩包解压失败，可能损坏、缺少分卷或使用了不支持的格式")
+            }) throw DlsiteArchiveIntegrityException("完整原始包校验失败，请重新下载")
+            throw DlsiteArchiveException("完整原始包解压失败，文件可能损坏、缺少分卷或格式不受支持")
         }
     }
 
@@ -73,7 +73,7 @@ object DlsiteArchiveExtractor {
                     state.checked()
                     val entry = entries.nextElement()
                     if (entry.isUnixSymlink || !zip.canReadEntryData(entry)) {
-                        throw DlsiteArchiveException("压缩包含有链接、加密或不支持的文件")
+                        throw DlsiteArchiveException("压缩包里有不支持或已加密的文件")
                     }
                     val file = state.entry(entry.name, entry.isDirectory)
                     if (entry.isDirectory) continue
@@ -88,7 +88,7 @@ object DlsiteArchiveExtractor {
                             }
                         }
                         if (entry.crc >= 0 && output.crc.value != entry.crc) {
-                            throw DlsiteArchiveIntegrityException("压缩包文件校验失败，请重新下载")
+                            throw DlsiteArchiveIntegrityException("压缩包校验失败，请重新下载")
                         }
                         output.verifySize()
                     }
@@ -127,16 +127,16 @@ object DlsiteArchiveExtractor {
             checked()
             val name = safeRelativePath(raw)
             if (names.size >= MAX_ENTRIES || !names.add(name)) {
-                throw DlsiteArchiveException("压缩包文件数量过多或包含重复路径")
+                throw DlsiteArchiveException("压缩包内容异常，无法解压")
             }
             val file = File(root, name)
             if (!file.canonicalPath.startsWith(root.path + File.separator)) {
-                throw DlsiteArchiveException("压缩包包含不安全的路径")
+                throw DlsiteArchiveException("压缩包内容异常，已停止解压")
             }
             if (directory) {
                 if ((!file.isDirectory && !file.mkdirs()) || file.isFile) throw IOException("Directory unavailable")
             } else {
-                if (file.exists()) throw DlsiteArchiveException("压缩包包含冲突的文件路径")
+                if (file.exists()) throw DlsiteArchiveException("压缩包内容冲突，无法解压")
                 val parent = file.parentFile ?: throw IOException("Directory unavailable")
                 if (!parent.isDirectory && !parent.mkdirs()) throw IOException("Directory unavailable")
             }
@@ -162,9 +162,9 @@ object DlsiteArchiveExtractor {
             checked()
             if (count <= 0) return
             written += count
-            if (expected >= 0 && written > expected) throw DlsiteArchiveIntegrityException("压缩包解压大小校验失败")
+            if (expected >= 0 && written > expected) throw DlsiteArchiveIntegrityException("压缩包校验失败，请重新下载")
             if (untilSpaceCheck <= 0) {
-                if (root.usableSpace < count + 1024L * 1024) throw DlsiteArchiveException("存储空间不足，无法解压原始压缩包")
+                if (root.usableSpace < count + 1024L * 1024) throw DlsiteArchiveException("存储空间不足，无法解压完整原始包")
                 untilSpaceCheck = 4L * 1024 * 1024
             }
             untilSpaceCheck -= count

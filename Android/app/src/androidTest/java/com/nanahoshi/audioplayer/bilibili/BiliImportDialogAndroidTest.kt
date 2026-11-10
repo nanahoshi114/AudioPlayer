@@ -26,12 +26,12 @@ class BiliImportDialogAndroidTest {
             LaunchedEffect(Unit) { imported = requests.choose(listOf(BiliVideoDetails(video, parts))) }
             BiliImportDialog(requests)
         } }
-        compose.onNodeWithText("继续").assertIsNotEnabled()
+        compose.onNodeWithText("按此方式导入").assertIsNotEnabled()
         compose.onNodeWithText("分开导入").performClick()
-        compose.onNodeWithText("全选 / 取消全选", substring = true).performClick()
-        compose.onNodeWithText("继续").assertIsNotEnabled()
+        compose.onNodeWithText("已选", substring = true).performClick()
+        compose.onNodeWithText("按此方式导入").assertIsNotEnabled()
         compose.onNodeWithText("P2 · two").performClick()
-        compose.onNodeWithText("继续").assertIsEnabled().performClick()
+        compose.onNodeWithText("按此方式导入").assertIsEnabled().performClick()
         compose.runOnIdle { assertEquals(listOf(parts[1]), imported!!.single().parts) }
     }
 
@@ -43,10 +43,10 @@ class BiliImportDialogAndroidTest {
             BiliImportDialog(requests)
         } }
         compose.onNodeWithText("统一导入").performClick()
-        compose.onNodeWithText("继续").performClick()
-        compose.onNodeWithText("确认转换入库方式").assertIsDisplayed()
+        compose.onNodeWithText("按此方式导入").performClick()
+        compose.onNodeWithText("更改导入方式？").assertIsDisplayed()
         compose.runOnIdle { assertNull(imported) }
-        compose.onNodeWithText("确认转换并继续").performClick()
+        compose.onNodeWithText("确认更改并继续").performClick()
         compose.runOnIdle {
             assertTrue(imported!!.single().conversionConfirmed)
             assertEquals(parts, imported!!.single().parts)

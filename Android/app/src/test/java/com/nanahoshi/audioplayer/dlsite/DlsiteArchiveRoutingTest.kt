@@ -229,7 +229,7 @@ class DlsiteArchiveRoutingTest {
         for ((html, expected) in listOf(
             "<html><script src='/cdn-cgi/challenge-platform/test'></script></html>" to "验证页面",
             "<html><input type='password' name='password'></html>" to "商店登录尚未生效",
-            "<html><title>unrecognized</title>private text</html>" to "页面格式变化",
+            "<html><title>unrecognized</title>private text</html>" to "没有找到完整原始包的下载地址",
         )) {
             val error = runCatching { client { reply(it, 200, html) }.download("RJ300957", temporary.newFolder()) }.exceptionOrNull()
             assertTrue(error is DlsiteArchiveException)

@@ -141,7 +141,7 @@ private fun TextPreview(file: LibraryFileEntity, viewModel: FilePreviewViewModel
     var body by remember(file.id) { mutableStateOf<String?>(null) }
     LaunchedEffect(file.id) {
         val path = file.localUri?.takeIf { java.io.File(it).isFile } ?: file.remoteUrl
-        body = if (path.isBlank()) "原始文件尚未缓存" else viewModel.text(path)
+        body = if (path.isBlank()) "这个文件还没有下载到本机" else viewModel.text(path)
     }
     val text = body
     if (text == null) {
@@ -272,7 +272,7 @@ private fun ExternalOpenContent(request: RemotePreview, localUri: String?, viewM
         if (loading) {
             com.nanahoshi.audioplayer.ui.components.RoundedProgress(
                 progress = total?.takeIf { it > 0 }?.let { bytes.toFloat() / it }, modifier = Modifier.padding(top = 16.dp))
-            Text("已暂存 ${com.nanahoshi.audioplayer.data.formatCacheBytes(bytes)}")
+            Text("正在准备文件，已下载 ${com.nanahoshi.audioplayer.data.formatCacheBytes(bytes)}")
             androidx.compose.material3.TextButton(onClick = { job?.cancel() }) { Text("取消") }
         } else {
             androidx.compose.material3.FilledTonalButton(onClick = {

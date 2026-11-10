@@ -95,7 +95,7 @@ class TranslateCenter(
     suspend fun applyGenerated(jobId: Long, fingerprint: String): String? {
         val ticket = calls.prepare("whisper-$jobId")
         return try {
-            val cues = readGenerated(fingerprint) ?: return "没有读到日文字幕"
+            val cues = readGenerated(fingerprint) ?: return "没有找到日文字幕"
             if (cues.isEmpty() || cues.hasTranslation()) return "没有需要翻译的日文"
             if (!whisperTranslating(jobId)) throw CancellationException()
             val translated = translateAll(cues, ticket)

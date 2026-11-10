@@ -549,8 +549,8 @@ internal fun storedItemMatches(item: StoredItem, query: String): Boolean {
     val needle = query.trim()
     if (needle.isEmpty()) return true
     val kind = when (item.kind) {
-        StoredKind.GENERATED -> "生成字幕"
-        StoredKind.SUBTITLE -> "字幕"
+        StoredKind.GENERATED -> "App 生成字幕"
+        StoredKind.SUBTITLE -> "字幕文件"
         StoredKind.AUDIO -> ""
     }
     return item.name.contains(needle, ignoreCase = true) ||

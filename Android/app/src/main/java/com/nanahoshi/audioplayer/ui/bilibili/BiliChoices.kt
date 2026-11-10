@@ -3,7 +3,7 @@ package com.nanahoshi.audioplayer.ui.bilibili
 import com.nanahoshi.audioplayer.bilibili.BiliPart
 import com.nanahoshi.audioplayer.bilibili.BiliVideoHit
 
-internal enum class BiliAction(val label: String) { PLAY("播放"), SAVE("保存到音频库"), DOWNLOAD("下载") }
+internal enum class BiliAction(val label: String) { PLAY("播放"), SAVE("加入音频库"), DOWNLOAD("下载") }
 internal data class BiliPartGroup(val video: BiliVideoHit, val parts: List<BiliPart>)
 internal data class BiliPartChoice(
     val action: BiliAction, val groups: List<BiliPartGroup>, val failed: List<String>, val selected: Set<Pair<String, Long>>,

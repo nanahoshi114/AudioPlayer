@@ -53,7 +53,7 @@ class YouTubeClient(
         val url = "https://www.youtube.com/oembed".toHttpUrlOrNull()!!.newBuilder()
             .addQueryParameter("url", "https://www.youtube.com/watch?v=$id").addQueryParameter("format", "json").build()
         val root = json(request(Request.Builder().url(url).header("User-Agent", WEB_AGENT).build()))
-        val title = root.text("title").takeIf { it.isNotBlank() } ?: throw YouTubeException("没有读到 YouTube 视频标题")
+        val title = root.text("title").takeIf { it.isNotBlank() } ?: throw YouTubeException("没有找到 YouTube 视频标题")
         val cover = root.text("thumbnail_url").replace("http://", "https://").toHttpUrlOrNull()
             ?.takeIf { it.isHttps && (it.host == "ytimg.com" || it.host.endsWith(".ytimg.com")) }?.toString()
             ?: "https://i.ytimg.com/vi/$id/hqdefault.jpg"
@@ -80,8 +80,8 @@ class YouTubeClient(
             .header("Cookie", saved).header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8").build())
         return when {
             body.contains("\"LOGGED_IN\":true") || body.contains("loggedIn\":true") -> "已登录"
-            body.contains("\"LOGGED_IN\":false") -> "已保存，但 YouTube 没有确认登录"
-            else -> "已保存，未能确认登录状态"
+            body.contains("\"LOGGED_IN\":false") -> "已保存，但未能确认登录状态"
+            else -> "已保存，但未能确认登录状态"
         }
     }
     private suspend fun visitor(): Gate = gate ?: gateLock.withLock {
@@ -145,7 +145,7 @@ class YouTubeClient(
         return results(videos, search)
     }
     private fun results(videos: List<YouTubeVideo>, search: Boolean): YouTubeResults {
-        if (videos.isEmpty()) throw YouTubeException(if (search) "没有找到相关视频" else "没有读到这个播放列表，请检查登录信息或列表是否可访问")
+        if (videos.isEmpty()) throw YouTubeException(if (search) "没有找到相关视频" else "没有找到这个播放列表，请检查登录信息或列表是否可访问")
         return YouTubeResults(videos)
     }
 
@@ -172,7 +172,7 @@ class YouTubeClient(
                         "LOGIN_REQUIRED", "AGE_CHECK_REQUIRED" -> "这个视频需要登录或验证，请在「我的」更新 YouTube Cookie"
                         "UNPLAYABLE", "ERROR" -> "这个视频不可播放，可能需要登录或验证"
                         "OK", "" -> "这个视频没有可用的独立音轨"
-                        else -> "YouTube 拒绝了播放请求"
+                        else -> "YouTube 拒绝了播放请求，请稍后重试"
                     }
                     if (lastStatus.isNotEmpty() && lastStatus != "OK") continue
                     val streams = audioStreams(root.child("streamingData"))
@@ -192,7 +192,7 @@ class YouTubeClient(
                         solvedResults(solver.solve(player, sigs, ns), sigs.isNotEmpty(), ns.isNotEmpty())
                     }
                     val chosen = streams.firstNotNullOfOrNull { stream -> finishUrl(stream, solved)?.let { stream to it } }
-                        ?: throw YouTubeException("YouTube 签名解析失败")
+                        ?: throw YouTubeException("YouTube 签名解析失败，请重试")
                     val details = root.child("videoDetails")
                     val cover = (details.child("thumbnail").child("thumbnails") as? JsonArray)?.lastOrNull()?.text("url")
                     val video = YouTubeVideo(id, details.text("title").ifBlank { id }, details.text("author"),
@@ -247,13 +247,13 @@ class YouTubeClient(
         }
         fun finish() {
             try {
-                if (position < 1024 || partial.length() != position) throw YouTubeException("YouTube 音轨下载不完整")
+                if (position < 1024 || partial.length() != position) throw YouTubeException("YouTube 音轨下载不完整，请重试")
                 val signature = partial.inputStream().use { input ->
                     val header = ByteArray(8)
                     input.read(header)
                     String(header, 4, 4, Charsets.US_ASCII)
                 }
-                if (signature != "ftyp") throw YouTubeException("YouTube 返回的内容不是 MP4 音轨")
+                if (signature != "ftyp") throw YouTubeException("YouTube 返回了无法识别的音轨，请重试")
                 onProgress(position, total)
                 if (continuation.isActive) continuation.resume(Unit)
             } catch (error: Exception) { fail(error) }
@@ -287,21 +287,21 @@ class YouTubeClient(
                         response.use {
                             if (!continuation.isActive) throw IOException("cancelled")
                             if (response.code in setOf(401, 403, 404)) throw MediaRejected(response.code)
-                            if (response.code != 200 && response.code != 206) throw YouTubeException("YouTube 音轨下载失败")
-                            val body = response.body ?: throw YouTubeException("音频内容为空")
+                            if (response.code != 200 && response.code != 206) throw YouTubeException("YouTube 下载失败，请重试")
+                            val body = response.body ?: throw YouTubeException("YouTube 没有返回音频内容，请重试")
                             val length: Long
                             if (response.code == 206) {
                                 val range = parseMediaRange(response.header("Content-Range"))
-                                    ?: throw YouTubeException("YouTube 返回的音轨分段信息无效")
+                                    ?: throw YouTubeException("YouTube 返回了无法识别的音轨，请重试")
                                 if (range.start != start || range.end > end || (total > 0 && range.total != total)) {
-                                    throw YouTubeException("YouTube 返回的音轨分段不匹配，请重试")
+                                    throw YouTubeException("音轨数据不完整，请重试")
                                 }
                                 total = range.total
                                 length = range.end - range.start + 1
-                                if (body.contentLength() >= 0 && body.contentLength() != length) throw YouTubeException("YouTube 返回的音轨分段长度不匹配")
+                                if (body.contentLength() >= 0 && body.contentLength() != length) throw YouTubeException("音轨数据不完整，请重试")
                             } else {
                                 // 小文件即使忽略 Range 也可一次完成；大文件不能退回被限速的整段读取。
-                                if (start != 0L || body.contentLength() > chunkSize) throw YouTubeException("音轨服务器未按分段返回内容，请重试")
+                                if (start != 0L || body.contentLength() > chunkSize) throw YouTubeException("音轨服务器响应异常，请重试")
                                 length = body.contentLength()
                                 if (length >= 0) total = length
                                 complete = true
@@ -314,7 +314,7 @@ class YouTubeClient(
                                 while (length < 0 || read < length) {
                                     if (!continuation.isActive) throw IOException("cancelled")
                                     val remaining = if (length < 0) chunkSize + 1 - read else length - read
-                                    if (remaining <= 0) throw YouTubeException("音轨服务器未按分段返回内容，请重试")
+                                    if (remaining <= 0) throw YouTubeException("音轨服务器响应异常，请重试")
                                     val count = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
                                     if (count < 0) {
                                         if (length >= 0 && read != length) throw java.io.EOFException("incomplete media chunk")
@@ -322,7 +322,7 @@ class YouTubeClient(
                                     }
                                     output.write(buffer, 0, count)
                                     read += count
-                                    if (length < 0 && read > chunkSize) throw YouTubeException("音轨服务器未按分段返回内容，请重试")
+                                    if (length < 0 && read > chunkSize) throw YouTubeException("音轨服务器响应异常，请重试")
                                     if (read - reported >= 256 * 1024) {
                                         onProgress(start + read, total.coerceAtLeast(0)); reported = read
                                     }
@@ -342,7 +342,7 @@ class YouTubeClient(
         }
         enqueueChunk(0)
     }
-    private fun json(value: String): JsonElement = try { Json.parseToJsonElement(value) } catch (_: Exception) { throw YouTubeException("YouTube 返回的数据无法读取") }
+    private fun json(value: String): JsonElement = try { Json.parseToJsonElement(value) } catch (_: Exception) { throw YouTubeException("YouTube 返回了无法读取的内容，请重试") }
     private suspend fun request(request: Request): String {
         transport?.let { return it(request) }
         return suspendCancellableCoroutine { continuation ->
@@ -356,7 +356,7 @@ class YouTubeClient(
                     try {
                         val value = response.use {
                             if (!it.isSuccessful) throw YouTubeException(if (it.code == 401) "YouTube 登录已失效，请重新保存 Cookie" else "YouTube 请求失败，请稍后重试")
-                            it.body?.string() ?: throw YouTubeException("YouTube 返回为空")
+                            it.body?.string() ?: throw YouTubeException("YouTube 没有返回内容，请重试")
                         }
                         if (continuation.isActive) continuation.resume(value)
                     } catch (_: Exception) {

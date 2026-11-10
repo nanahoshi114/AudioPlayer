@@ -164,7 +164,7 @@ class BiliPlaybackDataSource(
         // 识别挂上的 content:/file: 和下载到 App 目录的文件都在这里读本地。
         openStored(dataSpec, track.localUri)?.let { return it }
         val url = track.remoteUrl
-        if (url.isNullOrBlank()) throw IOException("原始文件尚未缓存，请下载完整压缩包")
+        if (url.isNullOrBlank()) throw IOException("这个文件还没有下载到本机，请下载完整原始包")
         val workno = runBlocking(Dispatchers.IO) { worknoOf(track) }
         return openAuthed(dataSpec, url, DlsiteClient.PLAY_REFERER, workno, rawFileKey(track.fileHash))
     }

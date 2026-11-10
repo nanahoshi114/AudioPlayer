@@ -18,8 +18,11 @@ import com.nanahoshi.audioplayer.dlsite.DlsiteClient
 import com.nanahoshi.audioplayer.dlsite.PlayEntry
 import com.nanahoshi.audioplayer.dlsite.RemotePlayable
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -29,6 +32,46 @@ import java.util.UUID
 @RunWith(AndroidJUnit4::class)
 class DlsiteOriginalStoreAndroidTest {
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
+
+    @Test
+    fun replacingManifestInvalidatesAPathEvenWhenOldFolderRowsRemain() = runBlocking {
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        val directory = File(context.filesDir, "original-path-test/${UUID.randomUUID()}")
+        try {
+            val credentials = CredentialStore(context)
+            val dlsite = DlsiteClient(credentials)
+            val library = LibraryRepository(context, db, BilibiliClient(credentials), AsmrClient(), dlsite)
+            val facts = WorkFacts("fixture", "circle", emptyList(), emptyList(), "", "RJ123456")
+            val root = db.folders().insert(FolderEntity(name = "fixture", position = 0,
+                asmrWorkId = 123456, asmrSourceId = "RJ123456", workMeta = facts.toJson()))
+            val store = DlsiteOriginalStore(context, db, dlsite, library) { _, _, _ -> emptyList() }
+            fun generation(name: String, subfolder: String) = File(directory, name).apply {
+                val folder = File(this, "audio/$subfolder").apply { mkdirs() }
+                File(folder, "voice.wav").writeBytes(ByteArray(32))
+            }
+            store.importDirectory("RJ123456", generation("first", "old"), "first")
+            val original = db.dlsiteOriginals().entries("RJ123456")
+            val parent = original.single { it.relativePath == "audio" }.folderId!!
+            val removed = original.single { it.relativePath == "audio/old" }.folderId!!
+            val paths = Channel<List<Long>>(Channel.UNLIMITED)
+            val watcher = launch {
+                library.observeVisibleWorkPath(listOf(root, parent, removed), TrackSource.DLSITE)
+                    .collect { paths.send(it.map(FolderEntity::id)) }
+            }
+            try {
+                assertEquals(listOf(root, parent, removed), withTimeout(5000) { paths.receive() })
+                store.importDirectory("RJ123456", generation("second", "new"), "second")
+                assertEquals(listOf(root, parent), withTimeout(5000) { paths.receive() })
+                assertNotNull(db.folders().get(removed))
+                assertEquals(listOf("new"), library.observeChildFolders(parent, TrackSource.DLSITE).first().map { it.name })
+            } finally {
+                watcher.cancel()
+            }
+        } finally {
+            db.close()
+            directory.deleteRecursively()
+        }
+    }
 
     @Test
     fun replacingGenerationKeepsTracksPlaylistsQueueAndSubtitles() = runBlocking {

@@ -25,6 +25,7 @@ internal fun WorkFileBrowser(
     state: LazyListState,
     modifier: Modifier = Modifier,
     bottomPadding: PaddingValues = PaddingValues(bottom = 24.dp),
+    loading: Boolean = false,
     header: @Composable ColumnScope.() -> Unit,
     controls: @Composable ColumnScope.() -> Unit,
     files: LazyListScope.() -> Unit,
@@ -37,8 +38,12 @@ internal fun WorkFileBrowser(
             header()
             Column(Modifier.fillMaxWidth().height(pageHeight).nestedScroll(connection)) {
                 controls()
-                LazyColumn(state = state, modifier = Modifier.fillMaxWidth().weight(1f),
-                    contentPadding = bottomPadding, content = files)
+                if (loading) {
+                    LoadingState("正在读取文件…", Modifier.weight(1f))
+                } else {
+                    LazyColumn(state = state, modifier = Modifier.fillMaxWidth().weight(1f),
+                        contentPadding = bottomPadding, content = files)
+                }
             }
         }
     }

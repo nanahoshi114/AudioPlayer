@@ -116,7 +116,7 @@ fun ModelSettingsScreen(
                     OutlinedTextField(
                         value = viewModel.whisperToken,
                         onValueChange = { viewModel.whisperToken = it },
-                        label = { Text(if (isCloudWhisperModel(viewModel.whisperModel)) "API Key" else "口令") },
+                        label = { Text("API Key") },
                         singleLine = true,
                         visualTransformation = PasswordVisualTransformation(),
                         modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
@@ -148,7 +148,7 @@ fun ModelSettingsScreen(
                 OutlinedTextField(
                     value = viewModel.translateToken,
                     onValueChange = { viewModel.translateToken = it },
-                    label = { Text("口令") },
+                    label = { Text("API Key") },
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
                     modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
@@ -156,13 +156,8 @@ fun ModelSettingsScreen(
                 OutlinedTextField(
                     value = viewModel.translateModel,
                     onValueChange = { viewModel.translateModel = it },
-                    placeholder = {
-                        Text(
-                            viewModel.translatePlatform.defaultModel,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    },
-                    supportingText = { Text("模型名") },
+                    label = { Text("模型名（可选）") },
+                    supportingText = { Text("留空使用 ${viewModel.translatePlatform.defaultModel}") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                 )
@@ -227,7 +222,7 @@ private fun SaveStatus(modified: Boolean, configured: Boolean) {
         when {
             modified -> "有未保存的修改"
             configured -> "已保存"
-            else -> "未配置完成"
+            else -> "未配置"
         },
         style = MaterialTheme.typography.bodySmall,
         color = if (modified) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -517,7 +512,7 @@ private fun WhisperHelpDialog(onDismiss: () -> Unit) {
                     modifier = Modifier.padding(top = 8.dp),
                 )
                 Text(
-                    "Qwen3-ASR：自己部署的服务，填地址和口令（服务不校验口令时随便填一个）。地址在局域网时，首次访问要允许本地网络。",
+                    "Qwen3-ASR：自己部署的服务，填地址和 API Key（服务不校验时可随便填）。地址在局域网时，首次访问要允许本地网络。",
                     modifier = Modifier.padding(top = 8.dp),
                 )
                 Text(
@@ -543,7 +538,7 @@ private fun TranslateHelpDialog(onDismiss: () -> Unit) {
         title = { Text("翻译") },
         text = {
             Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
-                Text("选一个平台，填入口令后点「保存」。模型名可以不填：千问AI平台默认 qwen3.8-flash，DeepSeek 默认 deepseek-flash。")
+                Text("选一个平台，填入 API Key 后点「保存」。模型名可以留空：千问 AI 平台默认 qwen3.8-flash，DeepSeek 默认 deepseek-flash。")
                 Text(
                     "深度思考一般不用打开；想要更细的译文时再打开，并选择思考强度。",
                     modifier = Modifier.padding(top = 8.dp),

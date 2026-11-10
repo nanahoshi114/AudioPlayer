@@ -23,7 +23,7 @@ internal class BiliLibraryStore(
     private suspend fun validateConversion(request: BiliImportRequest) {
         val current = mode(request.video.bvid)
         check(current == null || current == request.mode || request.conversionConfirmed) {
-            "这个视频的入库方式已变化，请重新导入并确认转换"
+            "这个视频的导入方式已经改变，请重新导入并确认。"
         }
     }
 
@@ -65,7 +65,7 @@ internal class BiliLibraryStore(
         } else {
             if (oldGroup != null) {
                 check(db.folders().childrenOf(oldGroup.id).isEmpty() && db.files().listIn(oldGroup.id).isEmpty() &&
-                    db.tracks().inFolder(oldGroup.id).all { it.bvid == bvid }) { "分组含有其它内容，无法直接转换" }
+                    db.tracks().inFolder(oldGroup.id).all { it.bvid == bvid }) { "这个分组里还有其他视频，无法直接更改导入方式" }
                 existing.filter { it.folderId == oldGroup.id }.forEach { db.tracks().setFolder(it.id, oldGroup.parentId) }
                 db.folders().delete(oldGroup.id)
             }

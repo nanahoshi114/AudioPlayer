@@ -15,12 +15,13 @@ import com.nanahoshi.audioplayer.data.DlsiteDownloadMode
 import com.nanahoshi.audioplayer.data.FormatConflict
 import com.nanahoshi.audioplayer.data.LibrarySort
 import com.nanahoshi.audioplayer.data.LocalAudio
+import com.nanahoshi.audioplayer.data.LocalRemoval
 import com.nanahoshi.audioplayer.data.findFormatConflicts
 import com.nanahoshi.audioplayer.data.idsToDrop
 import com.nanahoshi.audioplayer.data.TrackSource
 import com.nanahoshi.audioplayer.data.WorkFill
-import com.nanahoshi.audioplayer.data.libraryFileSource
 import com.nanahoshi.audioplayer.data.isSubtitleFile
+import com.nanahoshi.audioplayer.data.localRemoval
 import com.nanahoshi.audioplayer.data.sortedForLibrary
 import com.nanahoshi.audioplayer.data.db.FolderEntity
 import com.nanahoshi.audioplayer.data.db.LibraryFileEntity
@@ -29,15 +30,22 @@ import com.nanahoshi.audioplayer.graph
 import com.nanahoshi.audioplayer.playback.pickSubtitleName
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 enum class LibrarySourceFilter {
     ALL,
@@ -97,9 +105,16 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     val workFileSource = MutableStateFlow<TrackSource?>(null)
     val workSources = MutableStateFlow(false)
     val workRootId = MutableStateFlow<Long?>(null)
-    val workRoot = workRootId.flatMapLatest { id ->
-        if (id == null) kotlinx.coroutines.flow.flowOf(null) else graph.library.observeFolder(id)
-    }
+    internal val workLocation = MutableStateFlow<WorkFolderLocation?>(null)
+    internal val workMissing = MutableStateFlow(false)
+    private var openedWorkId: Long? = null
+    private var workPathJob: Job? = null
+    internal val workListing = workLocation.map { it?.request }.distinctUntilChanged()
+        .flatMapLatest { request ->
+            if (request == null) emptyFlow()
+            else graph.library.observeFolderListing(request.folderId, LibrarySort.NAME, request.source)
+                .map { LoadedWorkFolder(request, it) }
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
     private val listingSort = combine(sort, workRootId) { global, root ->
         effectiveLibrarySort(global, root)
     }
@@ -153,28 +168,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             request.filter != LibrarySourceFilter.ALL -> acrossLibrary { folders, tracks, _ ->
                 filteredListing(request.filter, request.sort, folders, tracks)
             }
-            else -> combine(
-                graph.library.observeChildFolders(request.folderId),
-                graph.library.observeTracksIn(request.folderId),
-                graph.library.observeFilesIn(request.folderId),
-            ) { folders, tracks, files ->
-                val source = request.workSource
-                val shownFolders = if (source == null) {
-                    folders
-                } else {
-                    folders.filter { it.contentSource == source.name || it.asmrWorkId == null }
-                }
-                val shownTracks = if (source == null) tracks else tracks.filter { it.source == source }
-                val shownFiles = if (source == null) {
-                    files
-                } else {
-                    files.filter { libraryFileSource(it.fileHash) == source }
-                }
-                LibraryListing(
-                    shownFolders.sortedForLibrary(request.sort),
-                    mixedEntries(shownTracks, shownFiles, request.sort),
-                )
-            }
+            else -> graph.library.observeFolderListing(request.folderId, request.sort, request.workSource)
         }
     }
     val biliAuthors = graph.library.observeTracks().map { tracks ->
@@ -187,9 +181,10 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     val selectedFolderIds = MutableStateFlow<Set<Long>>(emptySet())
     private val metaRequested = mutableSetOf<Long>()
 
-        init {
+    init {
         viewModelScope.launch {
             combine(currentFolderId, currentFolder) { id, folder -> id to folder }.collect { (id, folder) ->
+                if (workLocation.value != null) return@collect
                 if (id == null) {
                     clearWorkSource()
                     return@collect
@@ -200,7 +195,9 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         viewModelScope.launch {
-            listing.collect { current ->
+            val listings = workLocation.map { it == null }.distinctUntilChanged()
+                .flatMapLatest { ordinary -> if (ordinary) listing else emptyFlow() }
+            listings.collect { current ->
                 current.folders.forEach { folder ->
                     if (folder.asmrSourceId == null || !folder.workMeta.isNullOrBlank()) return@forEach
                     if (!metaRequested.add(folder.id)) return@forEach
@@ -221,14 +218,69 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun openWork(folderId: Long) {
-        viewModelScope.launch {
+        if (openedWorkId == folderId) return
+        openedWorkId = folderId
+        workPathJob?.cancel()
+        workMissing.value = false
+        workPathJob = viewModelScope.launch {
             val folder = graph.library.folder(folderId)
             if (folder == null) {
-                graph.messages.value = "没有这个作品"
+                markWorkMissing()
                 return@launch
             }
+            workLocation.value = WorkFolderLocation(listOf(folder))
             openFolder(folder)
+            workLocation.map { it?.request }.distinctUntilChanged()
+                .flatMapLatest { request ->
+                    if (request == null) emptyFlow() else graph.library.observeWorkPath(request)
+                }.collect { (request, path) ->
+                    val location = workLocation.value ?: return@collect
+                    if (location.request !== request) return@collect
+                    if (path.isEmpty()) markWorkMissing()
+                    else updateWorkLocation(location.move(path))
+                }
         }
+    }
+
+    private fun markWorkMissing() {
+        openJob?.cancel()
+        openGeneration += 1
+        workMissing.value = true
+        workLocation.value = null
+        currentFolderId.value = null
+        clearSelection()
+        clearWorkSource()
+        busy.value = false
+    }
+
+    private fun updateWorkLocation(location: WorkFolderLocation) {
+        if (workLocation.value?.request !== location.request) {
+            currentFolderId.value = location.request.folderId
+            workFileSource.value = location.request.source
+            clearSelection()
+        }
+        workLocation.value = location
+    }
+
+    internal fun openWorkFolder(request: WorkFolderRequest?, folder: FolderEntity) {
+        val location = workLocation.value ?: return
+        if (location.request !== request) return
+        val next = location.enter(folder)
+        if (next === location) return
+        folderScroll[folder.id] = LazyListState()
+        updateWorkLocation(next)
+    }
+
+    internal fun goToWorkAncestor(folderId: Long) {
+        val location = workLocation.value ?: return
+        updateWorkLocation(location.ancestor(folderId))
+    }
+
+    internal fun upInWork(): Boolean {
+        val path = workLocation.value?.path ?: return false
+        val parent = path.getOrNull(path.lastIndex - 1) ?: return false
+        goToWorkAncestor(parent.id)
+        return true
     }
 
     fun openFolder(folder: FolderEntity) {
@@ -258,15 +310,15 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 graph.library.ensureWorkMeta(folder.id)
                 if (work && graph.library.ensureWorkFiles(folder.id) == WorkFill.EMPTY) {
-                    graph.messages.value = "没有读到这个作品的文件"
+                    graph.messages.value = "没有找到这个作品的文件"
                 }
-                if (work && generation == openGeneration && currentFolderId.value == folder.id) {
+                if (work && generation == openGeneration && workRootId.value == folder.id) {
                     applyWorkSources(folder.id)
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                graph.messages.value = failure.message ?: "没有读到这个作品的文件"
+                graph.messages.value = failure.message ?: "没有找到这个作品的文件"
             } finally {
                 if (generation == openGeneration) busy.value = false
             }
@@ -274,12 +326,11 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun useWorkSource(source: TrackSource) {
-        if (workFileSource.value == source && currentFolderId.value == workRootId.value) return
-        val root = workRootId.value ?: return
-        folderScroll[root] = LazyListState()
-        if (currentFolderId.value != root) currentFolderId.value = root
-        workFileSource.value = source
-        clearSelection()
+        val location = workLocation.value ?: return
+        if (location.request.source == source) return
+        val root = location.path.first()
+        folderScroll[root.id] = LazyListState()
+        updateWorkLocation(location.move(listOf(root), source))
         openJob?.cancel()
         sourceCheckJob?.cancel()
         openGeneration += 1
@@ -287,21 +338,21 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         openJob = viewModelScope.launch {
             busy.value = true
             try {
-                val fill = graph.library.ensureWorkSource(root, source)
+                val fill = graph.library.ensureWorkSource(root.id, source)
                 if (fill == WorkFill.EMPTY) {
                     graph.messages.value = if (source == TrackSource.DLSITE) {
-                        "无法读取已购买文件"
+                        "无法读取已购买作品的文件"
                     } else {
-                        "没有读到这个作品的文件"
+                        "没有找到这个作品的文件"
                     }
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
                 graph.messages.value = if (failure.message == "未找到该作品") {
-                    "asmr.one未收录"
+                    "asmr.one 未收录"
                 } else {
-                    failure.message ?: "没有读到这个作品的文件"
+                    failure.message ?: "没有找到这个作品的文件"
                 }
             } finally {
                 if (generation == openGeneration) busy.value = false
@@ -312,13 +363,11 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun applyWorkSources(folderId: Long) {
         val sources = graph.library.prepareWorkSources(folderId) ?: return
         if (sources.hasPlay) {
-            workFileSource.value = TrackSource.DLSITE
-            workSources.value = true
+            showWorkSources(TrackSource.DLSITE)
             return
         }
         if (sources.purchased == true) {
-            workFileSource.value = TrackSource.ASMR
-            workSources.value = true
+            showWorkSources(TrackSource.ASMR)
             return
         }
         if (sources.purchased == false) return
@@ -326,10 +375,25 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         sourceCheckJob = viewModelScope.launch {
             val purchased = graph.library.checkPurchased(folderId)
             if (purchased && workRootId.value == folderId) {
-                workFileSource.value = TrackSource.ASMR
-                workSources.value = true
+                showWorkSources(TrackSource.ASMR)
             }
         }
+    }
+
+    private fun showWorkSources(defaultSource: TrackSource) {
+        val location = workLocation.value
+        if (location != null) {
+            val folderSource = location.path.last().contentSource
+            val source = if (location.path.size == 1) defaultSource else when (folderSource) {
+                TrackSource.ASMR.name -> TrackSource.ASMR
+                TrackSource.DLSITE.name -> TrackSource.DLSITE
+                else -> defaultSource
+            }
+            updateWorkLocation(location.move(location.path, source))
+        } else {
+            workFileSource.value = defaultSource
+        }
+        workSources.value = true
     }
 
     fun setSourceFilter(filter: LibrarySourceFilter) {
@@ -380,7 +444,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         pendingAsmr.value = null
         launch {
             graph.library.importAsmr(preview.sourceId, currentFolderId.value)
-            graph.messages.value = "已导入作品"
+            graph.messages.value = "已加入音频库"
         }
     }
 
@@ -429,20 +493,14 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     fun downloadTrack(track: TrackEntity) = launch {
         val count = downloadTracks(listOf(track)) ?: return@launch
-        val caching = track.source == TrackSource.BILIBILI
-        graph.messages.value = when {
-            count == 0 && caching -> "已经在本地或正在缓存"
-            count == 0 -> "已经在本地或正在下载"
-            caching -> "已加入缓存"
-            else -> "已加入下载"
-        }
+        graph.messages.value = if (count == 0) "已在本地或正在下载" else "已加入下载"
     }
 
     fun downloadSelection() = launch {
         val tracks = selectedTracks()
         val count = downloadTracks(tracks) ?: return@launch
         clearSelection()
-        graph.messages.value = if (count == 0) "没有需要下载的音频" else "已加入 $count 个下载"
+        graph.messages.value = if (count == 0) "没有需要下载的音频" else "已加入 $count 个下载任务"
     }
 
     private suspend fun downloadTracks(tracks: List<TrackEntity>): Int? {
@@ -465,36 +523,69 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         return count + graph.downloads.enqueue(tracks.filter { it.source != TrackSource.DLSITE })
     }
 
-    data class PendingAudioDelete(val tracks: List<TrackEntity>, val subtitles: Int)
-
-    val pendingAudioDelete = MutableStateFlow<PendingAudioDelete?>(null)
-
-    fun deleteDownloadedTrack(track: TrackEntity) = launch { requestDeleteDownloaded(listOf(track)) }
-
-    fun deleteDownloadedSelection() = launch {
-        val tracks = selectedTracks()
-        clearSelection()
-        requestDeleteDownloaded(tracks)
+    internal data class LocalRemovalTargets(
+        val downloads: List<TrackEntity>,
+        val associations: List<TrackEntity>,
+    ) {
+        val label: String get() = if (downloads.isNotEmpty()) "删除已下载文件" else "取消本地关联"
     }
 
-    private suspend fun requestDeleteDownloaded(tracks: List<TrackEntity>) {
-        if (tracks.isEmpty()) return
-        val subtitles = tracks.count { graph.subtitles.hasGenerated(it.id, it.localUri, it.remoteUrl) }
-        if (subtitles > 0) {
-            pendingAudioDelete.value = PendingAudioDelete(tracks, subtitles)
+    internal data class LocalRemovalSelection(
+        val tracks: Set<Long>,
+        val folders: Set<Long>,
+        val source: TrackSource?,
+    )
+
+    internal val selectedLocalRemoval = combine(
+        selectedTrackIds, selectedFolderIds, workFileSource, ::LocalRemovalSelection,
+    ).flatMapLatest { selection ->
+        if (selection.tracks.isEmpty() && selection.folders.isEmpty()) flowOf(null)
+        else graph.library.observeLocalRemovalTracks(selection.tracks, selection.folders, selection.source)
+            .map { tracks ->
+                val targets = localRemovalTargets(tracks)
+                targets.takeUnless { it.downloads.isEmpty() && it.associations.isEmpty() }?.let { selection to it }
+            }
+    }.flowOn(Dispatchers.IO).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    internal data class PendingAudioDelete(val targets: LocalRemovalTargets, val subtitles: Int)
+
+    internal val pendingAudioDelete = MutableStateFlow<PendingAudioDelete?>(null)
+
+    fun deleteDownloadedTrack(track: TrackEntity) = launch {
+        requestDeleteDownloaded(withContext(Dispatchers.IO) { localRemovalTargets(listOf(track)) })
+    }
+
+    internal fun deleteDownloadedSelection(selection: LocalRemovalSelection, targets: LocalRemovalTargets) = launch {
+        if (selection != LocalRemovalSelection(selectedTrackIds.value, selectedFolderIds.value, workFileSource.value)) return@launch
+        clearSelection()
+        requestDeleteDownloaded(targets)
+    }
+
+    private suspend fun requestDeleteDownloaded(targets: LocalRemovalTargets) {
+        val subtitles = targets.downloads.count { graph.subtitles.hasGenerated(it.id, it.localUri, it.remoteUrl) }
+        if (subtitles > 0 || (targets.downloads.isNotEmpty() && targets.associations.isNotEmpty())) {
+            pendingAudioDelete.value = PendingAudioDelete(targets, subtitles)
         } else {
-            graph.messages.value = deleteDownloadedNotice(graph.downloads.deleteDownloaded(tracks, deleteSubtitles = true))
+            applyLocalRemoval(targets, deleteSubtitles = true)
         }
     }
 
     fun confirmAudioDelete(deleteSubtitles: Boolean) {
         val pending = pendingAudioDelete.value ?: return
         pendingAudioDelete.value = null
-        launch {
-            graph.messages.value = deleteDownloadedNotice(
-                graph.downloads.deleteDownloaded(pending.tracks, deleteSubtitles),
-            )
-        }
+        launch { applyLocalRemoval(pending.targets, deleteSubtitles) }
+    }
+
+    private suspend fun applyLocalRemoval(targets: LocalRemovalTargets, deleteSubtitles: Boolean) {
+        val tracks = targets.downloads + targets.associations
+        val result = graph.downloads.deleteDownloaded(tracks, deleteSubtitles)
+        graph.messages.value = deleteDownloadedNotice(result)
+    }
+
+    private fun localRemovalTargets(tracks: List<TrackEntity>): LocalRemovalTargets {
+        val filesDir = getApplication<Application>().filesDir
+        val byAction = tracks.groupBy { it.localRemoval(filesDir) }
+        return LocalRemovalTargets(byAction[LocalRemoval.DOWNLOAD].orEmpty(), byAction[LocalRemoval.ASSOCIATION].orEmpty())
     }
 
     fun cancelAudioDelete() {
@@ -546,7 +637,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             chosen = askCache(CachePrompt.Source(sourceFolderId)) as? TrackSource ?: return
         }
         val tracks = graph.library.asmrTracksInTree(folderId)
-        // 普通父目录仍缓存整个子树；DLsite子作品各自转为一个完整包任务。
+        // 普通父目录仍下载整个子树；DLsite 子作品各自转为一个完整原始包任务。
         if (root == null) {
             val worknos = tracks.filter { it.source == TrackSource.DLSITE }
                 .mapNotNull { graph.downloads.requestWorkno(it) }
@@ -554,7 +645,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             for (workno in worknos) graph.downloads.enqueueDlsiteArchive(workno)
             val files = graph.downloads.enqueue(tracks.filter { it.source != TrackSource.DLSITE })
             graph.messages.value = if (worknos.isEmpty() && files == 0) "没有需要下载的音频"
-                else "已加入 ${worknos.size + files} 个下载"
+                else "已加入 ${worknos.size + files} 个下载任务"
             return
         }
         // 没弹窗时：当前来源优先，作品外面按 Play 优先，其次 asmr.one。
@@ -567,9 +658,9 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             val worknos = root?.asmrSourceId?.let { listOf(it) }
                 ?: tracks.filter { it.source == TrackSource.DLSITE }.mapNotNull { graph.downloads.requestWorkno(it) }
                     .distinctBy { com.nanahoshi.audioplayer.dlsite.DlsiteClient.canonicalWorkno(it) }
-            if (worknos.isEmpty()) error("找不到作品编号")
+            if (worknos.isEmpty()) error("这个作品缺少编号")
             for (workno in worknos) graph.downloads.enqueueDlsiteArchive(workno, root?.name ?: workno)
-            graph.messages.value = "已加入 ${worknos.size} 个完整包下载"
+            graph.messages.value = "已加入 ${worknos.size} 个完整原始包下载任务"
             return
         }
         val pending = tracks.filter { it.source == source && !LocalAudio.hasStoredCopy(it.localUri) }
@@ -580,7 +671,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             dropped = dropped + idsToDrop(conflict, keep)
         }
         val count = graph.downloads.enqueue(pending.filter { it.id !in dropped })
-        graph.messages.value = if (count == 0) "没有需要下载的音频" else "已加入 $count 个下载"
+        graph.messages.value = if (count == 0) "没有需要下载的音频" else "已加入 $count 个下载任务"
     }
 
     fun addSelectionToPlaylist(playlistId: Long) = launch {
@@ -816,7 +907,7 @@ internal fun searchListing(
 }
 
 /** 向上找最近的作品根；普通文件夹返回 null。 */
-private fun workRootOf(folderId: Long?, byId: Map<Long, FolderEntity>): FolderEntity? {
+internal fun workRootOf(folderId: Long?, byId: Map<Long, FolderEntity>): FolderEntity? {
     var current = folderId?.let(byId::get)
     while (current != null) {
         if (!current.asmrSourceId.isNullOrBlank() || current.biliBvid != null) return current
@@ -885,9 +976,10 @@ private fun FolderEntity.matchesRj(digits: String): Boolean {
 private fun rjNumber(raw: String): String =
     raw.uppercase().removePrefix("RJ").removePrefix("VJ").filter { it.isDigit() }.trimStart('0').ifEmpty { "0" }
 
-private fun deleteDownloadedNotice(result: DeleteResult): String = when {
-    result.total == 0 -> "没有已下载的文件"
-    result.unlinked == 0 -> if (result.deleted == 1) "已删除已下载的文件" else "已删除 ${result.deleted} 个已下载文件"
-    result.deleted == 0 -> "已取消识别 ${result.unlinked} 首，手机上的原文件没有动"
-    else -> "已删除 ${result.deleted} 个已下载文件，取消识别 ${result.unlinked} 首"
+internal fun deleteDownloadedNotice(result: DeleteResult): String = buildList {
+    if (result.deleted > 0) add("已删除 ${result.deleted} 个已下载文件")
+    if (result.unlinked > 0) add("已取消 ${result.unlinked} 首曲目的本地关联，手机原文件已保留")
+    if (result.changed > 0) add("已跳过 ${result.changed} 首本地路径已变化或已移除的曲目")
+}.joinToString("。").ifEmpty {
+    "没有可删除的下载副本或可取消的本地关联"
 }

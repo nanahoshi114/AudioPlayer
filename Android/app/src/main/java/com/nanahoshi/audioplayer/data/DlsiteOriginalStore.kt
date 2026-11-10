@@ -58,10 +58,10 @@ class DlsiteOriginalStore(
         val code = DlsiteClient.canonicalWorkno(workno)
         val rootDirectory = directory.canonicalFile
         require(rootDirectory.isDirectory && rootDirectory.path.startsWith(filesDir.path + File.separator)) {
-            "找不到已解压的原始文件"
+            "找不到已解压的完整原始包文件"
         }
         val disk = scanOriginalDirectory(rootDirectory)
-        require(disk.any { it.kind != DlsiteOriginalKind.FOLDER }) { "原始压缩包里没有文件" }
+        require(disk.any { it.kind != DlsiteOriginalKind.FOLDER }) { "完整原始包里没有文件" }
         val originalLeaves = disk.filter { it.kind != DlsiteOriginalKind.FOLDER }.map { it.path }
         val previousRoot = library.folderBySource(code)
         val shown = if (previousRoot == null) optional { dlsite.showcase(code) } else null
@@ -237,7 +237,7 @@ private data class OriginalDiskEntry(val path: String, val file: File, val kind:
 
 private fun scanOriginalDirectory(root: File): List<OriginalDiskEntry> = root.walkTopDown().drop(1).map { file ->
     require(file.canonicalPath == file.absolutePath && file.canonicalPath.startsWith(root.path + File.separator)) {
-        "原始文件目录包含不安全的路径"
+        "完整原始包目录包含不安全的路径"
     }
     val path = file.relativeTo(root).invariantSeparatorsPath
     val kind = when {

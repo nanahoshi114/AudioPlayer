@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Album
@@ -26,6 +27,9 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Icon
@@ -40,6 +44,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.semantics.semantics
@@ -86,7 +91,7 @@ class StoredFilesViewModel(app: Application) : AndroidViewModel(app) {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                error = failure.message ?: "无法读取已下载的文件"
+                error = failure.message ?: "无法读取文件列表"
             } finally {
                 loading = false
             }
@@ -128,7 +133,7 @@ class StoredFilesViewModel(app: Application) : AndroidViewModel(app) {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                error = failure.message?.takeIf { it.isNotBlank() } ?: "无法读取字幕信息"
+                error = failure.message?.takeIf { it.isNotBlank() } ?: "无法读取字幕信息，请重试"
             }
         }
     }
@@ -163,13 +168,19 @@ fun StoredFilesScreen(
     viewModel: StoredFilesViewModel = viewModel(),
 ) {
     val context = LocalContext.current
-    var query by remember { mutableStateOf("") }
+    var showAudio by rememberSaveable { mutableStateOf(true) }
+    val audioListState = rememberLazyListState()
+    val subtitleListState = rememberLazyListState()
+    var query by rememberSaveable { mutableStateOf("") }
     var selecting by remember { mutableStateOf(false) }
     var selected by remember { mutableStateOf(setOf<String>()) }
-    val visible = remember(viewModel.items, query) {
-        viewModel.items.filter { storedItemMatches(it, query) }
+    val categoryItems = remember(viewModel.items, showAudio) {
+        viewModel.items.filter { (it.kind == StoredKind.AUDIO) == showAudio }
     }
-    val chosen = viewModel.items.filter { it.path in selected }
+    val visible = remember(categoryItems, query) {
+        categoryItems.filter { storedItemMatches(it, query) }
+    }
+    val chosen = categoryItems.filter { it.path in selected }
     val single = chosen.singleOrNull()
     BackHandler(enabled = selecting) {
         selecting = false
@@ -199,14 +210,14 @@ fun StoredFilesScreen(
                 actions = buildList {
                     add(
                         SelectionAction(
-                            "导出",
+                            "分享",
                             Icons.Default.Share,
                             { shareStored(context, chosen.map { File(it.path) }) },
                             enabled = chosen.isNotEmpty(),
                         ),
                     )
                     if (single?.sourceId != null) {
-                        add(SelectionAction("作品", Icons.Default.Album, { onOpenWork(single.sourceId) }))
+                        add(SelectionAction("打开作品", Icons.Default.Album, { onOpenWork(single.sourceId) }))
                     }
                     add(
                         SelectionAction(
@@ -222,34 +233,54 @@ fun StoredFilesScreen(
         } else {
             AppTopBar(title = "下载管理", onBack = onBack)
         }
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+            SegmentedButton(
+                selected = showAudio,
+                onClick = { showAudio = true },
+                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                enabled = !selecting,
+            ) { Text("音频") }
+            SegmentedButton(
+                selected = !showAudio,
+                onClick = { showAudio = false },
+                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                enabled = !selecting,
+            ) { Text("字幕") }
+        }
         OutlinedTextField(
             value = query,
             onValueChange = { query = it },
-            placeholder = { Text("文件名、RJ 号或作品名") },
+            placeholder = { Text("文件名、编号或作品名") },
             leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
             singleLine = true,
             shape = RoundedCornerShape(28.dp),
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
         )
         when {
-            viewModel.loading && viewModel.items.isEmpty() -> LoadingState("正在读取已下载的文件", Modifier.fillMaxSize())
-            viewModel.error != null && viewModel.items.isEmpty() -> ErrorState(
+            viewModel.loading && visible.isEmpty() -> LoadingState("正在读取文件", Modifier.fillMaxSize())
+            viewModel.error != null && visible.isEmpty() -> ErrorState(
                 message = viewModel.error!!,
                 onRetry = viewModel::refresh,
                 modifier = Modifier.fillMaxSize(),
             )
-            viewModel.items.isEmpty() -> EmptyState(title = "没有已下载的文件", modifier = Modifier.fillMaxSize())
+            categoryItems.isEmpty() -> EmptyState(
+                title = if (showAudio) "还没有下载的音频" else "还没有字幕文件",
+                modifier = Modifier.fillMaxSize(),
+            )
             visible.isEmpty() -> EmptyState(title = "没有匹配的文件", modifier = Modifier.fillMaxSize())
-            else -> LazyColumn(Modifier.fillMaxSize()) {
+            else -> LazyColumn(
+                state = if (showAudio) audioListState else subtitleListState,
+                modifier = Modifier.fillMaxSize(),
+            ) {
                 if (viewModel.loading) {
-                    item(key = "loading") { LoadingState("正在读取已下载的文件") }
+                    item(key = "loading") { LoadingState("正在读取文件") }
                 } else if (viewModel.error != null) {
                     item(key = "error") { ErrorState(viewModel.error!!, viewModel::refresh) }
                 }
                 if (!selecting) {
                     item(key = "selection-hint") {
                         Text(
-                            "长按文件可多选、导出或删除",
+                            "长按文件可多选、分享或删除",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
@@ -266,8 +297,8 @@ fun StoredFilesScreen(
                         supportingContent = {
                             val bits = listOfNotNull(
                                 when (item.kind) {
-                                    StoredKind.GENERATED -> "生成字幕"
-                                    StoredKind.SUBTITLE -> "字幕"
+                                    StoredKind.GENERATED -> "App 生成字幕"
+                                    StoredKind.SUBTITLE -> "字幕文件"
                                     StoredKind.AUDIO -> null
                                 },
                                 item.workTitle?.takeIf { it.isNotBlank() },
@@ -325,11 +356,11 @@ private fun shareStored(context: Context, files: List<File>) {
         uris.drop(1).forEach { clip.addItem(ClipData.Item(it)) }
         intent.clipData = clip
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        val chooser = Intent.createChooser(intent, "导出")
+        val chooser = Intent.createChooser(intent, "分享")
         chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         context.startActivity(chooser)
     } catch (_: Exception) {
-        (context.applicationContext as Application).graph().messages.value = "无法导出"
+        (context.applicationContext as Application).graph().messages.value = "无法分享"
     }
 }
 

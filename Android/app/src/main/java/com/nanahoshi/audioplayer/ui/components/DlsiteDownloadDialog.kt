@@ -26,12 +26,12 @@ fun DlsiteDownloadDialog(requests: DlsiteDownloadRequests) {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text(
                     if (prompt.allowPartial) {
-                        "下载部分文件时，DLsite Play 可能会压缩音频、降低音质。是否下载完整原始压缩包并自动解压？"
+                        "下载部分文件时，DLsite Play 可能会压缩音频、降低音质。是否改为下载完整原始包并自动解压？"
                     } else {
-                        "所选音频包含无法单独下载的原始文件，需要下载完整原始压缩包并自动解压。"
+                        "所选内容里有无法单独下载的文件，需要下载完整原始包并自动解压。"
                     },
                 )
-                Text("原始包的音质以作者提供的文件为准。", style = MaterialTheme.typography.bodySmall)
+                Text("完整原始包的音质以作者提供的文件为准。", style = MaterialTheme.typography.bodySmall)
                 if (prompt.workNames.isNotEmpty()) {
                     Text(prompt.workNames.joinToString("\n"), style = MaterialTheme.typography.bodySmall)
                 }
@@ -40,7 +40,7 @@ fun DlsiteDownloadDialog(requests: DlsiteDownloadRequests) {
         confirmButton = {
             Column(Modifier.fillMaxWidth()) {
                 TextButton(onClick = { requests.answer(prompt.id, DlsiteDownloadMode.ARCHIVE) }, modifier = Modifier.fillMaxWidth()) {
-                    Text("下载完整包")
+                    Text("下载完整原始包")
                 }
                 if (prompt.allowPartial) {
                     TextButton(onClick = { requests.answer(prompt.id, DlsiteDownloadMode.PARTIAL) }, modifier = Modifier.fillMaxWidth()) {

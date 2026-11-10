@@ -70,7 +70,7 @@ fun BiliBrowser(onOpenCollection: (BiliCollection) -> Unit = {}, viewModel: Bili
         if (uploader == null) {
             Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(viewModel.mode == BiliSearchMode.VIDEO, { viewModel.switchMode(BiliSearchMode.VIDEO) }, label = { Text("视频") })
-                FilterChip(viewModel.mode == BiliSearchMode.UPLOADER, { viewModel.switchMode(BiliSearchMode.UPLOADER) }, label = { Text("UP主") })
+                FilterChip(viewModel.mode == BiliSearchMode.UPLOADER, { viewModel.switchMode(BiliSearchMode.UPLOADER) }, label = { Text("UP 主") })
             }
             OutlinedTextField(value = viewModel.query, onValueChange = viewModel::updateQuery,
                 label = { Text(if (users) "UP 主昵称、UID 或主页链接" else "关键词、BV 号或视频链接") }, singleLine = true,
@@ -106,7 +106,7 @@ fun BiliBrowser(onOpenCollection: (BiliCollection) -> Unit = {}, viewModel: Bili
             if (loading) TextButton(onClick = viewModel::cancelSearch) { Text("中止") }
             else if (uploader == null) TextButton(onClick = viewModel::search, enabled = !viewModel.working) { Text("查找") }
             if (!users && items.isNotEmpty()) TextButton(onClick = viewModel::selectAll) {
-                Text(if (viewModel.selected.size == items.size) "取消全选" else "全选")
+                Text(if (viewModel.selected.size == items.size) "取消全选" else "全选已加载")
             }
         }
         if (viewModel.selected.isNotEmpty()) {
@@ -115,7 +115,7 @@ fun BiliBrowser(onOpenCollection: (BiliCollection) -> Unit = {}, viewModel: Bili
                 TextButton(onClick = viewModel::clearSelection) { Text("取消") }
                 TextButton(enabled = !viewModel.resolving && !viewModel.working, onClick = {
                     viewModel.prepare(BiliAction.SAVE, items.filter { it.bvid in viewModel.selected })
-                }) { Text("保存") }
+                }) { Text("加入音频库") }
                 TextButton(enabled = !viewModel.resolving && !viewModel.working, onClick = {
                     viewModel.prepare(BiliAction.DOWNLOAD, items.filter { it.bvid in viewModel.selected })
                 }) { Text("下载") }
@@ -127,9 +127,9 @@ fun BiliBrowser(onOpenCollection: (BiliCollection) -> Unit = {}, viewModel: Bili
         }
         if (loading || viewModel.resolving || viewModel.working) LinearProgressIndicator(Modifier.fillMaxWidth())
         if (count == 0 && !loading && error == null) {
-            EmptyState(title = if (searched) (if (users) "没有找到 UP 主" else "没有读到视频") else "搜索B站音频",
-                message = if (uploader != null) "这位 UP 主暂时没有可显示的投稿。"
-                    else if (users) "输入昵称查找 UP 主，也可以输入 UID 或主页链接。" else "输入关键词、BV 号或视频链接，查找后可播放、保存或下载。")
+            EmptyState(title = if (searched) (if (users) "没有找到 UP 主" else "没有找到视频") else "搜索 B 站音频",
+                message = if (uploader != null) "这位 UP 主暂时没有投稿。"
+                    else if (users) "输入昵称查找 UP 主，也可以输入 UID 或主页链接。" else "输入关键词、BV 号或视频链接，查找后可播放、加入音频库或下载。")
         }
         LazyColumn(state = state, modifier = Modifier.weight(1f)) {
             if (users) {
@@ -152,9 +152,9 @@ fun BiliBrowser(onOpenCollection: (BiliCollection) -> Unit = {}, viewModel: Bili
                     ListItem(headlineContent = { Text(video.title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
                         supportingContent = { Column {
                             Text(listOf(video.author, formatDuration(video.durationMs)).filter { it.isNotBlank() }.joinToString(" · "), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(listOfNotNull(if (saved.isNotEmpty()) "已保存 ${saved.size} P" else null,
-                                if (downloaded > 0) "已下载 $downloaded P" else null, if (active > 0) "下载中 $active P" else null)
-                                .joinToString(" · ").ifBlank { "B站 · ${video.bvid}" }, style = MaterialTheme.typography.labelSmall)
+                            Text(listOfNotNull(if (saved.isNotEmpty()) "已加入 ${saved.size} 个分 P" else null,
+                                if (downloaded > 0) "已下载 $downloaded 个分 P" else null, if (active > 0) "下载中 $active 个分 P" else null)
+                                .joinToString(" · ").ifBlank { "B 站 · ${video.bvid}" }, style = MaterialTheme.typography.labelSmall)
                         } },
                         leadingContent = { if (viewModel.selected.isEmpty()) CoverImage(video.coverUrl)
                             else Checkbox(video.bvid in viewModel.selected, { viewModel.toggle(video.bvid) }) },
@@ -181,9 +181,12 @@ fun BiliBrowser(onOpenCollection: (BiliCollection) -> Unit = {}, viewModel: Bili
     }
     }
     viewModel.choice?.let { choice ->
+        val allParts = choice.groups.sumOf { it.parts.size }
         AlertDialog(onDismissRequest = viewModel::cancelParts, title = { Text("选择分 P · ${choice.action.label}") },
             text = { Column {
-                if (choice.action != BiliAction.PLAY) TextButton(onClick = viewModel::selectAllParts) { Text("全选 / 取消全选") }
+                if (choice.action != BiliAction.PLAY) TextButton(onClick = viewModel::selectAllParts) {
+                    Text(if (choice.selected.size == allParts) "取消全选" else "全选")
+                }
                 LazyColumn(Modifier.heightIn(max = 420.dp)) {
                     for (group in choice.groups) {
                         item(key = group.video.bvid) { Text(group.video.title, Modifier.padding(vertical = 8.dp), style = MaterialTheme.typography.titleSmall) }

@@ -9,6 +9,7 @@ import com.nanahoshi.audioplayer.asmr.AsmrClient
 import com.nanahoshi.audioplayer.data.*
 import com.nanahoshi.audioplayer.data.db.*
 import com.nanahoshi.audioplayer.dlsite.DlsiteClient
+import com.nanahoshi.audioplayer.ui.library.favoriteDownloadNotice
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Test
@@ -40,6 +41,15 @@ class BiliGroupedImportAndroidTest {
 
     private fun cached(context: Context, part: BiliPart): File = biliAudioFile(context.filesDir, part.bvid, part.cid)!!
         .apply { parentFile!!.mkdirs(); writeBytes(ByteArray(128) { 1 }) }
+
+    @Test fun oneThreePartVideoReportsThreeNewDownloadTasks() = runBlocking {
+        fixture { context, db, library ->
+            val downloads = BiliDownloads(context.filesDir, db, library)
+            val threeParts = parts + parts.last().copy(cid = 43, page = 3, title = "part 3")
+            assertEquals("已加入 3 个下载任务", favoriteDownloadNotice(downloads.enqueue(threeParts), 0))
+            assertEquals("已在本地或正在下载", favoriteDownloadNotice(downloads.enqueue(threeParts), 0))
+        }
+    }
 
     @Test fun conversionsKeepIdsAndAssociationsAndRetainUncheckedExistingParts() = runBlocking {
         fixture { context, db, library ->

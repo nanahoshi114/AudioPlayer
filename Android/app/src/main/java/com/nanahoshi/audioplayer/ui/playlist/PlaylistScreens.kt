@@ -46,6 +46,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.nanahoshi.audioplayer.data.db.FolderEntity
 import com.nanahoshi.audioplayer.data.db.PlaylistEntity
 import com.nanahoshi.audioplayer.data.db.PlaylistTrack
 import com.nanahoshi.audioplayer.ui.CoverImage
@@ -59,6 +60,7 @@ fun PlaylistListScreen(
     viewModel: PlaylistViewModel = viewModel(),
 ) {
     val playlists by viewModel.playlists.collectAsStateWithLifecycle(emptyList())
+    val coverFolders by viewModel.coverFolders.collectAsStateWithLifecycle(null)
     var creating by remember { mutableStateOf(false) }
     var name by remember { mutableStateOf("") }
     Box(Modifier.fillMaxSize()) {
@@ -71,7 +73,7 @@ fun PlaylistListScreen(
         } else {
             LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 96.dp)) {
                 items(playlists, key = { it.id }) { playlist ->
-                    PlaylistSummaryRow(playlist, viewModel, onClick = { onOpen(playlist.id) })
+                    PlaylistSummaryRow(playlist, viewModel, coverFolders, onClick = { onOpen(playlist.id) })
                 }
             }
         }
@@ -134,13 +136,7 @@ fun PlaylistDetailScreen(
                 }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                 DropdownMenuItem(text = { Text("改名") }, onClick = { menu = false; renaming = true })
-                DropdownMenuItem(
-                    text = { Text("删除列表") },
-                    onClick = {
-                        menu = false
-                        confirmDelete = true
-                    },
-                )
+                DropdownMenuItem(text = { Text("删除播放列表") }, onClick = { menu = false; confirmDelete = true })
             }
             },
         )
@@ -151,7 +147,7 @@ fun PlaylistDetailScreen(
         )
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = { viewModel.playReplacing(playlistId) }, enabled = rows.isNotEmpty(), modifier = Modifier.weight(1f)) { Text("播放") }
-            OutlinedButton(onClick = { viewModel.appendToQueue(playlistId) }, enabled = rows.isNotEmpty(), modifier = Modifier.weight(1f)) { Text("加到末尾") }
+            OutlinedButton(onClick = { viewModel.appendToQueue(playlistId) }, enabled = rows.isNotEmpty(), modifier = Modifier.weight(1f)) { Text("加入播放队列") }
         }
         if (rows.isEmpty()) {
             EmptyState(title = "这个列表还是空的", message = "在音频库里多选曲目，再加入播放列表。", modifier = Modifier.fillMaxSize())
@@ -204,6 +200,7 @@ fun PlaylistDetailScreen(
 private fun PlaylistSummaryRow(
     playlist: PlaylistEntity,
     viewModel: PlaylistViewModel,
+    folders: Map<Long, FolderEntity>?,
     onClick: () -> Unit,
 ) {
     val sources by viewModel.collectionSources.collectAsStateWithLifecycle(emptyList())
@@ -213,14 +210,17 @@ private fun PlaylistSummaryRow(
         return
     }
     val rows by viewModel.playlistTracks(playlist.id).collectAsStateWithLifecycle(emptyList())
+    val covers = remember(rows, folders) {
+        if (folders == null) emptyList() else playlistCoverUris(rows, folders)
+    }
     ListItem(
         headlineContent = { Text(playlist.name) },
         supportingContent = { Text("${rows.size} 首") },
         leadingContent = {
             Box(Modifier.size(48.dp)) {
-                rows.take(3).forEachIndexed { index, row ->
+                covers.forEachIndexed { index, coverUri ->
                     CoverImage(
-                        row.coverUri,
+                        coverUri,
                         modifier = Modifier.offset(x = (index * 10).dp),
                         size = 32.dp,
                     )
@@ -249,7 +249,7 @@ private fun PlaylistTrackRow(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 CoverImage(row.coverUri)
                 IconButton(onClick = onDelete) {
-                    Icon(Icons.Default.Delete, contentDescription = "移除")
+                    Icon(Icons.Default.Delete, contentDescription = "从播放列表移除")
                 }
             }
         },

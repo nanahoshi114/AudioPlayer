@@ -266,7 +266,7 @@ private fun PlayerApp(clipboardImport: ClipboardImportViewModel) {
     if (sleepFinished) {
         AlertDialog(
             onDismissRequest = {},
-            text = { Text("倒计时已结束") },
+            text = { Text("定时关闭时间已到，播放已暂停") },
             confirmButton = {
                 TextButton(onClick = {
                     graph.player.acknowledgeSleepFinished()
@@ -311,7 +311,7 @@ private fun PlayerApp(clipboardImport: ClipboardImportViewModel) {
                                         }
                                     },
                                 ) {
-                                    Icon(Icons.Default.Download, contentDescription = "下载")
+                                    Icon(Icons.Default.Download, contentDescription = "下载任务")
                                 }
                             }
                         },

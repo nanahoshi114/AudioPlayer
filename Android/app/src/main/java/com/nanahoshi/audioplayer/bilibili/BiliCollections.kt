@@ -20,7 +20,7 @@ data class BiliCollection(
     val coverIsFallback: Boolean = false,
 ) {
     val key: String get() = "${kind.name}:$remoteId"
-    val label: String get() = if (kind == BiliCollectionKind.SEASON) "B站合集" else "B站系列"
+    val label: String get() = if (kind == BiliCollectionKind.SEASON) "B 站合集" else "B 站系列"
 }
 
 data class BiliCollectionPage(
@@ -31,12 +31,12 @@ data class BiliCollectionPage(
     val complete: Boolean = false,
 )
 
-private fun JsonElement.obj() = this as? JsonObject ?: throw BilibiliException(0, "B站没有返回合集数据")
+private fun JsonElement.obj() = this as? JsonObject ?: throw BilibiliException(0, "B 站没有返回合集数据")
 private fun JsonElement.value(key: String) = obj()[key] ?: JsonNull
 private fun JsonElement.string(key: String) = (value(key) as? JsonPrimitive)?.contentOrNull.orEmpty()
 private fun JsonElement.long(key: String) = string(key).toLongOrNull()
 private fun JsonElement.array(key: String) = value(key) as? JsonArray
-    ?: throw BilibiliException(0, "B站没有返回合集列表，请重试")
+    ?: throw BilibiliException(0, "B 站没有返回合集列表，请重试")
 private fun https(value: String) = when {
     value.startsWith("//") -> "https:$value"
     value.startsWith("http://") -> value.replaceFirst("http://", "https://")

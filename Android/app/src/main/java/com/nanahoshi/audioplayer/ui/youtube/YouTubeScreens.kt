@@ -98,11 +98,11 @@ class YouTubeViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun save(video: YouTubeVideo) = action {
         graph.library.saveYouTube(video)
-        graph.messages.value = "已保存到音频库"
+        graph.messages.value = "已加入音频库"
     }
     fun download(videos: List<YouTubeVideo>) = action {
         val count = graph.downloads.enqueueYouTube(videos)
-        graph.messages.value = if (count == 0) "已经在本地或正在下载" else "已加入 $count 个下载，完成后自动入库"
+        graph.messages.value = if (count == 0) "已在本地或正在下载" else "已加入 $count 个下载任务，完成后自动加入音频库"
         selected = emptySet()
     }
 }
@@ -144,7 +144,7 @@ fun YouTubeBrowser(
                 TextButton(onClick = { viewModel.search(playlistId) }) { Text(if (playlistId == null) "查找" else "刷新") }
             }
             if (viewModel.videos.isNotEmpty()) TextButton(onClick = viewModel::selectAll) {
-                Text(if (viewModel.selected.size == viewModel.videos.size) "取消全选" else "全选")
+                Text(if (viewModel.selected.size == viewModel.videos.size) "取消全选" else "全选已加载")
             }
         }
         if (viewModel.selected.isNotEmpty()) {
@@ -171,7 +171,7 @@ fun YouTubeBrowser(
                     supportingContent = {
                         Column {
                             Text(listOf(video.author, formatDuration(video.durationMs)).filter { it.isNotBlank() }.joinToString(" · "), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(when { downloaded -> "已下载"; downloading -> "下载中"; track != null -> "已在音频库"; else -> "YouTube" }, style = MaterialTheme.typography.labelSmall)
+                            Text(when { downloaded -> "已下载"; downloading -> "下载中"; track != null -> "已在音频库"; else -> "未保存" }, style = MaterialTheme.typography.labelSmall)
                         }
                     },
                     leadingContent = {
@@ -182,7 +182,7 @@ fun YouTubeBrowser(
                             Box {
                                 IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "更多") }
                                 DropdownMenu(menu, { menu = false }) {
-                                    DropdownMenuItem(text = { Text(if (track != null) "已在音频库" else "保存到音频库") }, enabled = track == null,
+                                    DropdownMenuItem(text = { Text(if (track != null) "已在音频库" else "加入音频库") }, enabled = track == null,
                                         onClick = { menu = false; viewModel.save(video) })
                                     DropdownMenuItem(text = { Text(when { downloaded -> "已下载"; downloading -> "下载中"; else -> "下载" }) }, enabled = !downloaded && !downloading,
                                         onClick = { menu = false; viewModel.download(listOf(video)) })
@@ -223,7 +223,7 @@ class YouTubeAccountViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun clear() {
         job?.cancel(); graph.credentials.saveYouTubeCookie(""); graph.youtube.resetSession()
-        saved = false; busy = false; status = "已清除"
+        saved = false; busy = false; status = "已退出登录"
     }
 }
 
@@ -237,7 +237,7 @@ fun YouTubeAccountCard(onOpenList: (String) -> Unit, viewModel: YouTubeAccountVi
             Text(viewModel.status, Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodyMedium)
             Row {
                 TextButton(onClick = { editing = true }) { Text(if (viewModel.saved) "更新 Cookie" else "保存 Cookie") }
-                TextButton(onClick = { confirmClear = true }, enabled = viewModel.saved) { Text("清除") }
+                TextButton(onClick = { confirmClear = true }, enabled = viewModel.saved) { Text("退出登录") }
             }
             Row {
                 TextButton(onClick = { onOpenList("LL") }) { Text("喜欢的视频") }
@@ -256,9 +256,9 @@ fun YouTubeAccountCard(onOpenList: (String) -> Unit, viewModel: YouTubeAccountVi
     }
     if (confirmClear) {
         ConfirmActionDialog(
-            title = "清除 YouTube 登录信息",
-            message = "「喜欢的视频」和「稍后观看」需要重新保存 Cookie 后才能读取。",
-            confirmLabel = "清除",
+            title = "退出 YouTube 登录",
+            message = "「喜欢的视频」和「稍后观看」需要重新保存 Cookie 后才能读取；已加入音频库的曲目和下载文件不受影响。",
+            confirmLabel = "退出登录",
             onConfirm = { confirmClear = false; viewModel.clear() },
             onDismiss = { confirmClear = false },
         )

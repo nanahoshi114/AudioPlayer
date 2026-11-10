@@ -198,7 +198,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun reportLocalNetworkDenied() {
-        graph.messages.value = "需要允许访问本地网络，才能连接这台设备"
+        graph.messages.value = "需要允许访问本地网络，才能连接你填写的听写服务"
     }
 
     fun requestTranslation() {
@@ -217,7 +217,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                     showChinese = true
                     reloadSubtitles(client.state.value.queueItemId)
                 } else {
-                    graph.messages.value = "翻译失败"
+                    graph.messages.value = "翻译失败，请重试"
                 }
             } catch (cancelled: CancellationException) {
                 if (!isActive) throw cancelled
@@ -276,9 +276,9 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                         id, row.title, row.artist.orEmpty(), row.coverUri ?: "https://i.ytimg.com/vi/$id/hqdefault.jpg", row.durationMs,
                     )))
                     offerBiliCache = false
-                    graph.messages.value = if (count == 0) "已经在本地或正在缓存" else "已加入缓存"
+                    graph.messages.value = if (count == 0) "已在本地或正在下载" else "已加入下载"
                 } catch (cancelled: CancellationException) { throw cancelled }
-                catch (_: Exception) { graph.messages.value = "YouTube 缓存失败" }
+                catch (_: Exception) { graph.messages.value = "YouTube 下载失败，请重试" }
                 return@launch
             }
             // 没入库的队列项把 bvid/cid 放在 workno/fileKey。
@@ -303,7 +303,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }
             offerBiliCache = false
-            graph.messages.value = if (added == 0) "已经在本地或正在缓存" else "已加入缓存"
+            graph.messages.value = if (added == 0) "已在本地或正在下载" else "已加入下载"
         }
     }
 
@@ -355,7 +355,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 whisperPrompt = WhisperPrompt.NeedDownload
                 return@launch
             }
-            graph.messages.value = "这首无法下载，不能生成字幕"
+            graph.messages.value = "这首歌没有可用的音频文件，无法生成字幕"
         }
     }
 
@@ -432,7 +432,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 reloadSubtitles(client.state.value.queueItemId)
                 if (translate) translateExisting()
             }
-            WhisperStart.Unavailable -> graph.messages.value = "这首无法下载，不能生成字幕"
+            WhisperStart.Unavailable -> graph.messages.value = "这首歌没有可用的音频文件，无法生成字幕"
         }
     }
 
@@ -452,7 +452,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 showChinese = true
                 reloadSubtitles(client.state.value.queueItemId)
             } else {
-                graph.messages.value = "翻译失败"
+                graph.messages.value = "翻译失败，请重试"
             }
         } catch (cancelled: CancellationException) {
             if (!coroutineContext.isActive) throw cancelled

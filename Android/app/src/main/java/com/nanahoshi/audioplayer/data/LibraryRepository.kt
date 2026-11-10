@@ -16,6 +16,7 @@ import com.nanahoshi.audioplayer.dlsite.PlayEntry
 import com.nanahoshi.audioplayer.dlsite.RemotePlayable
 import com.nanahoshi.audioplayer.bilibili.BilibiliClient
 import com.nanahoshi.audioplayer.data.db.AppDatabase
+import com.nanahoshi.audioplayer.data.db.DlsiteOriginalEntryEntity
 import com.nanahoshi.audioplayer.data.db.FolderEntity
 import com.nanahoshi.audioplayer.data.db.LibraryFileEntity
 import com.nanahoshi.audioplayer.playback.queueRow
@@ -30,6 +31,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
@@ -37,6 +40,25 @@ enum class WorkFill {
     UNCHANGED,
     FILLED,
     EMPTY,
+}
+
+private fun FolderEntity.isVisibleWorkChild(source: TrackSource?, originalFolders: Set<Long>?): Boolean =
+    (source == null || contentSource == source.name || asmrWorkId == null) &&
+        (originalFolders == null || contentSource != TrackSource.DLSITE.name || id in originalFolders)
+
+internal fun validWorkPath(
+    ids: List<Long>,
+    folders: Map<Long, FolderEntity>,
+    source: TrackSource? = null,
+    originalFolders: Map<Long, Set<Long>> = emptyMap(),
+): List<FolderEntity> = buildList {
+    for (id in ids) {
+        val folder = folders[id] ?: break
+        val parent = lastOrNull()
+        if (parent != null && (folder.parentId != parent.id ||
+                !folder.isVisibleWorkChild(source, originalFolders[parent.id]))) break
+        add(folder)
+    }
 }
 
 /** [purchased] 为 null 表示还没拿到 DLsite 已购列表。 */
@@ -109,7 +131,7 @@ class LibraryRepository(
         db.tracks().observeIn(folderId), db.dlsiteOriginals().observeEntries(),
     ) { tracks, _ -> filterOriginalTracks(folderId, tracks) }
 
-    private suspend fun originalEntriesForFolder(folderId: Long?): List<com.nanahoshi.audioplayer.data.db.DlsiteOriginalEntryEntity>? {
+    private suspend fun originalEntriesForFolder(folderId: Long?): List<DlsiteOriginalEntryEntity>? {
         if (folderId == null) return null
         val all = db.dlsiteOriginals().allEntries()
         val code = db.dlsiteOriginals().works().firstOrNull { it.rootFolderId == folderId }?.workno
@@ -263,11 +285,69 @@ class LibraryRepository(
         if (ids == null) files else files.filter { libraryFileSource(it.fileHash) != TrackSource.DLSITE || it.id in ids }
     }
 
-    fun observeChildFolders(parentId: Long?): Flow<List<FolderEntity>> = combine(
-        db.folders().observeChildren(parentId), db.dlsiteOriginals().observeEntries(),
-    ) { folders, _ ->
-        val ids = originalEntriesForFolder(parentId)?.filter { it.kind == "FOLDER" }?.mapNotNull { it.folderId }?.toSet()
-        if (ids == null) folders else folders.filter { it.contentSource != TrackSource.DLSITE.name || it.id in ids }
+    internal fun observeChildFolders(parentId: Long?, source: TrackSource? = null): Flow<List<FolderEntity>> =
+        observeWorkTreeChanges().map {
+            db.withTransaction {
+                val originalFolders = parentId?.let { originalContentsByFolder()[it]?.folders }
+                db.folders().childrenOf(parentId).filter { it.isVisibleWorkChild(source, originalFolders) }
+            }
+        }.distinctUntilChanged()
+
+    internal fun observeVisibleWorkPath(ids: List<Long>, source: TrackSource?): Flow<List<FolderEntity>> =
+        observeWorkTreeChanges().map {
+            db.withTransaction {
+                val folders = db.folders().getByIds(ids).associateBy { it.id }
+                val originals = if (ids.size > 1) originalContentsByFolder().mapValues { it.value.folders } else emptyMap()
+                validWorkPath(ids, folders, source, originals)
+            }
+        }.distinctUntilChanged()
+
+    private fun observeWorkTreeChanges() =
+        db.invalidationTracker.createFlow("folders", "dlsite_original_works", "dlsite_original_entries")
+
+    internal fun observeLocalRemovalTracks(
+        trackIds: Set<Long>,
+        folderIds: Set<Long>,
+        source: TrackSource?,
+    ): Flow<List<TrackEntity>> =
+        db.invalidationTracker.createFlow("tracks", "folders", "dlsite_original_works", "dlsite_original_entries")
+            .map {
+                db.withTransaction {
+                    val tracks = trackIds.chunked(500).flatMap { db.tracks().getByIds(it) }
+                    val nested = if (folderIds.isEmpty()) emptyList() else {
+                        val originals = originalContentsByFolder()
+                        val visible = db.folders().all().filter {
+                            it.id in folderIds || it.isVisibleWorkChild(source, originals[it.parentId]?.folders)
+                        }
+                        val descendants = descendantFolderIds(visible, folderIds)
+                        descendants.chunked(500).flatMap { db.tracks().inFolders(it) }.filter { track ->
+                            val original = originals[track.folderId]
+                            original == null || track.source != TrackSource.DLSITE || track.id in original.tracks
+                        }
+                    }
+                    (tracks + nested).distinctBy { it.id }.filter { source == null || it.source == source }
+                }
+            }
+
+    private data class OriginalContents(val folders: Set<Long>, val tracks: Set<Long>)
+
+    private suspend fun originalContentsByFolder(): Map<Long, OriginalContents> {
+        val originals = db.dlsiteOriginals()
+        val byWork = originals.allEntries().groupBy { it.workno }.mapValues { (_, entries) ->
+            OriginalContents(
+                entries.filter { it.kind == "FOLDER" }.mapNotNull { it.folderId }.toSet(),
+                entries.mapNotNull { it.trackId }.toSet(),
+            )
+        }
+        return buildMap {
+            for (contents in byWork.values) {
+                for (id in contents.folders) putIfAbsent(id, contents)
+            }
+            for (work in originals.works()) {
+                val rootId = work.rootFolderId ?: continue
+                put(rootId, byWork[work.workno] ?: OriginalContents(emptySet(), emptySet()))
+            }
+        }
     }
 
     fun observeFolder(id: Long): Flow<FolderEntity?> = db.folders().observe(id)
@@ -464,7 +544,7 @@ class LibraryRepository(
                 return WorkLevel(files, folders)
             }
             val work = workLevel(workFolderId)
-            if (work.files.isEmpty() && work.folders.isEmpty()) error("这个作品还没有读到文件")
+            if (work.files.isEmpty() && work.folders.isEmpty()) error("这个作品还没有找到文件")
 
             val picked = HashMap<Long, Uri>()
             var counter = 0L

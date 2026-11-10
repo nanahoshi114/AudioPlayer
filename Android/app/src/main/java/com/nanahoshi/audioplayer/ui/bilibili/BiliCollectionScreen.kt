@@ -74,8 +74,8 @@ fun BiliCollectionScreen(
                     }
                     if (collection.description.isNotBlank()) Text(collection.description, Modifier.padding(horizontal = 16.dp), maxLines = 4, overflow = TextOverflow.Ellipsis)
                     Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (model.savedId == null) TextButton(onClick = model::bookmark, enabled = !model.busy) { Text("收藏到播放列表") }
-                        else Text("已收藏到播放列表", Modifier.padding(vertical = 12.dp), style = MaterialTheme.typography.bodySmall)
+                        if (model.savedId == null) TextButton(onClick = model::bookmark, enabled = !model.busy) { Text("收藏在线列表") }
+                        else Text("已收藏在线列表", Modifier.padding(vertical = 12.dp), style = MaterialTheme.typography.bodySmall)
                         TextButton(onClick = model::refresh, enabled = !model.busy && !model.loading) { Text("刷新") }
                     }
                     CollectionPlaybackActions(model.selected.isNotEmpty(), !model.busy, onAction = { model.prepare(it) })
@@ -84,19 +84,22 @@ fun BiliCollectionScreen(
                     Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error)
                     TextButton(onClick = model::refresh, enabled = !model.busy && !model.loading) { Text("重试读取目录") }
                 }
-                if (model.complete && model.videos.isEmpty()) Text("这个合集没有视频", Modifier.padding(16.dp))
+                if (model.complete && model.videos.isEmpty()) Text("这个合集暂时没有视频", Modifier.padding(16.dp))
             }
             item(key = "selection") {
                 Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(if (model.selected.isEmpty()) "视频" else "已选 ${model.selected.size} 个", Modifier.weight(1f))
-                        TextButton(onClick = model::selectAll, enabled = !model.busy) { Text(if (model.selected.isEmpty()) "全选已显示" else "全选 / 取消") }
+                        val allSelected = model.videos.isNotEmpty() && model.selected.size == model.videos.size
+                        TextButton(onClick = model::selectAll, enabled = !model.busy) {
+                            Text(if (allSelected) "取消全选" else "全选已加载")
+                        }
                     }
                     CollectionSortSelector(model.sort, model::updateSort, enabled = !model.busy)
                     if (model.selected.isNotEmpty()) FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         TextButton(onClick = { model.prepareSelection(CollectionAction.PLAY) }, enabled = !model.busy) { Text("播放") }
-                        TextButton(onClick = { model.prepareSelection(CollectionAction.APPEND) }, enabled = !model.busy) { Text("追加") }
-                        TextButton(onClick = { model.prepareSelection(CollectionAction.SAVE) }, enabled = !model.busy) { Text("保存") }
+                        TextButton(onClick = { model.prepareSelection(CollectionAction.APPEND) }, enabled = !model.busy) { Text("加入播放队列") }
+                        TextButton(onClick = { model.prepareSelection(CollectionAction.SAVE) }, enabled = !model.busy) { Text("加入音频库") }
                         TextButton(onClick = { model.prepareSelection(CollectionAction.DOWNLOAD) }, enabled = !model.busy) { Text("下载") }
                     }
                 }
@@ -112,7 +115,7 @@ fun BiliCollectionScreen(
                         Box {
                             IconButton(onClick = { rowMenu = true }, enabled = !model.busy) { Icon(Icons.Default.MoreVert, "视频操作") }
                             DropdownMenu(rowMenu, { rowMenu = false }) {
-                                for ((label, action) in listOf("保存到音频库" to CollectionAction.SAVE, "下载" to CollectionAction.DOWNLOAD)) {
+                                for ((label, action) in listOf("加入音频库" to CollectionAction.SAVE, "下载" to CollectionAction.DOWNLOAD)) {
                                     DropdownMenuItem(text = { Text(label) }, onClick = { rowMenu = false; model.prepare(action, listOf(video)) })
                                 }
                             }
@@ -126,7 +129,7 @@ fun BiliCollectionScreen(
     model.pending?.let { prepared ->
         AlertDialog(onDismissRequest = model::cancelPreparation, title = { Text("部分视频读取失败") },
             text = { LazyColumn { items(prepared.failed) { Text(it, Modifier.padding(vertical = 4.dp)) } } },
-            confirmButton = { TextButton(onClick = model::continuePending, enabled = prepared.details.isNotEmpty()) { Text("继续处理 ${prepared.details.size} 个成功项") } },
+            confirmButton = { TextButton(onClick = model::continuePending, enabled = prepared.details.isNotEmpty()) { Text("继续处理其余 ${prepared.details.size} 个视频") } },
             dismissButton = { Row { TextButton(onClick = model::retryPending) { Text("重试") }; TextButton(onClick = model::cancelPreparation) { Text("取消") } } })
     }
     if (model.singleParts.isNotEmpty()) AlertDialog(onDismissRequest = model::dismissParts, title = { Text("选择分 P") },
@@ -134,23 +137,28 @@ fun BiliCollectionScreen(
         confirmButton = { TextButton(onClick = model::dismissParts) { Text("取消") } })
     model.copyName?.let { initialName ->
         var name by remember(initialName) { mutableStateOf(initialName) }
-        AlertDialog(onDismissRequest = model::dismissCopy, title = { Text("复制为自建播放列表") },
-            text = { OutlinedTextField(name, { name = it }, singleLine = true, label = { Text("列表名称") }) },
-            confirmButton = { TextButton(onClick = { model.confirmCopy(name) }, enabled = name.isNotBlank()) { Text("选择入库方式") } },
+        AlertDialog(onDismissRequest = model::dismissCopy, title = { Text("复制为普通播放列表") },
+            text = {
+                Column {
+                    OutlinedTextField(name, { name = it }, singleLine = true, label = { Text("列表名称") })
+                    Text("不会随 B 站更新，之后可以自行编辑。", style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = { TextButton(onClick = { model.confirmCopy(name) }, enabled = name.isNotBlank()) { Text("下一步：选择内容") } },
             dismissButton = { TextButton(onClick = model::dismissCopy) { Text("取消") } })
     }
-    if (removing) AlertDialog(onDismissRequest = { removing = false }, title = { Text("取消收藏") },
-        text = { Text("仅移除合集收藏和目录缓存；已保存曲目、下载文件及当前队列会保留。") },
+    if (removing) AlertDialog(onDismissRequest = { removing = false }, title = { Text("取消收藏在线列表") },
+        text = { Text("仅移除在线列表收藏和本地目录缓存；已加入音频库的曲目、下载文件及当前队列会保留。") },
         confirmButton = { TextButton(onClick = { removing = false; model.unbookmark() }) { Text("取消收藏") } },
-        dismissButton = { TextButton(onClick = { removing = false }) { Text("返回") } })
+        dismissButton = { TextButton(onClick = { removing = false }) { Text("保留收藏") } })
 }
 
 @Composable
 internal fun CollectionPlaybackActions(selecting: Boolean, enabled: Boolean, onAction: (CollectionAction) -> Unit) {
     if (selecting) return
     Row(Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Button(onClick = { onAction(CollectionAction.PLAY) }, enabled = enabled, modifier = Modifier.weight(1f)) { Text("顺序播放全部") }
-        OutlinedButton(onClick = { onAction(CollectionAction.APPEND) }, enabled = enabled, modifier = Modifier.weight(1f)) { Text("加到末尾") }
+        Button(onClick = { onAction(CollectionAction.PLAY) }, enabled = enabled, modifier = Modifier.weight(1f)) { Text("按当前排序播放全部") }
+        OutlinedButton(onClick = { onAction(CollectionAction.APPEND) }, enabled = enabled, modifier = Modifier.weight(1f)) { Text("加入播放队列") }
     }
 }
 
@@ -175,8 +183,8 @@ internal fun CollectionSortSelector(sort: CollectionSort, onSort: (CollectionSor
 
 @Composable
 internal fun CollectionMenuItems(saved: Boolean, onAction: (CollectionAction) -> Unit, onUnbookmark: () -> Unit) {
-    for ((label, action) in listOf("保存到音频库" to CollectionAction.SAVE, "下载全部音轨" to CollectionAction.DOWNLOAD,
-        "复制为自建播放列表" to CollectionAction.COPY)) {
+    for ((label, action) in listOf("加入音频库" to CollectionAction.SAVE, "下载全部音轨" to CollectionAction.DOWNLOAD,
+        "复制为普通播放列表" to CollectionAction.COPY)) {
         DropdownMenuItem(text = { Text(label) }, onClick = { onAction(action) })
     }
     if (saved) DropdownMenuItem(text = { Text("取消收藏") }, onClick = onUnbookmark)

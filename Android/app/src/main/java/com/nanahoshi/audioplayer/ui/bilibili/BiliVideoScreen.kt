@@ -17,14 +17,17 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.nanahoshi.audioplayer.data.LocalRemoval
 import com.nanahoshi.audioplayer.data.db.FolderEntity
 import com.nanahoshi.audioplayer.data.db.TrackEntity
+import com.nanahoshi.audioplayer.data.localRemoval
 import com.nanahoshi.audioplayer.graph
 import com.nanahoshi.audioplayer.ui.CoverImage
 import com.nanahoshi.audioplayer.ui.components.*
 import com.nanahoshi.audioplayer.ui.formatDuration
 import com.nanahoshi.audioplayer.ui.library.PlaylistPickDialog
 import com.nanahoshi.audioplayer.ui.library.TrackRow
+import com.nanahoshi.audioplayer.ui.library.deleteDownloadedNotice
 import com.nanahoshi.audioplayer.ui.theme.LocalSourceColors
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.combine
@@ -65,19 +68,23 @@ class BiliVideoViewModel(app: Application) : AndroidViewModel(app) {
     fun download(items: List<TrackEntity> = chosen()) = action {
         val added = graph.downloads.enqueue(items)
         clear()
-        graph.messages.value = if (added > 0) "已加入 $added 个下载" else "已有本地副本或下载任务"
+        graph.messages.value = if (added > 0) "已加入 $added 个下载任务" else "已有本地文件或下载任务"
     }
     data class PendingDelete(val tracks: List<TrackEntity>, val subtitles: Int)
     var pendingDelete by mutableStateOf<PendingDelete?>(null); private set
 
     fun deleteDownloads(items: List<TrackEntity> = chosen()) = action {
-        val subtitles = items.count { graph.subtitles.hasGenerated(it.id, it.localUri, it.remoteUrl) }
+        val downloads = withContext(Dispatchers.IO) {
+            val filesDir = getApplication<Application>().filesDir
+            items.filter { it.localRemoval(filesDir) == LocalRemoval.DOWNLOAD }
+        }
+        val subtitles = downloads.count { graph.subtitles.hasGenerated(it.id, it.localUri, it.remoteUrl) }
         if (subtitles > 0) {
-            pendingDelete = PendingDelete(items, subtitles)
+            pendingDelete = PendingDelete(downloads, subtitles)
         } else {
-            val result = graph.downloads.deleteDownloaded(items, deleteSubtitles = true)
+            val result = graph.downloads.deleteDownloaded(downloads, deleteSubtitles = true)
             clear()
-            graph.messages.value = "已删除 ${result.deleted} 个已下载文件"
+            graph.messages.value = deleteDownloadedNotice(result)
         }
     }
     fun confirmDelete(deleteSubtitles: Boolean) {
@@ -86,7 +93,7 @@ class BiliVideoViewModel(app: Application) : AndroidViewModel(app) {
         action {
             val result = graph.downloads.deleteDownloaded(pending.tracks, deleteSubtitles)
             clear()
-            graph.messages.value = "已删除 ${result.deleted} 个已下载文件"
+            graph.messages.value = deleteDownloadedNotice(result)
         }
     }
     fun cancelDelete() { pendingDelete = null }
@@ -107,12 +114,12 @@ fun BiliVideoScreen(folderId: Long, onBack: () -> Unit, viewModel: BiliVideoView
     val state = rememberLazyListState()
     Column(Modifier.fillMaxSize()) {
         if (selecting) SelectionTopBar(viewModel.selected.size, viewModel::clear, listOf(
-            SelectionAction("播放", Icons.Default.PlayArrow, viewModel::playSelection),
-            SelectionAction("下一个播放", Icons.Default.SkipNext, { viewModel.next() }),
-            SelectionAction("加到末尾", Icons.AutoMirrored.Filled.PlaylistAdd, { viewModel.append() }),
-            SelectionAction("下载", Icons.Default.Download, { viewModel.download() }),
+            SelectionAction("播放所选", Icons.Default.PlayArrow, viewModel::playSelection),
+            SelectionAction("接下来播放", Icons.Default.SkipNext, { viewModel.next() }),
+            SelectionAction("加入播放队列", Icons.AutoMirrored.Filled.PlaylistAdd, { viewModel.append() }),
+            SelectionAction("下载音轨", Icons.Default.Download, { viewModel.download() }),
             SelectionAction("加入播放列表", Icons.AutoMirrored.Filled.QueueMusic, { pickingPlaylist = true }),
-            SelectionAction("删除已下载的文件", Icons.Default.Delete, { viewModel.deleteDownloads() }, destructive = true),
+            SelectionAction("删除已下载文件", Icons.Default.Delete, { viewModel.deleteDownloads() }, destructive = true),
         )) else AppTopBar("视频", onBack = onBack, actions = {
             IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "更多") }
             DropdownMenu(menu, { menu = false }) {
@@ -128,7 +135,7 @@ fun BiliVideoScreen(folderId: Long, onBack: () -> Unit, viewModel: BiliVideoView
                     Column(Modifier.weight(1f).padding(start = 12.dp)) {
                         Text(folder.name, style = MaterialTheme.typography.titleLarge)
                         Text(viewModel.tracks.firstOrNull()?.artist.orEmpty(), Modifier.padding(top = 8.dp))
-                        BadgeLine(listOf(BadgeItem("B站", LocalSourceColors.current.bilibili), BadgeItem("多P", MaterialTheme.colorScheme.secondary)),
+                        BadgeLine(listOf(BadgeItem("B 站", LocalSourceColors.current.bilibili), BadgeItem("多 P", MaterialTheme.colorScheme.secondary)),
                             listOf(BadgeItem(folder.biliBvid.orEmpty(), MaterialTheme.colorScheme.onSurfaceVariant)), modifier = Modifier.padding(top = 8.dp))
                         Text("${viewModel.tracks.size} P · ${formatDuration(viewModel.tracks.sumOf { it.durationMs })}", Modifier.padding(top = 8.dp))
                     }

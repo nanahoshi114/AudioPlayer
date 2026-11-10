@@ -54,6 +54,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.automirrored.outlined.HelpOutline
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Description
@@ -134,7 +135,6 @@ import com.nanahoshi.audioplayer.data.db.LibraryFileEntity
 import com.nanahoshi.audioplayer.data.db.TrackEntity
 import com.nanahoshi.audioplayer.data.previewKind
 import com.nanahoshi.audioplayer.data.rawFileKey
-import com.nanahoshi.audioplayer.data.libraryFileSource
 import com.nanahoshi.audioplayer.data.isAsmrAudio
 import com.nanahoshi.audioplayer.data.isContainer
 import com.nanahoshi.audioplayer.data.isSubtitleFile
@@ -159,7 +159,11 @@ import com.nanahoshi.audioplayer.ui.formatDuration
 import com.nanahoshi.audioplayer.ui.theme.LocalReduceMotion
 import com.nanahoshi.audioplayer.ui.theme.Motion
 import com.nanahoshi.audioplayer.ui.library.LibraryEntry
-import com.nanahoshi.audioplayer.ui.library.mixedEntries
+import com.nanahoshi.audioplayer.ui.library.LibraryCrumb
+import com.nanahoshi.audioplayer.ui.library.LoadedWorkFolder
+import com.nanahoshi.audioplayer.ui.library.WorkFolderRequest
+import com.nanahoshi.audioplayer.ui.library.observeFolderListing
+import com.nanahoshi.audioplayer.ui.library.observeWorkPath
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -169,24 +173,26 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.coroutines.coroutineContext
 
 enum class OnlineSort(val label: String, val order: String, val direction: String) {
-    RELEASE_DESC("发售日", "release", "desc"),
-    NEWEST("最新收录", "create_date", "desc"),
-    RELEASE_ASC("发售日-正序", "release", "asc"),
-    SALES("销量", "dl_count", "desc"),
-    PRICE_ASC("价格-正序", "price", "asc"),
-    PRICE_DESC("价格", "price", "desc"),
-    RATING("评分", "rate_average_2dp", "desc"),
-    REVIEWS("评价数", "review_count", "desc"),
-    RJ_DESC("RJ号", "id", "desc"),
-    RJ_ASC("RJ号-正序", "id", "asc"),
+    RELEASE_DESC("发售日（新→旧）", "release", "desc"),
+    NEWEST("最新上架", "create_date", "desc"),
+    RELEASE_ASC("发售日（旧→新）", "release", "asc"),
+    SALES("销量（高→低）", "dl_count", "desc"),
+    PRICE_ASC("价格（低→高）", "price", "asc"),
+    PRICE_DESC("价格（高→低）", "price", "desc"),
+    RATING("评分（高→低）", "rate_average_2dp", "desc"),
+    REVIEWS("评价数（多→少）", "review_count", "desc"),
+    RJ_DESC("RJ 号（大→小）", "id", "desc"),
+    RJ_ASC("RJ 号（小→大）", "id", "asc"),
     RANDOM("随机", "random", "desc"),
 }
 
@@ -207,6 +213,12 @@ private suspend fun <T> catchPage(block: suspend () -> T): Result<T> = try {
     throw cancelled
 } catch (failure: Exception) {
     Result.failure(failure)
+}
+
+/** 异常消息已经带来源名时不再重复加前缀，避免「asmr.one：暂时无法连接 asmr.one」。 */
+private fun sourceError(source: String, failure: Throwable): String {
+    val message = failure.message?.takeIf { it.isNotBlank() } ?: "暂时无法连接"
+    return if (message.contains(source, ignoreCase = true)) message else "$source：$message"
 }
 
 enum class PieceKind(val label: String, val key: String) {
@@ -407,8 +419,8 @@ class OnlineSearchViewModel(app: Application) : AndroidViewModel(app) {
                 works = listed
                 page = nextPage
                 error = listOfNotNull(
-                    asmrResult?.exceptionOrNull()?.let { "asmr.one：${it.message ?: "暂时无法连接"}" },
-                    dlsiteResult?.exceptionOrNull()?.let { "DLsite：${it.message ?: "暂时无法连接"}" },
+                    asmrResult?.exceptionOrNull()?.let { sourceError("asmr.one", it) },
+                    dlsiteResult?.exceptionOrNull()?.let { sourceError("DLsite", it) },
                 ).takeIf { it.isNotEmpty() }?.joinToString("\n")
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -496,24 +508,18 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var working by mutableStateOf(false)
         private set
-    var atWorkRoot by mutableStateOf(true)
-        private set
-    var folderTitle by mutableStateOf("")
-        private set
     var usingLibrary by mutableStateOf(false)
         private set
-    var filesFromPlay by mutableStateOf(false)
-        private set
-    var libraryFolders by mutableStateOf<List<FolderEntity>>(emptyList())
-        private set
-    var libraryEntries by mutableStateOf<List<LibraryEntry>>(emptyList())
-        private set
+    private var libraryListing by mutableStateOf<LoadedWorkFolder?>(null)
+    val libraryFolders: List<FolderEntity> get() = libraryListing?.listing?.folders.orEmpty()
+    val libraryEntries: List<LibraryEntry> get() = libraryListing?.listing?.entries.orEmpty()
+    val libraryLoading: Boolean get() = usingLibrary && libraryListing == null
     var nodeFolders by mutableStateOf<List<AsmrNode>>(emptyList())
         private set
     var nodeFiles by mutableStateOf<List<AsmrNode>>(emptyList())
         private set
 
-    var browserPath by mutableStateOf<List<String>>(emptyList())
+    internal var browserPath by mutableStateOf<List<LibraryCrumb>>(emptyList())
         private set
     private var browserIdentity by mutableStateOf("")
     private val libraryNames = mutableMapOf<Long, String>()
@@ -523,19 +529,13 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun publishLocation() {
         browserPath = when {
-            showPlay -> playStack.map { it.title }
-            usingLibrary -> libraryStack.drop(1).map { libraryNames[it].orEmpty() }
-            else -> nodeStack.map { it.title }
+            showPlay -> playStack.map { LibraryCrumb(System.identityHashCode(it).toLong(), it.title) }
+            usingLibrary -> libraryStack.drop(1).map { LibraryCrumb(it, libraryNames[it].orEmpty()) }
+            else -> nodeStack.map { LibraryCrumb(System.identityHashCode(it).toLong(), it.title) }
         }
-        val path = when {
-            showPlay -> playStack.joinToString("/") { System.identityHashCode(it).toString() }
-            usingLibrary -> libraryStack.joinToString("/")
-            else -> nodeStack.joinToString("/") { System.identityHashCode(it).toString() }
-        }
+        val path = if (usingLibrary) libraryStack.joinToString("/") else browserPath.joinToString("/") { it.id.toString() }
         browserIdentity = "$sourceKey|${fileSource.name}|$path"
     }
-
-    fun ancestor(depth: Int) { repeat((browserPath.size - depth).coerceAtLeast(0)) { up() } }
 
     fun openGallery(index: Int): Boolean {
         val url = gallery.getOrNull(index) ?: return false
@@ -545,50 +545,33 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private var sourceKey = ""
-    private var rootFolderId: Long? = null
     private var originalRootId by mutableStateOf<Long?>(null)
     val hasOriginalFiles: Boolean get() = originalRootId != null
     private val libraryStack = mutableListOf<Long>()
     private val nodeStack = mutableListOf<AsmrNode>()
     private val playStack = mutableListOf<com.nanahoshi.audioplayer.dlsite.PlayEntry>()
     private var playRoot = emptyList<com.nanahoshi.audioplayer.dlsite.PlayEntry>()
-    private val browseId = MutableStateFlow<Long?>(null)
-    private val browseSource = MutableStateFlow(TrackSource.ASMR)
+    private val browseRequest = MutableStateFlow<WorkFolderRequest?>(null)
     private val originalWorkKey = MutableStateFlow<String?>(null)
     private var loadJob: Job? = null
     private var loadRevision = 0L
+    private var sourceRevision = 0L
 
     init {
         viewModelScope.launch {
-            combine(browseId, browseSource) { id, source -> id to source }.flatMapLatest { (id, source) ->
-                if (id == null) {
-                    kotlinx.coroutines.flow.flowOf(null)
-                } else {
-                    combine(
-                        graph.library.observeChildFolders(id),
-                        graph.library.observeTracksIn(id),
-                        graph.library.observeFilesIn(id),
-                        graph.library.observeFolder(id),
-                    ) { folders, tracks, files, folder ->
-                        val displaySort = LibrarySort.NAME
-                        LibraryBrowse(
-                            id = id,
-                            source = source,
-                            title = folder?.name.orEmpty(),
-                            folders = folders.filter { it.contentSource == source.name || it.asmrWorkId == null }
-                                .sortedForLibrary(displaySort),
-                            entries = mixedEntries(tracks.filter { it.source == source },
-                                files.filter { libraryFileSource(it.fileHash) == source }, displaySort),
-                        )
-                    }
-                }
+            browseRequest.flatMapLatest { request ->
+                if (request == null) emptyFlow()
+                else graph.library.observeFolderListing(request.folderId, LibrarySort.NAME, request.source)
+                    .map { LoadedWorkFolder(request, it) }
             }.collect { browse ->
-                if (browse == null || !usingLibrary || showPlay || browse.id != browseId.value || browse.source != browseSource.value) return@collect
-                libraryFolders = browse.folders
-                libraryEntries = browse.entries
-                filesFromPlay = browseSource.value == TrackSource.DLSITE
-                folderTitle = browse.title
-                atWorkRoot = browse.id == rootFolderId
+                if (browse.request === browseRequest.value) libraryListing = browse
+            }
+        }
+        viewModelScope.launch {
+            browseRequest.flatMapLatest { request ->
+                if (request == null) emptyFlow() else graph.library.observeWorkPath(request)
+            }.collect { (request, path) ->
+                if (browseRequest.value === request) updateLibraryPath(path)
             }
         }
         viewModelScope.launch {
@@ -608,11 +591,12 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun load(sourceId: String, metered: Boolean, force: Boolean = false) {
-        if (!force && sourceKey == sourceId && facts != null) {
-            refreshDownloads(sourceId)
+        if (!force && sourceKey == sourceId && (facts != null || loadJob?.isActive == true)) {
+            if (facts != null) refreshDownloads(sourceId)
             return
         }
         val revision = ++loadRevision
+        val initialSourceRevision = sourceRevision
         sourceKey = sourceId
         originalRootId = null
         originalWorkKey.value = DlsiteClient.canonicalWorkno(sourceId)
@@ -622,8 +606,13 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
             error = null
             nodeStack.clear()
             playStack.clear()
-            filesFromPlay = false
+            libraryStack.clear()
+            showPlay = false
+            usingLibrary = false
+            browseRequest.value = null
+            libraryListing = null
             fileSource = WorkFileSource.ASMR
+            publishNodes()
             downloadedPlay = emptySet()
             downloadedAsmr = emptySet()
             allowGallery = !metered
@@ -638,8 +627,10 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
                 if (original != null && localFacts != null) {
                     facts = localFacts
                     coverUrl = existing.coverUri
-                    fileSource = WorkFileSource.PLAY
-                    showOriginalLibrary(original)
+                    if (initialSourceRevision == sourceRevision) {
+                        fileSource = WorkFileSource.PLAY
+                        showOriginalLibrary(original)
+                    }
                     saved = true
                 }
                 var missing = false
@@ -665,7 +656,7 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
                 val nextFacts = loaded?.facts() ?: pageFacts ?: localFacts?.takeIf { original != null }
                 if (nextFacts == null) {
                     facts = null
-                    error = "没有读到作品。"
+                    error = "没有找到这部作品"
                     return@launch
                 }
                 facts = nextFacts
@@ -684,42 +675,34 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
                     false
                 }
                 if (revision != loadRevision) return@launch
-                saved = existing != null
-                if (original != null) {
+                val localRoot = originalRootId
+                saved = existing != null || localRoot != null
+                if (initialSourceRevision != sourceRevision) {
+                    if (fileSource == WorkFileSource.ASMR && !usingLibrary) publishNodes()
+                } else if (localRoot != null) {
                     fileSource = WorkFileSource.PLAY
-                    showOriginalLibrary(original)
+                    showOriginalLibrary(localRoot)
                 } else if (purchased) {
                     fileSource = WorkFileSource.PLAY
                     showPlay = true
                     usingLibrary = false
-                    browseId.value = null
+                    browseRequest.value = null
+                    publishPlay()
                     playRoot = try {
                         graph.dlsite.playTree(nextFacts.sourceId, nextFacts.circle, coverUrl)
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (failure: Exception) {
-                        graph.messages.value = failure.message ?: "无法读取已购买文件"
+                        graph.messages.value = failure.message ?: "无法读取已购买作品的文件"
                         emptyList()
                     }
-                    atWorkRoot = true
-                    folderTitle = ""
-                    publishPlay()
+                    if (showPlay) publishPlay()
                 } else if (loaded != null && existing != null) {
                     showPlay = false
-                    val workId = existing.asmrWorkId
-                    if (workId != null) {
-                        filesFromPlay = graph.library.observeTracks().first()
-                            .any { it.asmrWorkId == workId && it.source == TrackSource.DLSITE }
-                    }
                     showLibrary(existing.id)
                 } else if (loaded != null) {
                     showPlay = false
                     usingLibrary = false
-                    rootFolderId = null
-                    libraryStack.clear()
-                    browseId.value = null
-                    atWorkRoot = true
-                    folderTitle = ""
                     publishNodes()
                 } else {
                     showPlay = false
@@ -739,11 +722,10 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
     fun useFileSource(source: WorkFileSource) {
         if (source == fileSource) return
         if (source == WorkFileSource.PLAY && !purchased && originalRootId == null) return
+        sourceRevision += 1
         fileSource = source
         playStack.clear()
         nodeStack.clear()
-        atWorkRoot = true
-        folderTitle = ""
         if (source == WorkFileSource.PLAY) {
             originalRootId?.let {
                 showOriginalLibrary(it)
@@ -752,12 +734,12 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
             }
             showPlay = true
             usingLibrary = false
-            browseId.value = null
+            browseRequest.value = null
             publishPlay()
         } else {
             showPlay = false
             usingLibrary = false
-            browseId.value = null
+            browseRequest.value = null
             publishNodes()
         }
         browserStates.remove(browserIdentity)
@@ -798,60 +780,53 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
         allowGallery = true
     }
 
-    fun canGoUp(): Boolean = when {
-        showPlay -> playStack.isNotEmpty()
-        usingLibrary -> libraryStack.size > 1
-        else -> nodeStack.isNotEmpty()
+    fun canGoUp(): Boolean = browserPath.isNotEmpty()
+
+    fun up() = ancestor(browserPath.lastIndex)
+
+    internal fun goToAncestor(folderId: Long) {
+        val index = browserPath.indexOfFirst { it.id == folderId }
+        if (index >= 0) ancestor(index + 1)
     }
 
-    fun up() {
-        if (!canGoUp()) return
+    internal fun ancestor(depth: Int) {
+        if (depth !in 0 until browserPath.size) return
         when {
             showPlay -> {
-                playStack.removeAt(playStack.lastIndex)
-                atWorkRoot = playStack.isEmpty()
-                folderTitle = playStack.lastOrNull()?.title.orEmpty()
+                playStack.subList(depth, playStack.size).clear()
                 publishPlay()
             }
             usingLibrary -> {
-                libraryStack.removeAt(libraryStack.lastIndex)
-                libraryFolders = emptyList()
-                libraryEntries = emptyList()
-                browseId.value = libraryStack.last()
-                publishLocation()
+                libraryStack.subList(depth + 1, libraryStack.size).clear()
+                requestLibraryFolder(browseRequest.value?.source)
             }
             else -> {
-                nodeStack.removeAt(nodeStack.lastIndex)
-                atWorkRoot = nodeStack.isEmpty()
-                folderTitle = nodeStack.lastOrNull()?.title.orEmpty()
+                nodeStack.subList(depth, nodeStack.size).clear()
                 publishNodes()
             }
         }
     }
 
     fun openLibraryFolder(folder: FolderEntity) {
+        val request = browseRequest.value ?: return
+        if (folder.parentId != request.folderId || libraryFolders.none { it.id == folder.id }) return
         libraryNames[folder.id] = folder.name
         libraryStack.add(folder.id)
-        libraryFolders = emptyList()
-        libraryEntries = emptyList()
-        browseId.value = folder.id
-        publishLocation()
+        requestLibraryFolder(request.source)
         browserStates.remove(browserIdentity)
     }
 
     fun openNode(node: AsmrNode) {
+        if (showPlay || usingLibrary || nodeFolders.none { it === node }) return
         nodeStack.add(node)
-        atWorkRoot = false
-        folderTitle = node.title
         publishNodes()
         browserStates.remove(browserIdentity)
     }
 
     fun playLibrary(track: TrackEntity) {
         viewModelScope.launch {
-            val folderId = browseId.value ?: return@launch
-            val source = browseSource.value
-            val tracks = graph.library.tracksIn(folderId).filter { it.source == source }
+            val request = browseRequest.value ?: return@launch
+            val tracks = graph.library.tracksIn(request.folderId).filter { it.source == request.source }
                 .sortedForLibrary(LibrarySort.NAME)
             val index = tracks.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
             graph.player.replaceAndPlay(tracks.ifEmpty { listOf(track) }, index)
@@ -878,7 +853,7 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
         }
         val index = siblings.indexOfFirst { it.hash == node.hash && it.title == node.title }.coerceAtLeast(0)
         if (items.isEmpty()) {
-            graph.messages.value = "没有可播放的音频"
+            graph.messages.value = "这个文件没有可播放的音频"
         } else {
             graph.player.replaceAndPlayRemote(items, index)
         }
@@ -901,9 +876,8 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun openPlay(entry: com.nanahoshi.audioplayer.dlsite.PlayEntry) {
+        if (!showPlay || playFolders.none { it === entry }) return
         playStack.add(entry)
-        atWorkRoot = false
-        folderTitle = entry.title
         publishPlay()
         browserStates.remove(browserIdentity)
     }
@@ -912,7 +886,7 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
         val siblings = playFiles.mapNotNull { it.audio }
         val index = siblings.indexOfFirst { it.remoteUrl == entry.audio?.remoteUrl }.coerceAtLeast(0)
         if (siblings.isEmpty()) {
-            graph.messages.value = "没有可播放的音频"
+            graph.messages.value = "这个文件没有可播放的音频"
         } else {
             graph.player.replaceAndPlayRemote(siblings, index)
         }
@@ -922,15 +896,15 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 if (com.nanahoshi.audioplayer.data.LocalAudio.hasStoredCopy(track.localUri)) return@launch
-                val workno = graph.downloads.requestWorkno(track) ?: error("找不到作品编号")
+                val workno = graph.downloads.requestWorkno(track) ?: error("这个作品缺少编号")
                 val mode = graph.dlsiteDownloadRequests.choose(listOf(workno),
                     allowPartial = !track.fileHash.isNullOrBlank()) ?: return@launch
                 if (mode == DlsiteDownloadMode.ARCHIVE) {
                     graph.downloads.enqueueDlsiteArchive(workno)
-                    graph.messages.value = "已加入完整包下载"
+                    graph.messages.value = "已加入完整原始包下载任务"
                 } else {
                     val count = graph.downloads.enqueue(listOf(track))
-                    graph.messages.value = if (count > 0) "已加入下载" else "已经在本地或正在下载"
+                    graph.messages.value = if (count > 0) "已加入下载" else "已在本地或正在下载"
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (failure: Exception) { graph.messages.value = failure.message ?: "下载失败" }
@@ -940,13 +914,13 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
     fun downloadPlay(entry: com.nanahoshi.audioplayer.dlsite.PlayEntry) {
         val audio = entry.audio ?: return
         if (playDownloaded(audio.fileKey)) {
-            graph.messages.value = "已经下载"
+            graph.messages.value = "已下载"
             return
         }
         viewModelScope.launch {
             val workno = audio.workno ?: facts?.sourceId.orEmpty()
             if (workno.isBlank()) {
-                graph.messages.value = "找不到作品编号"
+                graph.messages.value = "这个作品缺少编号"
                 return@launch
             }
             val mode = graph.dlsiteDownloadRequests.choose(
@@ -956,10 +930,10 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 if (mode == DlsiteDownloadMode.ARCHIVE) {
                     val id = graph.downloads.enqueueDlsiteArchive(workno, facts?.title?.ifBlank { workno } ?: workno)
-                    graph.messages.value = if (id > 0L) "已加入完整包下载" else "原始文件已在本地或正在下载"
+                    graph.messages.value = if (id > 0L) "已加入完整原始包下载任务" else "完整原始包已在本地或正在下载"
                 } else {
                     val added = graph.downloads.enqueueRemote(audio, workno)
-                    graph.messages.value = if (added) "已加入下载" else "已经在下载"
+                    graph.messages.value = if (added) "已加入下载" else "正在下载"
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -972,12 +946,12 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
     fun downloadNode(node: AsmrNode) {
         val current = work ?: return
         if (asmrDownloaded(node)) {
-            graph.messages.value = "已经下载"
+            graph.messages.value = "已下载"
             return
         }
         val url = node.streamUrl
         if (url.isNullOrBlank()) {
-            graph.messages.value = "没有可下载的地址"
+            graph.messages.value = "这个文件没有可用的下载地址"
             return
         }
         val item = com.nanahoshi.audioplayer.dlsite.RemotePlayable(
@@ -993,7 +967,7 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
         )
         viewModelScope.launch {
             val added = graph.downloads.enqueueRemote(item, current.sourceId)
-            graph.messages.value = if (added) "已加入下载" else "已经在下载"
+            graph.messages.value = if (added) "已加入下载" else "正在下载"
         }
     }
 
@@ -1024,14 +998,14 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
                 if (purchased) {
                     graph.library.importPlayWork(currentFacts, playRoot, coverUrl)
                     saved = true
-                    graph.messages.value = "已保存"
+                    graph.messages.value = "已加入音频库"
                 } else if (current != null) {
                     graph.library.ensureAsmrWork(current)
                     val root = graph.library.folderBySource(current.sourceId) ?: return@launch
                     saved = true
                     showPlay = false
                     showLibrary(root.id)
-                    graph.messages.value = "已保存"
+                    graph.messages.value = "已加入音频库"
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -1045,7 +1019,7 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
                         }
                     }
                 }
-                graph.messages.value = failure.message ?: "保存失败"
+                graph.messages.value = failure.message ?: "保存失败，请重试"
             } finally {
                 working = false
             }
@@ -1054,26 +1028,40 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun showOriginalLibrary(rootId: Long) {
         showPlay = false
-        filesFromPlay = true
-        if (!usingLibrary || rootFolderId != rootId || browseSource.value != TrackSource.DLSITE) {
+        if (!usingLibrary || libraryStack.firstOrNull() != rootId || browseRequest.value?.source != TrackSource.DLSITE) {
             showLibrary(rootId, TrackSource.DLSITE)
         }
     }
 
     private fun showLibrary(rootId: Long, source: TrackSource = TrackSource.ASMR) {
-        browseSource.value = source
-        bindChain(listOf(rootId))
-    }
-
-    private fun bindChain(chain: List<Long>) {
-        if (chain.isEmpty()) return
-        rootFolderId = chain.first()
         usingLibrary = true
         libraryStack.clear()
-        libraryStack.addAll(chain)
-        browseId.value = chain.last()
-        atWorkRoot = chain.size == 1
+        libraryStack.add(rootId)
+        requestLibraryFolder(source)
+    }
+
+    private fun requestLibraryFolder(source: TrackSource?) {
+        libraryListing = null
+        browseRequest.value = WorkFolderRequest(libraryStack.toList(), source)
         publishLocation()
+    }
+
+    private fun updateLibraryPath(path: List<FolderEntity>) {
+        if (path.isEmpty()) {
+            usingLibrary = false
+            libraryStack.clear()
+            browseRequest.value = null
+            libraryListing = null
+            if (fileSource == WorkFileSource.PLAY) {
+                showPlay = true
+                publishPlay()
+            } else {
+                publishNodes()
+            }
+            return
+        }
+        path.forEach { libraryNames[it.id] = it.name }
+        if (path.size < libraryStack.size) ancestor(path.lastIndex) else publishLocation()
     }
 
     private fun publishPlay() {
@@ -1091,14 +1079,6 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
     }
 
 }
-
-private data class LibraryBrowse(
-    val id: Long,
-    val source: TrackSource,
-    val title: String,
-    val folders: List<FolderEntity>,
-    val entries: List<LibraryEntry>,
-)
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -1234,7 +1214,7 @@ fun OnlineSearchScreen(onOpenWork: (String) -> Unit, onOpenBiliCollection: (com.
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilterChip(selected = source == "works", onClick = { source = "works" }, label = { Text("作品") })
-            FilterChip(selected = source == "bilibili", onClick = { source = "bilibili" }, label = { Text("B站") })
+            FilterChip(selected = source == "bilibili", onClick = { source = "bilibili" }, label = { Text("B 站") })
             FilterChip(selected = source == "youtube", onClick = { source = "youtube" }, label = { Text("YouTube") })
         }
         Box(Modifier.weight(1f)) {
@@ -1282,7 +1262,7 @@ private fun OnlineResultCard(item: OnlineHit, onClick: () -> Unit) {
                             add(BadgeItem(facts.sourceId, MaterialTheme.colorScheme.primary))
                         }
                         if (item.asmrMissing) {
-                            add(BadgeItem("asmr.one未收录", MaterialTheme.colorScheme.error))
+                            add(BadgeItem("asmr.one 未收录", MaterialTheme.colorScheme.error))
                         }
                     },
                     tags = facts.tags.take(8).map {
@@ -1499,7 +1479,7 @@ private fun worknoOf(sourceId: String): String? = try {
 
 private fun Context.openWorkSite(url: String?) {
     if (url.isNullOrBlank()) {
-        (applicationContext as Application).graph().messages.value = "没有作品编号"
+        (applicationContext as Application).graph().messages.value = "这个作品缺少编号"
         return
     }
     try {
@@ -1528,7 +1508,7 @@ fun OnlineWorkScreen(
     if (browserChoice && facts != null) {
         AlertDialog(
             onDismissRequest = { browserChoice = false },
-            title = { Text("打开外部浏览器") },
+            title = { Text("在浏览器打开作品页") },
             text = {
                 Column(Modifier.fillMaxWidth()) {
                     TextButton(
@@ -1567,7 +1547,7 @@ fun OnlineWorkScreen(
                     }
                     DropdownMenu(expanded = browserMenu, onDismissRequest = { browserMenu = false }) {
                         DropdownMenuItem(
-                            text = { Text("打开外部浏览器") },
+                            text = { Text("在浏览器打开作品页") },
                             onClick = {
                                 browserMenu = false
                                 browserChoice = true
@@ -1582,7 +1562,7 @@ fun OnlineWorkScreen(
                 CircularProgressIndicator()
             }
             facts == null -> ErrorState(
-                viewModel.error ?: "没有读到作品。",
+                viewModel.error ?: "没有找到这部作品",
                 onRetry = { viewModel.load(sourceId, context.onMeteredNetwork(), force = true) },
                 modifier = Modifier.fillMaxSize(),
             )
@@ -1603,6 +1583,7 @@ fun OnlineWorkScreen(
                     state = viewModel.browserListState(),
                     modifier = Modifier.weight(1f).fillMaxWidth(),
                     bottomPadding = PaddingValues(bottom = if (canSave) 96.dp else 24.dp),
+                    loading = viewModel.libraryLoading || (viewModel.busy && foldersEmpty && filesEmpty),
                     header = {
                         if (viewModel.error != null && !viewModel.busy) ErrorState(viewModel.error!!,
                             onRetry = { viewModel.load(sourceId, context.onMeteredNetwork(), force = true) })
@@ -1619,22 +1600,25 @@ fun OnlineWorkScreen(
                                 SegmentedButton(selected = viewModel.fileSource == WorkFileSource.PLAY,
                                     onClick = { viewModel.useFileSource(WorkFileSource.PLAY) },
                                     shape = SegmentedButtonDefaults.itemShape(0, 2)) {
-                                    Text("DLSite Play")
+                                    Text("DLsite Play")
                                 }
                                 SegmentedButton(selected = viewModel.fileSource == WorkFileSource.ASMR,
                                     onClick = { viewModel.useFileSource(WorkFileSource.ASMR) },
                                     shape = SegmentedButtonDefaults.itemShape(1, 2)) { Text("asmr.one") }
                             }
                         }
+                        val trail = viewModel.browserPath
                         com.nanahoshi.audioplayer.ui.library.LibraryBreadcrumb(
-                            trail = viewModel.browserPath.mapIndexed { index, name -> com.nanahoshi.audioplayer.ui.library.LibraryCrumb(index.toLong(), name) },
-                            rootLabel = "根目录", onRoot = { viewModel.ancestor(0) }, onCrumb = { viewModel.ancestor(it + 1) })
+                            trail = trail,
+                            rootLabel = "根目录", onRoot = { viewModel.ancestor(0) },
+                            onCrumb = { viewModel.goToAncestor(trail[it].id) },
+                            revealCurrent = true)
                     },
                 ) {
                 if (viewModel.asmrMissing && viewModel.fileSource == WorkFileSource.ASMR && !viewModel.showPlay) {
                     item(key = "missing") {
                         Box(Modifier.fillMaxWidth().padding(24.dp)) {
-                            EmptyHint("asmr.one未收录")
+                            EmptyHint("asmr.one 未收录")
                         }
                     }
                 } else {
@@ -1753,7 +1737,7 @@ fun OnlineWorkScreen(
                     if (foldersEmpty && filesEmpty) {
                         item(key = "empty") {
                             Box(Modifier.fillMaxWidth().padding(24.dp)) {
-                                EmptyHint("这个文件夹是空的。")
+                                EmptyHint("这个文件夹是空的")
                             }
                         }
                     }
@@ -1781,8 +1765,8 @@ fun OnlineWorkScreen(
             ExtendedFloatingActionButton(
                 onClick = { if (!viewModel.working) viewModel.save() },
                 expanded = true,
-                icon = { Icon(Icons.Default.Download, contentDescription = null) },
-                text = { Text("保存") },
+                icon = { Icon(Icons.Default.Add, contentDescription = null) },
+                text = { Text("加入音频库") },
                 modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
             )
         }
@@ -1863,14 +1847,14 @@ private fun OnlineRemoteFileRow(name: String, onClick: () -> Unit) {
 private fun trackSupporting(track: TrackEntity, hasSubtitle: Boolean): String {
     val artist = track.artist?.takeIf { it.isNotBlank() } ?: when (track.source) {
         TrackSource.YOUTUBE -> "YouTube"
-        TrackSource.BILIBILI -> "B站"
+        TrackSource.BILIBILI -> "B 站"
         TrackSource.ASMR -> "asmr.one"
         TrackSource.DLSITE -> "DLsite"
         TrackSource.LOCAL -> "本地"
     }
     val source = when (track.source) {
         TrackSource.YOUTUBE -> "YouTube"
-        TrackSource.BILIBILI -> "B站"
+        TrackSource.BILIBILI -> "B 站"
         TrackSource.ASMR -> "asmr.one"
         TrackSource.DLSITE -> "DLsite"
         TrackSource.LOCAL -> "本地"
@@ -1903,7 +1887,7 @@ private fun GalleryBlock(urls: List<String>, revealed: Boolean, onReveal: () -> 
     Column(Modifier.fillMaxWidth()) {
         SectionHeader("图库")
         if (!revealed) {
-            TextButton(onClick = onReveal, modifier = Modifier.padding(horizontal = 8.dp)) { Text("预览") }
+            TextButton(onClick = onReveal, modifier = Modifier.padding(horizontal = 8.dp)) { Text("加载图片（使用移动数据）") }
         } else {
             val context = LocalContext.current
             LazyRow(
@@ -1936,7 +1920,7 @@ private fun TrialBlock(
         SectionHeader("内容试听")
         if (trials.isEmpty()) {
             Text(
-                "没有试听",
+                "暂无试听",
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -2011,7 +1995,7 @@ class MineViewModel(app: Application) : AndroidViewModel(app) {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                webLoginError = failure.message ?: "登录失败"
+                webLoginError = failure.message ?: "登录失败，请重试"
             } finally {
                 webLoginLoading = false
                 webLoginJob = null
@@ -2030,7 +2014,7 @@ class MineViewModel(app: Application) : AndroidViewModel(app) {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                error = failure.message ?: "登录失败"
+                error = failure.message ?: "登录失败，请重试"
             } finally {
                 loading = false
             }
@@ -2099,7 +2083,7 @@ class MineViewModel(app: Application) : AndroidViewModel(app) {
             } catch (failure: Exception) {
                 if (generation != qrGeneration) return@launch
                 qrMessage = if (failure is BilibiliException) {
-                    failure.message ?: "扫码登录失败"
+                    failure.message ?: "扫码登录失败，请重试"
                 } else {
                     "无法连接 B 站"
                 }
@@ -2227,7 +2211,7 @@ fun MineScreen(
                         modifier = Modifier.padding(top = 12.dp),
                     ) { Text("查看已购买作品") }
                     TextButton(onClick = viewModel::openWebLogin) { Text("重新登录") }
-                    TextButton(onClick = { confirmDlsiteLogout = true }) { Text("退出") }
+                    TextButton(onClick = { confirmDlsiteLogout = true }) { Text("退出登录") }
                 }
             }
         }
@@ -2240,7 +2224,12 @@ fun MineScreen(
             com.nanahoshi.audioplayer.ui.youtube.YouTubeAccountCard(onOpenYouTubeList)
         }
         item(key = "bilibili") {
-            AccountCard(title = "B站", loggedIn = viewModel.biliReady) {
+            val biliBadge = when {
+                !viewModel.biliReady -> "未登录"
+                viewModel.biliCanRefresh -> "已登录"
+                else -> "已保存"
+            }
+            AccountCard(title = "B 站", loggedIn = viewModel.biliReady, badgeText = biliBadge) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         when {
@@ -2253,18 +2242,18 @@ fun MineScreen(
                         modifier = Modifier.weight(1f),
                     )
                     IconButton(onClick = { biliHelp = true }) {
-                        Icon(Icons.AutoMirrored.Outlined.HelpOutline, contentDescription = "B站登录说明")
+                        Icon(Icons.AutoMirrored.Outlined.HelpOutline, contentDescription = "B 站登录说明")
                     }
                 }
                 if (viewModel.biliReady) {
-                    Button(onClick = onOpenFavorites, modifier = Modifier.padding(top = 8.dp)) { Text("查看收藏夹") }
+                    Button(onClick = onOpenFavorites, modifier = Modifier.padding(top = 8.dp)) { Text("查看 B 站收藏夹") }
                     TextButton(onClick = viewModel::startBiliQr) { Text("扫码登录") }
                 } else {
                     Button(onClick = viewModel::startBiliQr, modifier = Modifier.padding(top = 8.dp)) { Text("扫码登录") }
-                    TextButton(onClick = onOpenFavorites) { Text("查看收藏夹") }
+                    TextButton(onClick = onOpenFavorites) { Text("查看 B 站收藏夹") }
                 }
-                TextButton(onClick = { sessdataLogin = true }) { Text("SESSDATA登录") }
-                TextButton(onClick = { confirmBiliClear = true }) { Text("清除") }
+                TextButton(onClick = { sessdataLogin = true }) { Text("SESSDATA 登录") }
+                TextButton(onClick = { confirmBiliClear = true }) { Text("退出登录") }
             }
         }
     }
@@ -2272,16 +2261,20 @@ fun MineScreen(
         ConfirmActionDialog(
             title = "退出 DLsite 登录",
             message = "已保存的登录信息会被清除，已购买作品需要重新登录后才能查看。",
-            confirmLabel = "退出",
+            confirmLabel = "退出登录",
             onConfirm = { confirmDlsiteLogout = false; viewModel.logout() },
             onDismiss = { confirmDlsiteLogout = false },
         )
     }
     if (confirmBiliClear) {
         ConfirmActionDialog(
-            title = "清除 B站登录信息",
-            message = "扫码登录的自动续期也会停止，收藏夹和字幕需要重新登录后才能读取。",
-            confirmLabel = "清除",
+            title = "退出 B 站登录",
+            message = if (viewModel.biliCanRefresh) {
+                "扫码登录的自动续期也会停止，收藏夹和字幕需要重新登录后才能读取。"
+            } else {
+                "收藏夹和字幕需要重新登录后才能读取。"
+            },
+            confirmLabel = "退出登录",
             onConfirm = { confirmBiliClear = false; viewModel.clearBili() },
             onDismiss = { confirmBiliClear = false },
         )
@@ -2292,6 +2285,7 @@ fun MineScreen(
 private fun AccountCard(
     title: String,
     loggedIn: Boolean,
+    badgeText: String = if (loggedIn) "已登录" else "未登录",
     content: @Composable () -> Unit,
 ) {
     Surface(
@@ -2303,7 +2297,7 @@ private fun AccountCard(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
                 LabelBadge(
-                    if (loggedIn) "已登录" else "未登录",
+                    badgeText,
                     if (loggedIn) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -2316,12 +2310,12 @@ private fun AccountCard(
 private fun BiliLoginHelpDialog(onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("B站登录") },
+        title = { Text("B 站登录") },
         text = {
             Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
-                Text("只保存在这台手机里，用来播放你的账号能听的声音，包括需要登录或大会员的视频。不会上传到别处。")
+                Text("登录信息只保存在这台手机里，用来播放你的账号有权限收听的音频，包括需要登录或大会员的内容；不会上传到别处。")
                 Text(
-                    "扫码登录后，登录信息会在需要时自动更新。也可以在「SESSDATA登录」里粘贴 SESSDATA，或整段 Cookie；粘贴的内容不会自动更新。",
+                    "扫码登录后，登录信息会在需要时自动更新。也可以在「SESSDATA 登录」里粘贴 SESSDATA，或整段 Cookie；粘贴的内容不会自动更新。",
                     modifier = Modifier.padding(top = 8.dp),
                 )
             }
@@ -2352,7 +2346,7 @@ private fun BiliSessdataDialog(
     }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("SESSDATA登录") },
+        title = { Text("SESSDATA 登录") },
         text = {
             OutlinedTextField(
                 value = text,
@@ -2373,9 +2367,9 @@ private fun BiliSessdataDialog(
     if (confirming) {
         AlertDialog(
             onDismissRequest = { confirming = false },
-            title = { Text("改用文字框里的登录？") },
+            title = { Text("改用粘贴的登录信息？") },
             text = {
-                Text("当前已扫码登录，登录信息会在需要时自动更新。保存后将改用文字框里的内容，之后不会自动更新。")
+                Text("当前已扫码登录，登录信息会在需要时自动更新。保存后将改用输入框里的内容，之后不会自动更新。")
             },
             confirmButton = {
                 TextButton(onClick = { onSave(text.trim()) }) { Text("保存") }
@@ -2404,7 +2398,7 @@ private fun BiliQrDialog(
                     Surface(color = Color.White) {
                         Image(
                             bitmap = image.asImageBitmap(),
-                            contentDescription = "B站登录二维码",
+                            contentDescription = "B 站登录二维码",
                             modifier = Modifier.size(220.dp),
                         )
                     }

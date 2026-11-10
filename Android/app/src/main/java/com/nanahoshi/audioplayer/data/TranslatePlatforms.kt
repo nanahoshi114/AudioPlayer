@@ -10,7 +10,7 @@ enum class TranslatePlatform(
     val defaultEffort: String,
 ) {
     QWEN(
-        "千问AI平台",
+        "千问 AI 平台",
         "https://maas.qianwenaiapi.com/compatible-mode/v1",
         "qwen3.8-flash",
         listOf(

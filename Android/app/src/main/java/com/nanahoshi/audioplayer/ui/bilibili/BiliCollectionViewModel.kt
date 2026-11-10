@@ -131,10 +131,10 @@ class BiliCollectionViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 stopRefresh()
                 savedId = repository.bookmark(value)
-                graph.messages.value = "已收藏到播放列表"
+                graph.messages.value = "已收藏在线列表"
                 refresh()
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (failure: Exception) { error = failure.message ?: "收藏失败" }
+            catch (failure: Exception) { error = failure.message ?: "收藏失败，请重试" }
         }
     }
 
@@ -168,7 +168,7 @@ class BiliCollectionViewModel(app: Application) : AndroidViewModel(app) {
                     if (!complete) readDirectory()
                     videos
                 }
-                if (items.isEmpty()) { error = "这个合集没有可处理的视频"; return@launch }
+                if (items.isEmpty()) { error = "这个合集没有可播放或保存的视频"; return@launch }
                 val details = mutableListOf<BiliVideoDetails>()
                 val failed = mutableListOf<String>()
                 for ((index, video) in items.distinctBy { it.bvid }.withIndex()) {
@@ -185,7 +185,7 @@ class BiliCollectionViewModel(app: Application) : AndroidViewModel(app) {
                 val result = CollectionPreparation(action, details, failed, items)
                 if (failed.isNotEmpty()) pending = result else dispatch(result)
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (failure: Exception) { error = failure.message ?: "准备失败，请重试" }
+            catch (failure: Exception) { error = failure.message ?: "操作失败，请重试" }
             finally { if (token == generation) preparing = false }
         }
     }
@@ -234,7 +234,7 @@ class BiliCollectionViewModel(app: Application) : AndroidViewModel(app) {
                 currentCoroutineContext().ensureActive()
                 graph.player.replaceAndPlayItems(listOf(item))
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { error = "音轨准备失败，请重试" }
+            catch (_: Exception) { error = "视频准备失败，请重试" }
         }
     }
     fun dismissParts() { singleParts = emptyList() }
@@ -279,8 +279,8 @@ class BiliCollectionViewModel(app: Application) : AndroidViewModel(app) {
             selected = emptySet()
             graph.messages.value = when (action) {
                 CollectionAction.DOWNLOAD -> "已加入 $downloads 个下载"
-                CollectionAction.COPY -> if (saved.isEmpty()) "没有成功曲目，未创建列表" else "已复制为自建播放列表"
-                else -> "已保存 ${saved.distinct().size} 首到音频库"
+                CollectionAction.COPY -> if (saved.isEmpty()) "没有可保存的音频，未创建播放列表" else "已复制为普通播放列表"
+                else -> "已加入 ${saved.distinct().size} 首到音频库"
             }
             if (failed.isNotEmpty()) error = failed.joinToString("\n")
         } finally { committing = false }

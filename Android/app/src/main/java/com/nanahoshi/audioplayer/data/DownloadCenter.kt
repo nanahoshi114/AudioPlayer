@@ -16,6 +16,7 @@ import com.nanahoshi.audioplayer.bilibili.BilibiliClient
 import com.nanahoshi.audioplayer.data.db.AppDatabase
 import com.nanahoshi.audioplayer.dlsite.DlsiteClient
 import com.nanahoshi.audioplayer.dlsite.RemotePlayable
+import com.nanahoshi.audioplayer.playback.SubtitleSource
 import com.nanahoshi.audioplayer.data.db.DownloadEntity
 import com.nanahoshi.audioplayer.data.db.DownloadStatus
 import com.nanahoshi.audioplayer.data.db.TrackEntity
@@ -41,10 +42,6 @@ import java.io.File
 import java.util.concurrent.TimeUnit
 
 private const val TAG = "DownloadCenter"
-
-data class DeleteResult(val deleted: Int, val unlinked: Int) {
-    val total: Int get() = deleted + unlinked
-}
 
 class DownloadCenter(
     context: Context,
@@ -104,7 +101,7 @@ class DownloadCenter(
                 db.downloads().latestArchive(key)?.takeIf { it.status == DownloadStatus.DONE }?.let { return@withLock it.id }
             }
             val id = db.downloads().insert(DownloadEntity(
-                trackId = 0, title = "$title · 原始压缩包", bytesDone = 0, bytesTotal = 0,
+                trackId = 0, title = "$title · 完整原始包", bytesDone = 0, bytesTotal = 0,
                 status = DownloadStatus.QUEUED, error = null, source = TrackSource.DLSITE.name,
                 workKey = key, kind = "DLSITE_ARCHIVE",
             ))
@@ -124,7 +121,7 @@ class DownloadCenter(
         db.dlsiteOriginals().entryForTrack(trackId)?.localPath?.takeIf { File(it).isFile }
 
     private suspend fun downloadArchive(job: DownloadEntity) = kotlinx.coroutines.coroutineScope {
-        val workno = job.workKey ?: error("没有作品编号")
+        val workno = job.workKey ?: error("这个作品缺少编号")
         val self = currentCoroutineContext()[kotlinx.coroutines.Job]!!
         archiveRunners[job.id] = self
         val generation = java.util.UUID.randomUUID().toString()
@@ -167,7 +164,7 @@ class DownloadCenter(
                 result
             }
             reportSkipped(imported)
-            // 清单发布后不再响应中止；完整包只在发布成功后回收。
+            // 清单发布后不再响应中止；完整原始包只在发布成功后回收。
             staging.deleteRecursively()
             kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
                 retireOriginalCopies(oldCopies, oldDirectory)
@@ -184,7 +181,7 @@ class DownloadCenter(
 
     private fun reportSkipped(result: DlsiteOriginalImportResult) {
         if (result.skipped.isEmpty()) return
-        notice("已发布原始文件；${result.skipped.size} 个文件已关联其他曲目，保持不变")
+        notice("原始文件已解压并加入作品；${result.skipped.size} 个文件已关联其他曲目，保持不变")
     }
 
     private suspend fun retireOriginalCopies(paths: List<Pair<Long, String>>, oldDirectory: String?) {
@@ -303,39 +300,8 @@ class DownloadCenter(
         true
     }
 
-    /** 删 App 下载的文件；识别得到的曲目（本地文件是用户自己的）只取消识别，不动磁盘上的文件。 */
-    suspend fun deleteDownloaded(tracks: List<TrackEntity>, deleteSubtitles: Boolean): DeleteResult = withContext(Dispatchers.IO) {
-        var deleted = 0
-        var unlinked = 0
-        val subtitles = com.nanahoshi.audioplayer.playback.SubtitleSource(appContext, db, bilibili, asmr)
-        for (track in tracks) {
-            if (track.source != TrackSource.ASMR && track.source != TrackSource.DLSITE && track.source != TrackSource.BILIBILI && track.source != TrackSource.YOUTUBE) {
-                continue
-            }
-            val path = track.localUri
-            if (localFileReady(path)) {
-                val file = File(path!!)
-                if (file.exists() && !file.delete()) continue
-                // 选择保留字幕时不动听写记录和字幕文件，重新下载同一音频会自动匹配。
-                if (deleteSubtitles) subtitles.discardStored(track.id, path, track.remoteUrl)
-                db.downloads().deleteFinishedForPath(path)
-                if (track.source == TrackSource.BILIBILI) {
-                    deleteBiliSubtitle(filesDir, track.bvid, track.cid)
-                }
-                db.tracks().clearLocalUri(track.id)
-                db.downloads().deleteFinishedForTrack(track.id)
-                deleted += 1
-            } else if (track.source != TrackSource.BILIBILI && isRecognizedLocal(path)) {
-                db.tracks().clearLocalUri(track.id)
-                db.downloads().deleteFinishedForTrack(track.id)
-                unlinked += 1
-            }
-        }
-        DeleteResult(deleted, unlinked)
-    }
-
-    private fun isRecognizedLocal(path: String?): Boolean =
-        path != null && (path.startsWith("content:", ignoreCase = true) || path.startsWith("file:", ignoreCase = true))
+    suspend fun deleteDownloaded(tracks: List<TrackEntity>, deleteSubtitles: Boolean): DeleteResult =
+        deleteLocalCopies(db, filesDir, SubtitleSource(appContext, db, bilibili, asmr), tracks, deleteSubtitles)
 
     suspend fun enqueue(tracks: List<TrackEntity>): Int = withContext(Dispatchers.IO) {
         var added = 0
@@ -579,8 +545,8 @@ class DownloadCenter(
             if (job.kind == "DLSITE_ARCHIVE" && db.downloads().get(job.id)?.status == DownloadStatus.DONE) return
             val message = if (job.kind == "DLSITE_ARCHIVE") {
                 if (error is CancellationException) "已中止"
-                else if (error is com.nanahoshi.audioplayer.dlsite.DlsiteArchiveException) error.message ?: "原始压缩包下载失败"
-                else "原始压缩包处理失败，请重试"
+                else if (error is com.nanahoshi.audioplayer.dlsite.DlsiteArchiveException) error.message ?: "完整原始包下载失败"
+                else "完整原始包处理失败，请重试"
             } else if (job.source == TrackSource.YOUTUBE.name) {
                 if (error is CancellationException) "已中止" else if (error is YouTubeException) error.message ?: "YouTube 下载失败" else "YouTube 下载失败"
             } else error.message ?: "下载失败"
@@ -603,7 +569,7 @@ class DownloadCenter(
         val dest = remoteDestination(job, rootDir, workKey)
         dest.parentFile?.mkdirs()
         val partial = File(dest.absolutePath + ".part")
-        var url = job.remoteUrl ?: error("没有可下载的地址")
+        var url = job.remoteUrl ?: error("这个文件没有可用的下载地址")
         var refreshed = false
         val referer = job.referer?.ifBlank { null } ?: DlsiteClient.PLAY_REFERER
         val authed = job.source == TrackSource.DLSITE.name && !job.fileKey.isNullOrBlank()
@@ -651,8 +617,8 @@ class DownloadCenter(
             }
             if (!expired) break
             refreshed = true
-            val workno = job.workKey ?: error("没有可下载的地址")
-            val fileKey = job.fileKey ?: error("没有可下载的地址")
+            val workno = job.workKey ?: error("这个文件没有可用的下载地址")
+            val fileKey = job.fileKey ?: error("这个文件没有可用的下载地址")
             val signed = dlsite.signedPlayFileBlocking(workno, fileKey)
             url = signed.url
             playCookie = signed.cookie
@@ -695,9 +661,9 @@ class DownloadCenter(
             db.tracks().updateRemoteUrl(track.id, signed.url)
             return signed.url
         }
-        val workId = track.asmrWorkId ?: error("没有可下载的地址")
+        val workId = track.asmrWorkId ?: error("这个文件没有可用的下载地址")
         val fresh = AsmrClient.findStream(asmr.trackTree(workId), rawFileKey(track.fileHash), track.title)
-            ?: error("没有可下载的地址")
+            ?: error("这个文件没有可用的下载地址")
         db.tracks().updateRemoteUrl(track.id, fresh)
         return fresh
     }
@@ -730,8 +696,8 @@ class DownloadCenter(
     }
 
     private suspend fun signedTrack(track: TrackEntity): com.nanahoshi.audioplayer.dlsite.SignedPlayFile {
-        val workno = worknoOf(track) ?: error("没有可下载的地址")
-        val fileKey = rawFileKey(track.fileHash) ?: error("没有可下载的地址")
+        val workno = worknoOf(track) ?: error("这个文件没有可用的下载地址")
+        val fileKey = rawFileKey(track.fileHash) ?: error("这个文件没有可用的下载地址")
         return dlsite.signedPlayFileBlocking(workno, fileKey)
     }
 
@@ -806,8 +772,8 @@ class DownloadCenter(
     private suspend fun downloadBili(job: DownloadEntity) {
         val track = job.trackId.takeIf { it > 0L }?.let { db.tracks().getById(it) }
         val bvid = job.workKey?.trim().orEmpty().ifBlank { track?.bvid?.trim().orEmpty() }
-        val cid = job.fileKey?.toLongOrNull() ?: track?.cid ?: error("没有可缓存的分集")
-        val dest = biliAudioFile(filesDir, bvid, cid) ?: error("没有可缓存的分集")
+        val cid = job.fileKey?.toLongOrNull() ?: track?.cid ?: error("没有可下载的分集")
+        val dest = biliAudioFile(filesDir, bvid, cid) ?: error("没有可下载的分集")
         if (dest.isFile && dest.length() > 0L) {
             library.completeBiliDownload(job.id, bvid, cid, dest.absolutePath)
             cacheBiliSubtitleLater(bvid, cid)
@@ -827,8 +793,8 @@ class DownloadCenter(
                     .build()
                 val expired = biliHttp.newCall(request).execute().use { response ->
                     if ((response.code == 403 || response.code == 401) && !refreshed) return@use true
-                    if (!response.isSuccessful) error("缓存失败")
-                    val body = response.body ?: error("缓存失败")
+                    if (!response.isSuccessful) error("下载失败")
+                    val body = response.body ?: error("下载失败")
                     val total = body.contentLength().coerceAtLeast(0)
                     body.byteStream().use { input ->
                         partial.outputStream().use { output ->
@@ -845,7 +811,7 @@ class DownloadCenter(
                                     reported = done
                                 }
                             }
-                            if (done <= 0 || (total > 0 && done != total)) error("B站音轨下载不完整，请重试")
+                            if (done <= 0 || (total > 0 && done != total)) error("B 站音轨下载不完整，请重试")
                         }
                     }
                     false
@@ -894,4 +860,5 @@ class DownloadCenter(
 
     private fun localFileReady(path: String?): Boolean =
         !path.isNullOrBlank() && path.startsWith("/") && File(path).isFile
+
 }

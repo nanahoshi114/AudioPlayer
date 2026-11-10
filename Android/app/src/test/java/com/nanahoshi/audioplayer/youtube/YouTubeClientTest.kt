@@ -345,7 +345,7 @@ class YouTubeClientTest {
             try {
                 YouTubeClient({null},solver,media).copyAudio(YouTubeAudio(YouTubeVideo(id,"fixture"),
                     "https://example.googlevideo.com/v","audio/mp4",emptyMap()),file) { _, _ -> };fail()
-            } catch (error: YouTubeException) { assertTrue(error.message!!.contains("分段不匹配")) }
+            } catch (error: YouTubeException) { assertTrue(error.message!!.contains("音轨数据不完整")) }
             assertFalse(file.exists())
         } finally { file.delete() }
     }

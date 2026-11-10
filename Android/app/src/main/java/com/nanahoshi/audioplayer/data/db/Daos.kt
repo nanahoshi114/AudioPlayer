@@ -17,9 +17,6 @@ interface FolderDao {
     suspend fun update(value: FolderEntity)
 
     @Query("SELECT * FROM folders WHERE parentId IS :parentId ORDER BY position ASC, name ASC")
-    fun observeChildren(parentId: Long?): Flow<List<FolderEntity>>
-
-    @Query("SELECT * FROM folders WHERE parentId IS :parentId ORDER BY position ASC, name ASC")
     suspend fun childrenOf(parentId: Long?): List<FolderEntity>
 
     @Query("SELECT * FROM folders ORDER BY position ASC, name ASC")
@@ -30,6 +27,9 @@ interface FolderDao {
 
     @Query("SELECT * FROM folders WHERE id = :id")
     suspend fun get(id: Long): FolderEntity?
+
+    @Query("SELECT * FROM folders WHERE id IN (:ids)")
+    suspend fun getByIds(ids: List<Long>): List<FolderEntity>
 
     @Query("SELECT * FROM folders WHERE id = :id")
     fun observe(id: Long): Flow<FolderEntity?>
@@ -551,7 +551,7 @@ interface PlaylistDao {
             tracks.id AS trackId, tracks.source AS source, tracks.title AS title,
             tracks.artist AS artist, tracks.durationMs AS durationMs, tracks.coverUri AS coverUri,
             tracks.localUri AS localUri, tracks.bvid AS bvid, tracks.cid AS cid, tracks.page AS page,
-            tracks.youtubeVideoId AS youtubeVideoId
+            tracks.youtubeVideoId AS youtubeVideoId, tracks.folderId AS folderId
         FROM playlist_items
         INNER JOIN tracks ON tracks.id = playlist_items.trackId
         WHERE playlist_items.playlistId = :playlistId
@@ -566,7 +566,7 @@ interface PlaylistDao {
             tracks.id AS trackId, tracks.source AS source, tracks.title AS title,
             tracks.artist AS artist, tracks.durationMs AS durationMs, tracks.coverUri AS coverUri,
             tracks.localUri AS localUri, tracks.bvid AS bvid, tracks.cid AS cid, tracks.page AS page,
-            tracks.youtubeVideoId AS youtubeVideoId
+            tracks.youtubeVideoId AS youtubeVideoId, tracks.folderId AS folderId
         FROM playlist_items
         INNER JOIN tracks ON tracks.id = playlist_items.trackId
         WHERE playlist_items.playlistId = :playlistId

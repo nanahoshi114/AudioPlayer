@@ -25,7 +25,7 @@ internal fun CollectionCatalogue(model: BiliBrowserViewModel, open: (BiliCollect
             Text("正在读取合集…", Modifier.weight(1f).padding(16.dp))
             TextButton(onClick = page::cancel) { Text("中止") }
         }
-        if (page.items.isEmpty() && !page.loading && page.error == null) EmptyState(title = "没有读到合集或系列", message = "可以刷新后重试。")
+        if (page.items.isEmpty() && !page.loading && page.error == null) EmptyState(title = "没有合集或系列", message = "可以刷新后重试。")
         LazyColumn(state = state, modifier = Modifier.weight(1f)) {
             items(page.items, key = { it.key }) { collection ->
                 ListItem(headlineContent = { Text(collection.title, maxLines = 2, overflow = TextOverflow.Ellipsis) },

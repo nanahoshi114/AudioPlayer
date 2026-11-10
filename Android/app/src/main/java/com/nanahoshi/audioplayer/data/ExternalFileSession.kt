@@ -56,7 +56,7 @@ class ExternalFileSession internal constructor(
             if (local != null && local.canonicalPath.startsWith(context.filesDir.canonicalPath + File.separator)) {
                 return@withContext ExternalFile(FileProvider.getUriForFile(context, "${context.packageName}.files", local), mime)
             }
-            if (local == null && request.url.isBlank()) throw ExternalFileException("原始文件尚未缓存，请重新下载完整原始包")
+            if (local == null && request.url.isBlank()) throw ExternalFileException("这个文件还没有下载到本机，请重新下载完整原始包")
             cache.protect(directory)
             if (!directory.isDirectory && !directory.mkdirs()) throw ExternalFileException("无法创建文件暂存目录")
             val target = File(directory, sanitizeEntryName(request.name))

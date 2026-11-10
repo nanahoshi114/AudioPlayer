@@ -79,7 +79,7 @@ class DlsiteArchiveTest {
         File(staging, "RJ123.zip.part").writeBytes(ByteArray(5))
         val error = runCatching { client.download("RJ123", staging) }.exceptionOrNull()
         assertTrue(error is DlsiteArchiveException)
-        assertTrue(error!!.message.orEmpty().contains("续传起点"))
+        assertTrue(error!!.message.orEmpty().contains("续传位置"))
         assertFalse(error.message.orEmpty().contains("http"))
         assertFalse(File(staging, "RJ123.zip").exists())
     }
@@ -95,7 +95,7 @@ class DlsiteArchiveTest {
         val partial = File(staging, "RJ123.zip.part").apply { writeBytes(prefix) }
         val error = runCatching { client.download("RJ123", staging) }.exceptionOrNull()
         assertTrue(error is DlsiteArchiveException)
-        assertTrue(error!!.message.orEmpty().contains("大小已变化"))
+        assertTrue(error!!.message.orEmpty().contains("在下载过程中发生变化"))
         assertArrayEquals(prefix, partial.readBytes())
         assertFalse(File(staging, "RJ123.zip").exists())
     }
@@ -114,7 +114,7 @@ class DlsiteArchiveTest {
             val partial = File(staging, "RJ123.part1.rar.part").apply { writeBytes(prefix) }
             val error = runCatching { client.download("RJ123", staging) }.exceptionOrNull()
             assertTrue(error is DlsiteArchiveException)
-            assertTrue(error!!.message.orEmpty().contains("分卷文件不符"))
+            assertTrue(error!!.message.orEmpty().contains("文件不完整"))
             assertArrayEquals(prefix, partial.readBytes())
             assertFalse(File(staging, "RJ123.part1.rar").exists())
         }

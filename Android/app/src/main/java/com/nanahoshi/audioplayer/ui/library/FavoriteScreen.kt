@@ -147,10 +147,10 @@ class FavoriteViewModel(app: Application) : AndroidViewModel(app) {
                     catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
                     catch (_: Exception) { failed += "$bvid：分 P 读取失败" }
                 }
-                if (details.isEmpty()) { graph.messages.value = "没有读到可导入的视频"; return@launch }
+                if (details.isEmpty()) { graph.messages.value = "没有可导入的视频"; return@launch }
                 val requests = graph.biliImportRequests.choose(details, failed) ?: return@launch
                 requests.forEach { graph.library.importBili(it) }
-                graph.messages.value = "已导入音频库" + if (failed.isNotEmpty()) "，失败 ${failed.size} 个视频" else ""
+                graph.messages.value = "已加入音频库" + if (failed.isNotEmpty()) "，失败 ${failed.size} 个视频" else ""
                 onDone()
             } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
             catch (failure: Exception) { graph.messages.value = failure.message ?: "导入失败，请重试" }
@@ -166,30 +166,31 @@ class FavoriteViewModel(app: Application) : AndroidViewModel(app) {
         }
         viewModelScope.launch {
             caching.value = true
-            var cached = 0
+            var queued = 0
             var failed = 0
             try {
                 for (bvid in bvids) {
                     try {
                         val parts = graph.library.lookupBvid(bvid)
-                        cached += graph.downloads.enqueueBili(parts)
+                        queued += graph.downloads.enqueueBili(parts)
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (_: Exception) {
                         failed += 1
                     }
                 }
-                graph.messages.value = when {
-                    failed == 0 && cached == 0 -> "已经在本地或正在缓存"
-                    failed == 0 -> "已加入 $cached 个缓存"
-                    else -> "已加入 $cached 个缓存，失败 $failed 个"
-                }
+                graph.messages.value = favoriteDownloadNotice(queued, failed)
             } finally {
                 caching.value = false
             }
         }
     }
 }
+
+internal fun favoriteDownloadNotice(queued: Int, failedVideos: Int): String = buildList {
+    if (queued > 0) add("已加入 $queued 个下载任务")
+    if (failedVideos > 0) add("$failedVideos 个视频处理失败")
+}.joinToString("，").ifEmpty { "已在本地或正在下载" }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -217,13 +218,13 @@ fun FavoriteScreen(onBack: () -> Unit, folderId: Long? = null, viewModel: Favori
 
     Column(Modifier.fillMaxSize()) {
         AppTopBar(
-            title = folder?.title ?: "收藏夹",
+            title = folder?.title ?: "B 站收藏夹",
             onBack = { if (folder != null) viewModel.closeFolder() else onBack() },
         )
         when {
             folder == null && folders.isEmpty() && !loading -> EmptyState(
-                title = "没有收藏夹",
-                message = "若刚保存过登录信息，请返回后重新进入。",
+                title = "没有 B 站收藏夹",
+                message = "登录信息可能还没生效，请返回后重新进入收藏夹。",
                 modifier = Modifier.weight(1f),
             )
             folder == null -> LazyColumn(Modifier.weight(1f)) {
@@ -260,12 +261,12 @@ fun FavoriteScreen(onBack: () -> Unit, folderId: Long? = null, viewModel: Favori
                 onClick = { viewModel.cacheSelected() },
                 enabled = !importing && !caching && selected.isNotEmpty(),
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-            ) { Text("缓存音轨") }
+            ) { Text("下载音轨") }
             Button(
                 onClick = { viewModel.importSelected(folderId, onBack) },
                 enabled = !importing && !caching && selected.isNotEmpty(),
                 modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
-            ) { Text("导入到音频库") }
+            ) { Text("加入音频库") }
         }
     }
 }

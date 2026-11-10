@@ -81,7 +81,7 @@ internal fun AboutContent(current: InstalledAppVersion, status: UpdateStatus, on
             Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("音频播放器", style = MaterialTheme.typography.headlineSmall)
-                    Text("当前版本：${current.display}（${current.code}）", style = MaterialTheme.typography.bodyLarge)
+                    Text("版本 ${current.display}（构建 ${current.code}）", style = MaterialTheme.typography.bodyLarge)
                 }
             }
             Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.fillMaxWidth()) {
@@ -95,10 +95,10 @@ internal fun AboutContent(current: InstalledAppVersion, status: UpdateStatus, on
                             Text(when (status.relation) {
                                 UpdateRelation.AVAILABLE -> "发现新版本 ${status.release.versionName}"
                                 UpdateRelation.CURRENT -> "当前已是最新版本"
-                                UpdateRelation.LOCAL_NEWER -> "当前版本高于最新发布版本"
+                                UpdateRelation.LOCAL_NEWER -> "本机版本比发布版本新"
                                 UpdateRelation.UNKNOWN -> "无法自动比较版本，请在发布页确认"
                             }, style = MaterialTheme.typography.titleSmall)
-                            Text("最新发布：${status.release.tag}")
+                            Text("最新发布：${status.release.versionName ?: status.release.tag}")
                         }
                     }
                     Button(onClick = onCheck, enabled = status != UpdateStatus.Checking, modifier = Modifier.fillMaxWidth()) { Text("检查更新") }
