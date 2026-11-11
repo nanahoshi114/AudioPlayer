@@ -108,6 +108,11 @@ public static class DlnaTest
         var features = DlnaProtocols.Features(false);
         if (!features.Contains("DLNA.ORG_OP=11", StringComparison.Ordinal) || !features.Contains("DLNA.ORG_FLAGS=61F00000", StringComparison.Ordinal))
             return "seek flags";
+        var wavInfo = DlnaProtocols.ProtocolInfo(DlnaServeKind.Original, "audio/wav", default, false);
+        if (!wavInfo.Contains("audio/wav:DLNA.ORG_PN=WAV;", StringComparison.Ordinal) || wavInfo.Contains("PN=MP3", StringComparison.Ordinal))
+            return "wav profile";
+        if (!DlnaProtocols.ProtocolInfo(DlnaServeKind.Original, "audio/mpeg", default, false).Contains("DLNA.ORG_PN=MP3;", StringComparison.Ordinal))
+            return "mp3 profile";
         var lrc = DlnaSidecar.FormatLrc([new SubtitleCue(1500, 2000, "你好")]);
         if (lrc == null || !lrc.Contains("[00:01.50]你好", StringComparison.Ordinal))
             return "lrc";

@@ -256,9 +256,29 @@ public static class DlnaProtocols
         return DlnaServeKind.Original;
     }
 
-    public static string Features(bool converted) =>
-        // OP 和 FLAGS 都要带上按时间和按字节拖动。只写字节时，山灵会把进度条锁住。
-        "DLNA.ORG_OP=11;DLNA.ORG_CI=" + (converted ? "1" : "0") + ";DLNA.ORG_FLAGS=61F00000000000000000000000000000";
+    public static string Profile(DlnaServeKind kind, string mime)
+    {
+        if (kind == DlnaServeKind.L16)
+            return "LPCM";
+        if (kind == DlnaServeKind.Wav)
+            return "WAV";
+        return mime.ToLowerInvariant() switch
+        {
+            "audio/mpeg" or "audio/mp3" => "MP3",
+            "audio/flac" or "audio/x-flac" => "FLAC",
+            "audio/wav" or "audio/x-wav" => "WAV",
+            "audio/mp4" or "audio/aac" or "audio/x-m4a" or "audio/mp4a-latm" => "AAC_ISO",
+            "audio/ogg" or "audio/opus" => "OGG",
+            _ => "",
+        };
+    }
+
+    public static string Features(bool converted, string? profile = null)
+    {
+        // 山灵不看文件后缀，只看 DLNA.ORG_PN。不写的时候屏幕会显示成 MP3。
+        var name = string.IsNullOrEmpty(profile) ? "" : "DLNA.ORG_PN=" + profile + ";";
+        return name + "DLNA.ORG_OP=11;DLNA.ORG_CI=" + (converted ? "1" : "0") + ";DLNA.ORG_FLAGS=61F00000000000000000000000000000";
+    }
 
     public static string ContentType(DlnaServeKind kind, string mime, PcmLayout layout) => kind switch
     {
@@ -270,7 +290,7 @@ public static class DlnaProtocols
 
     public static string ProtocolInfo(DlnaServeKind kind, string mime, PcmLayout layout, bool converted)
     {
-        var extra = Features(converted);
+        var extra = Features(converted, Profile(kind, mime));
         if (kind == DlnaServeKind.L16)
         {
             return "http-get:*:audio/L16;rate=" + layout.SampleRate.ToString(CultureInfo.InvariantCulture)

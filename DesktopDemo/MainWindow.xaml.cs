@@ -1911,6 +1911,8 @@ public partial class MainWindow : Window
     {
         if (e.Key == Key.Space)
         {
+            if (PlayerPage.Visibility != Visibility.Visible || Keyboard.FocusedElement is TextBox)
+                return;
             TogglePlay();
             e.Handled = true;
         }

@@ -101,7 +101,7 @@ public sealed class DlnaFileServer : IDisposable
             FilePath = path,
             Kind = kind,
             ContentType = DlnaProtocols.ContentType(kind, mime, layout),
-            Features = DlnaProtocols.Features(kind != DlnaServeKind.Original),
+            Features = DlnaProtocols.Features(kind != DlnaServeKind.Original, DlnaProtocols.Profile(kind, mime)),
             Length = length,
             Layout = layout,
             Cover = cover is { Length: > 0 } ? cover : null,
