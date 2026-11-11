@@ -6,6 +6,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Xml.Linq;
 using NAudio.Wave;
+using PlayerDemo.Subtitles;
 
 namespace PlayerDemo.Playback;
 
@@ -102,16 +103,24 @@ public static class DlnaTest
             return "time parse";
         if (DlnaSoap.TryTime("NOT_IMPLEMENTED", out _))
             return "time skip";
-        if (DlnaSoap.FormatTime(TimeSpan.FromSeconds(65)) != "0:01:05")
+        if (DlnaSoap.FormatTime(TimeSpan.FromSeconds(65)) != "00:01:05")
             return "time format";
+        var features = DlnaProtocols.Features(false);
+        if (!features.Contains("DLNA.ORG_OP=11", StringComparison.Ordinal) || !features.Contains("DLNA.ORG_FLAGS=61F00000", StringComparison.Ordinal))
+            return "seek flags";
+        var lrc = DlnaSidecar.FormatLrc([new SubtitleCue(1500, 2000, "你好")]);
+        if (lrc == null || !lrc.Contains("[00:01.50]你好", StringComparison.Ordinal))
+            return "lrc";
         return null;
     }
 
     private static string? TestSoap()
     {
-        var metadata = DlnaSoap.Metadata("http://a/b", "A & B", "甲", "http-get:*:audio/mpeg:*", 12, TimeSpan.FromSeconds(65));
-        if (!metadata.Contains("A &amp; B", StringComparison.Ordinal) || !metadata.Contains("duration=\"0:01:05\"", StringComparison.Ordinal))
+        var metadata = DlnaSoap.Metadata("http://a/b", "A & B", "甲", "http-get:*:audio/mpeg:*", 12, TimeSpan.FromSeconds(65), "专辑", "http://a/cover.jpg", "http://a/t.lrc");
+        if (!metadata.Contains("A &amp; B", StringComparison.Ordinal) || !metadata.Contains("duration=\"00:01:05\"", StringComparison.Ordinal))
             return "metadata";
+        if (!metadata.Contains("upnp:album>专辑", StringComparison.Ordinal) || !metadata.Contains("albumArtURI", StringComparison.Ordinal) || !metadata.Contains("http://a/t.lrc", StringComparison.Ordinal))
+            return "metadata art";
         var envelope = DlnaSoap.Envelope(DlnaSoap.AvTransport1, "Ping", [("CurrentURIMetaData", "<item>")]);
         if (!envelope.Contains("&lt;item&gt;", StringComparison.Ordinal) || envelope.Contains("<item>", StringComparison.Ordinal))
             return "soap escape";
@@ -142,7 +151,9 @@ public static class DlnaTest
                 writer.WriteSamples([0.5f, -0.5f], 0, 2);
 
             server = new DlnaFileServer();
-            if (!server.TryPublish(bin, DlnaServeKind.Original, out var original, out var error))
+            var cover = new byte[] { 1, 2, 3, 4 };
+            var lyrics = System.Text.Encoding.UTF8.GetBytes("[00:00.00]测试\n");
+            if (!server.TryPublish(bin, DlnaServeKind.Original, out var original, out var error, cover, lyrics))
                 return error;
             var full = Get("http://127.0.0.1:" + server.Port.ToString(CultureInfo.InvariantCulture) + original.Path, null);
             if (!full.AsSpan().SequenceEqual(raw))
@@ -150,6 +161,13 @@ public static class DlnaTest
             var range = Get("http://127.0.0.1:" + server.Port.ToString(CultureInfo.InvariantCulture) + original.Path, "bytes=10-19");
             if (!range.AsSpan().SequenceEqual(raw.AsSpan(10, 10)))
                 return "direct range";
+            var baseUrl = "http://127.0.0.1:" + server.Port.ToString(CultureInfo.InvariantCulture);
+            var gotCover = Get(baseUrl + original.CoverRoute, null);
+            if (!gotCover.AsSpan().SequenceEqual(cover))
+                return "cover";
+            var gotLyrics = Get(baseUrl + original.LyricsRoute, null);
+            if (!gotLyrics.AsSpan().SequenceEqual(lyrics))
+                return "lyrics";
             var missing = Status("http://127.0.0.1:" + server.Port.ToString(CultureInfo.InvariantCulture) + "/audio/999/track.bin");
             if (missing != 404)
                 return "missing " + missing;

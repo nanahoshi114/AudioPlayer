@@ -27,6 +27,8 @@ public sealed class ExclusivePlayer : IDisposable
     private OutputAdjust _adjust;
     private bool _stopRequested;
     private string _outputText = "";
+    private string? _playingPath;
+    private TimeSpan _start;
     private string _resampleNote = "";
     private string? _formatsKey;
     private List<WaveFormat>? _formats;
@@ -40,7 +42,12 @@ public sealed class ExclusivePlayer : IDisposable
 
     public TimeSpan Position
     {
-        get => _swap?.CurrentTime ?? TimeSpan.Zero;
+        get
+        {
+            if (_swap != null && _swap.TryPending(out var pending))
+                return pending;
+            return _swap?.CurrentTime ?? TimeSpan.Zero;
+        }
         set
         {
             if (_swap is not { CanSeek: true } stream)
@@ -132,8 +139,10 @@ public sealed class ExclusivePlayer : IDisposable
         device.AudioEndpointVolume.MasterVolumeLevelScalar = (float)scalar;
     }
 
-    public PlayResult Play(string path)
+    public PlayResult Play(string path, TimeSpan start = default)
     {
+        _playingPath = path;
+        _start = start < TimeSpan.Zero ? TimeSpan.Zero : start;
         WaveStream raw;
         try
         {
@@ -175,9 +184,23 @@ public sealed class ExclusivePlayer : IDisposable
 
         if (_output != null && _swap != null && CanFeed(raw))
         {
+            var handed = false;
             try
             {
-                _swap.Replace(WrapForDevice(raw));
+                if (_start > TimeSpan.Zero)
+                {
+                    var jump = _start;
+                    _start = TimeSpan.Zero;
+                    raw.Dispose();
+                    handed = true;
+                    _swap.ArmSeek(() => OpenLikeCurrent(path), jump);
+                }
+                else
+                {
+                    _swap.Replace(WrapForDevice(raw));
+                    handed = true;
+                }
+
                 _stopRequested = false;
                 if (_output.PlaybackState != PlaybackState.Playing)
                     _output.Play();
@@ -185,13 +208,28 @@ public sealed class ExclusivePlayer : IDisposable
             }
             catch (Exception ex)
             {
-                raw.Dispose();
+                if (!handed)
+                    raw.Dispose();
                 return PlayResult.Fail(ex.Message);
             }
         }
 
         StopOutput();
         return TryStart(path, raw);
+    }
+
+    public PlayResult Seek(TimeSpan position)
+    {
+        if (_swap == null || string.IsNullOrEmpty(_playingPath))
+            return PlayResult.Fail("没有正在播放");
+        if (position < TimeSpan.Zero)
+            position = TimeSpan.Zero;
+        var total = _swap.TotalTime;
+        if (total > TimeSpan.Zero && position > total)
+            position = total;
+        var path = _playingPath;
+        _swap.ArmSeek(() => OpenLikeCurrent(path), position);
+        return PlayResult.Success(_outputText);
     }
 
     public void Pause()
@@ -320,6 +358,10 @@ public sealed class ExclusivePlayer : IDisposable
         if (_exclusive && !DeviceAccepts(stream.WaveFormat))
             throw new NotSupportedException("设备不接受这个格式");
 
+        _adjust = adjust;
+        _deviceFormat = stream.WaveFormat;
+        _resampleNote = stream is RateConvertStream converted ? converted.SourceNote : "";
+        _outputText = Describe(stream.WaveFormat, adjust);
         _swap = new SwapStream(stream);
         var mode = _exclusive ? AudioClientShareMode.Exclusive : AudioClientShareMode.Shared;
         _output = new WasapiOut(_device, mode, true, 100);
@@ -328,6 +370,14 @@ public sealed class ExclusivePlayer : IDisposable
         {
             _stopRequested = false;
             _output.Init(_swap);
+            if (_start > TimeSpan.Zero && !string.IsNullOrEmpty(_playingPath))
+            {
+                var start = _start;
+                _start = TimeSpan.Zero;
+                var path = _playingPath;
+                _swap.ArmSeek(() => OpenLikeCurrent(path), start);
+            }
+
             _output.Play();
         }
         catch
@@ -341,11 +391,14 @@ public sealed class ExclusivePlayer : IDisposable
             DropDevice();
             throw;
         }
+    }
 
-        _adjust = adjust;
-        _deviceFormat = stream.WaveFormat;
-        _resampleNote = stream is RateConvertStream converted ? converted.SourceNote : "";
-        _outputText = Describe(stream.WaveFormat, adjust);
+    private WaveStream OpenLikeCurrent(string path)
+    {
+        var raw = CleanHeader(TrackLoader.OpenPcm(path));
+        if (_adjust == OutputAdjust.Resample && _deviceFormat != null)
+            return new RateConvertStream(raw, _deviceFormat);
+        return WrapForDevice(raw);
     }
 
     private bool CanFeed(WaveStream raw)
@@ -437,9 +490,15 @@ public sealed class ExclusivePlayer : IDisposable
 
     private static bool HoldsMediaFoundation(WaveStream stream)
     {
-        while (stream is CleanFormatStream clean)
-            stream = clean.Source;
-        return stream is MediaFoundationReader;
+        while (true)
+        {
+            if (stream is CleanFormatStream clean)
+                stream = clean.Source;
+            else if (stream is DurationClipStream clip)
+                stream = clip.Source;
+            else
+                return stream is MediaFoundationReader;
+        }
     }
 
     private static bool HasSamples(WaveStream raw)

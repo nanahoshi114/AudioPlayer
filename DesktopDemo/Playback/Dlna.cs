@@ -257,7 +257,8 @@ public static class DlnaProtocols
     }
 
     public static string Features(bool converted) =>
-        "DLNA.ORG_OP=01;DLNA.ORG_CI=" + (converted ? "1" : "0") + ";DLNA.ORG_FLAGS=01700000000000000000000000000000";
+        // OP 和 FLAGS 都要带上按时间和按字节拖动。只写字节时，山灵会把进度条锁住。
+        "DLNA.ORG_OP=11;DLNA.ORG_CI=" + (converted ? "1" : "0") + ";DLNA.ORG_FLAGS=61F00000000000000000000000000000";
 
     public static string ContentType(DlnaServeKind kind, string mime, PcmLayout layout) => kind switch
     {
@@ -330,7 +331,7 @@ public static class DlnaSoap
         return body.ToString();
     }
 
-    public static string Metadata(string url, string? title, string? artist, string protocolInfo, long size, TimeSpan duration)
+    public static string Metadata(string url, string? title, string? artist, string protocolInfo, long size, TimeSpan duration, string? album = null, string? artUrl = null, string? lyricsUrl = null)
     {
         var safeTitle = Xml(string.IsNullOrWhiteSpace(title) ? "音频" : title.Trim());
         var safeArtist = Xml(artist?.Trim() ?? "");
@@ -339,11 +340,19 @@ public static class DlnaSoap
         var creator = safeArtist.Length == 0
             ? ""
             : "<dc:creator>" + safeArtist + "</dc:creator><upnp:artist>" + safeArtist + "</upnp:artist>";
+        var albumText = string.IsNullOrWhiteSpace(album) ? "" : "<upnp:album>" + Xml(album.Trim()) + "</upnp:album>";
+        var art = string.IsNullOrWhiteSpace(artUrl)
+            ? ""
+            : "<upnp:albumArtURI dlna:profileID=\"JPEG_SM\" xmlns:dlna=\"urn:schemas-dlna-org:metadata-1-0/\">" + Xml(artUrl) + "</upnp:albumArtURI>";
+        var lyrics = string.IsNullOrWhiteSpace(lyricsUrl) ? "" : "<upnp:lyrics>" + Xml(lyricsUrl) + "</upnp:lyrics>";
         return "<DIDL-Lite xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\">"
             + "<item id=\"0\" parentID=\"-1\" restricted=\"1\">"
             + "<dc:title>" + safeTitle + "</dc:title>"
             + creator
+            + albumText
             + "<upnp:class>object.item.audioItem.musicTrack</upnp:class>"
+            + art
+            + lyrics
             + "<res protocolInfo=\"" + Xml(protocolInfo) + "\"" + durationText + sizeText + ">" + Xml(url) + "</res>"
             + "</item></DIDL-Lite>";
     }
@@ -404,7 +413,8 @@ public static class DlnaSoap
     {
         if (time < TimeSpan.Zero)
             time = TimeSpan.Zero;
-        return ((int)time.TotalHours).ToString(CultureInfo.InvariantCulture)
+        // 小时补成两位。山灵把 0:01:05 当成格式不对，进度就拖不动。
+        return ((int)time.TotalHours).ToString("00", CultureInfo.InvariantCulture)
             + ":" + time.Minutes.ToString("00", CultureInfo.InvariantCulture)
             + ":" + time.Seconds.ToString("00", CultureInfo.InvariantCulture);
     }

@@ -127,7 +127,15 @@ public static class TrackLoader
         }
 
         if (ext.Equals(".m4a", StringComparison.OrdinalIgnoreCase) || ext.Equals(".mp4", StringComparison.OrdinalIgnoreCase) || ext.Equals(".m4s", StringComparison.OrdinalIgnoreCase))
+        {
             FragmentedMp4.EnsureProgressive(path);
+            var reader = new MediaFoundationReader(path);
+            if (FragmentedMp4.TryMediaDuration(path, out var real)
+                && reader.TotalTime.TotalSeconds > real.TotalSeconds * 1.5 + 1)
+                return new DurationClipStream(reader, real);
+            return reader;
+        }
+
         return new MediaFoundationReader(path);
     }
 
@@ -186,33 +194,41 @@ public static class TrackLoader
         return cropped;
     }
 
-    public static string? CoverFile(string audioPath)
+    public static string? DirectoryCover(string directory)
     {
         string? best = null;
         var bestSize = -1L;
+        foreach (var name in CoverNames)
+        {
+            var candidate = Path.Combine(directory, name);
+            if (!File.Exists(candidate))
+                continue;
+            var length = new FileInfo(candidate).Length;
+            if (length > bestSize)
+            {
+                best = candidate;
+                bestSize = length;
+            }
+        }
+
+        return best;
+    }
+
+    public static string? CoverFile(string audioPath)
+    {
         var directory = Path.GetDirectoryName(audioPath);
         for (var depth = 0; depth < 4 && !string.IsNullOrEmpty(directory); depth++)
         {
-            foreach (var name in CoverNames)
-            {
-                var candidate = Path.Combine(directory, name);
-                if (!File.Exists(candidate))
-                    continue;
-                var length = new FileInfo(candidate).Length;
-                if (length > bestSize)
-                {
-                    best = candidate;
-                    bestSize = length;
-                }
-            }
-
+            var cover = DirectoryCover(directory);
+            if (cover != null)
+                return cover;
             var parent = Path.GetDirectoryName(directory);
             if (string.IsNullOrEmpty(parent) || parent.Equals(directory, StringComparison.OrdinalIgnoreCase))
                 break;
             directory = parent;
         }
 
-        return best;
+        return null;
     }
 
     public static BitmapSource? DecodeFile(string? path)
@@ -274,5 +290,58 @@ public static class TrackLoader
             ".ogg" => "OGG",
             _ => ext.TrimStart('.').ToUpperInvariant(),
         };
+    }
+}
+
+/// <summary>
+/// 容器把采样数写成了电影时间，Media Foundation 会把几十分钟报成几十小时。
+/// 播放和进度条改用采样表算出来的时长。
+/// </summary>
+sealed class DurationClipStream : WaveStream
+{
+    private readonly WaveStream _source;
+    private readonly long _length;
+
+    public DurationClipStream(WaveStream source, TimeSpan duration)
+    {
+        _source = source;
+        var format = source.WaveFormat;
+        var align = Math.Max(format.BlockAlign, 1);
+        var bytes = (long)Math.Round(duration.TotalSeconds * format.AverageBytesPerSecond);
+        bytes -= bytes % align;
+        if (bytes < align)
+            bytes = align;
+        if (source.Length > 0 && bytes > source.Length)
+            bytes = source.Length - source.Length % align;
+        _length = bytes;
+    }
+
+    public WaveStream Source => _source;
+
+    public override WaveFormat WaveFormat => _source.WaveFormat;
+
+    public override long Length => _length;
+
+    public override long Position
+    {
+        get => Math.Min(_source.Position, _length);
+        set => _source.Position = Math.Clamp(value, 0, _length);
+    }
+
+    public override int Read(byte[] buffer, int offset, int count)
+    {
+        var left = _length - _source.Position;
+        if (left <= 0)
+            return 0;
+        if (count > left)
+            count = (int)left;
+        return _source.Read(buffer, offset, count);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+            _source.Dispose();
+        base.Dispose(disposing);
     }
 }

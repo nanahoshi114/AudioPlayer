@@ -19,6 +19,23 @@ public sealed class DlnaPublication
     public required string Features { get; init; }
     public required long Length { get; init; }
     public PcmLayout Layout { get; init; }
+    public byte[]? Cover { get; init; }
+    public byte[]? Lyrics { get; init; }
+
+    public string CoverRoute => "/audio/" + Generation.ToString(CultureInfo.InvariantCulture) + "/cover.jpg";
+
+    public string LyricsRoute
+    {
+        get
+        {
+            var route = Path;
+            var slash = route.LastIndexOf('/');
+            var dot = route.LastIndexOf('.');
+            if (dot > slash)
+                return route[..dot] + ".lrc";
+            return route + ".lrc";
+        }
+    }
 }
 
 /// <summary>
@@ -45,7 +62,7 @@ public sealed class DlnaFileServer : IDisposable
         _accept.Start();
     }
 
-    public bool TryPublish(string path, DlnaServeKind kind, out DlnaPublication publication, out string error)
+    public bool TryPublish(string path, DlnaServeKind kind, out DlnaPublication publication, out string error, byte[]? cover = null, byte[]? lyrics = null)
     {
         publication = null!;
         error = "";
@@ -87,6 +104,8 @@ public sealed class DlnaFileServer : IDisposable
             Features = DlnaProtocols.Features(kind != DlnaServeKind.Original),
             Length = length,
             Layout = layout,
+            Cover = cover is { Length: > 0 } ? cover : null,
+            Lyrics = lyrics is { Length: > 0 } ? lyrics : null,
         };
         lock (_gate)
             _current = publication;
@@ -183,6 +202,31 @@ public sealed class DlnaFileServer : IDisposable
             return;
         }
 
+        var name = RequestName(request[1]);
+        if (name.Equals("cover.jpg", StringComparison.OrdinalIgnoreCase))
+        {
+            if (publication.Cover == null)
+            {
+                WriteHead(stream, 404, "Not Found", ("Content-Length", "0"), ("Connection", "close"));
+                return;
+            }
+
+            ServeBytes(stream, method, publication.Cover, "image/jpeg", headers);
+            return;
+        }
+
+        if (name.EndsWith(".lrc", StringComparison.OrdinalIgnoreCase))
+        {
+            if (publication.Lyrics == null)
+            {
+                WriteHead(stream, 404, "Not Found", ("Content-Length", "0"), ("Connection", "close"));
+                return;
+            }
+
+            ServeBytes(stream, method, publication.Lyrics, "text/plain; charset=utf-8", headers);
+            return;
+        }
+
         var range = ParseRange(headers.TryGetValue("Range", out var rangeHeader) ? rangeHeader : null, publication.Length, out var start, out var end);
         if (range == RangeResult.Unsatisfiable)
         {
@@ -275,9 +319,59 @@ public sealed class DlnaFileServer : IDisposable
         return headers;
     }
 
+    private static string RequestName(string target)
+    {
+        var path = StripTarget(target);
+        var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length == 0 ? "" : parts[^1];
+    }
+
+    private static void ServeBytes(NetworkStream stream, string method, byte[] body, string contentType, Dictionary<string, string> headers)
+    {
+        var range = ParseRange(headers.TryGetValue("Range", out var rangeHeader) ? rangeHeader : null, body.LongLength, out var start, out var end);
+        if (range == RangeResult.Unsatisfiable)
+        {
+            WriteHead(
+                stream,
+                416,
+                "Range Not Satisfiable",
+                ("Content-Range", "bytes */" + body.Length.ToString(CultureInfo.InvariantCulture)),
+                ("Content-Length", "0"),
+                ("Connection", "close"));
+            return;
+        }
+
+        var count = end - start + 1;
+        var partial = range == RangeResult.Partial;
+        var head = new List<(string, string)>
+        {
+            ("Content-Type", contentType),
+            ("Content-Length", count.ToString(CultureInfo.InvariantCulture)),
+            ("Accept-Ranges", "bytes"),
+            ("Cache-Control", "no-cache"),
+            ("Connection", "close"),
+            ("Server", "PlayerDemo UPnP/1.1 DLNADOC/1.50"),
+        };
+        if (partial)
+            head.Add(("Content-Range", "bytes " + start.ToString(CultureInfo.InvariantCulture) + "-" + end.ToString(CultureInfo.InvariantCulture) + "/" + body.Length.ToString(CultureInfo.InvariantCulture)));
+        WriteHead(stream, partial ? 206 : 200, partial ? "Partial Content" : "OK", head.ToArray());
+        if (method.Equals("HEAD", StringComparison.OrdinalIgnoreCase))
+            return;
+        stream.Write(body, (int)start, (int)count);
+    }
+
     private static bool TryGeneration(string target, out int generation)
     {
         generation = 0;
+        var path = StripTarget(target);
+        var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 2 || !parts[0].Equals("audio", StringComparison.OrdinalIgnoreCase))
+            return false;
+        return int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out generation);
+    }
+
+    private static string StripTarget(string target)
+    {
         var path = target;
         if (path.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || path.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
         {
@@ -288,10 +382,7 @@ public sealed class DlnaFileServer : IDisposable
         var query = path.IndexOf('?');
         if (query >= 0)
             path = path[..query];
-        var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length < 2 || !parts[0].Equals("audio", StringComparison.OrdinalIgnoreCase))
-            return false;
-        return int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out generation);
+        return path;
     }
 
     private static RangeResult ParseRange(string? header, long length, out long start, out long end)

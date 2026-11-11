@@ -39,6 +39,15 @@ public sealed class CrawlHit : INotifyPropertyChanged
     public string? MediaAgent { get; init; }
     public string MediaExtension { get; init; } = ".m4a";
     public string CoverReferer { get; init; } = "https://asmr.one/";
+    public long SeasonId { get; init; }
+    public long OwnerMid { get; init; }
+    public string WorkCircle { get; init; } = "";
+    public string SeedBvid { get; init; } = "";
+    public string PlaylistId { get; init; } = "";
+    public string ShelfId { get; set; } = "";
+    public string ShelfTitle { get; set; } = "";
+    public string ShelfCircle { get; set; } = "";
+    public int ShelfOrder { get; set; }
     public bool IsPicked
     {
         get => _picked;
@@ -72,6 +81,91 @@ public sealed class CrawlHit : INotifyPropertyChanged
         var image = await AsmrCrawl.CoverAsync(CoverUrl, CoverReferer);
         if (image != null)
             Cover = image;
+    }
+}
+
+static class LooseAlbum
+{
+    public static void Absorb(string folderName, string directory, string stem, bool nested)
+    {
+        if (folderName.Length == 0 || stem.Length == 0)
+            return;
+        string oldDir;
+        try
+        {
+            oldDir = Path.Combine(TrackLoader.LibraryRoot(), folderName);
+            if (!Directory.Exists(oldDir))
+                return;
+            if (string.Equals(Path.GetFullPath(oldDir), Path.GetFullPath(directory), StringComparison.OrdinalIgnoreCase))
+                return;
+        }
+        catch (IOException)
+        {
+            return;
+        }
+
+        var audios = Directory.GetFiles(oldDir).Where(TrackLoader.IsAudioFile).ToList();
+        if (audios.Count == 0)
+            return;
+        var source = !nested && audios.Count == 1
+            ? audios[0]
+            : audios.FirstOrDefault(file => NameMatches(file, stem));
+        if (source == null)
+            return;
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var dest = Path.Combine(directory, stem + Path.GetExtension(source));
+            if (!File.Exists(dest))
+                File.Move(source, dest);
+            else if (!string.Equals(Path.GetFullPath(source), Path.GetFullPath(dest), StringComparison.OrdinalIgnoreCase))
+                File.Delete(source);
+            var bare = Path.GetFileNameWithoutExtension(source);
+            var destBare = Path.GetFileNameWithoutExtension(dest);
+            foreach (var file in Directory.GetFiles(oldDir))
+            {
+                var name = Path.GetFileName(file);
+                if (TrackLoader.IsAudioFile(file) || !name.StartsWith(bare + ".", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                var sidecar = Path.Combine(directory, destBare + name[bare.Length..]);
+                if (!File.Exists(sidecar))
+                    File.Move(file, sidecar);
+                else
+                    File.Delete(file);
+            }
+
+            if (!Directory.GetFiles(oldDir).Any(TrackLoader.IsAudioFile))
+                DeleteBare(oldDir);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
+
+    private static bool NameMatches(string file, string stem)
+    {
+        var bare = Path.GetFileNameWithoutExtension(file);
+        if (bare.Length == 0)
+            return false;
+        return bare.Equals(stem, StringComparison.OrdinalIgnoreCase)
+            || stem.EndsWith(" " + bare, StringComparison.OrdinalIgnoreCase)
+            || bare.EndsWith(" " + stem, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void DeleteBare(string directory)
+    {
+        foreach (var name in new[] { "work.json", "videos.json", "cover.jpg", "cover.jpeg", "cover.png", "cover.webp" })
+        {
+            var path = Path.Combine(directory, name);
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+
+        if (!Directory.EnumerateFileSystemEntries(directory).Any())
+            Directory.Delete(directory);
     }
 }
 

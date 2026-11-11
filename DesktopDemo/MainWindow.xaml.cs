@@ -2,6 +2,8 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
@@ -24,6 +26,7 @@ public partial class MainWindow : Window
 {
     private readonly ObservableCollection<TrackItem> _tracks = new();
     private List<AlbumItem> _albums = [];
+    private readonly List<AlbumItem> _albumStack = [];
     private AlbumItem? _openAlbum;
     private DateTime _openedAlbumAt;
     private readonly OutputSession _player = new();
@@ -46,6 +49,8 @@ public partial class MainWindow : Window
     private bool _showOriginal = true;
     private bool _showDuplicates;
     private bool _listReady;
+    private bool _refreshingList;
+    private string _libraryQuery = "";
     private bool _outputReady;
     private Color _accent = Color.FromRgb(0x8A, 0x5A, 0x32);
     private string? _appliedDeviceId;
@@ -98,6 +103,7 @@ public partial class MainWindow : Window
         Loaded += (_, _) =>
         {
             LoadDevice();
+            CrawlPage.ResumeInterrupted();
             if (_deviceWatcher == null)
             {
                 _deviceWatcher = new OutputDeviceWatcher();
@@ -174,24 +180,21 @@ public partial class MainWindow : Window
 
     public void CaptureAndExit(string path)
     {
-        ContentRendered += (_, _) =>
+        Dispatcher.BeginInvoke(() =>
         {
-            Dispatcher.BeginInvoke(() =>
-            {
-                UpdateLayout();
-                var dpi = VisualTreeHelper.GetDpi(this);
-                var width = Math.Max(1, (int)(ActualWidth * dpi.DpiScaleX));
-                var height = Math.Max(1, (int)(ActualHeight * dpi.DpiScaleY));
-                var bitmap = new RenderTargetBitmap(width, height, dpi.PixelsPerInchX, dpi.PixelsPerInchY, PixelFormats.Pbgra32);
-                bitmap.Render(this);
-                var encoder = new PngBitmapEncoder();
-                encoder.Frames.Add(BitmapFrame.Create(bitmap));
-                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-                using var stream = File.Create(path);
-                encoder.Save(stream);
-                Application.Current.Shutdown();
-            }, DispatcherPriority.ApplicationIdle);
-        };
+            UpdateLayout();
+            var dpi = VisualTreeHelper.GetDpi(this);
+            var width = Math.Max(1, (int)(ActualWidth * dpi.DpiScaleX));
+            var height = Math.Max(1, (int)(ActualHeight * dpi.DpiScaleY));
+            var bitmap = new RenderTargetBitmap(width, height, dpi.PixelsPerInchX, dpi.PixelsPerInchY, PixelFormats.Pbgra32);
+            bitmap.Render(this);
+            var encoder = new PngBitmapEncoder();
+            encoder.Frames.Add(BitmapFrame.Create(bitmap));
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            using var stream = File.Create(path);
+            encoder.Save(stream);
+            Application.Current.Shutdown();
+        }, DispatcherPriority.ApplicationIdle);
     }
 
     private void LoadDevice()
@@ -425,32 +428,43 @@ public partial class MainWindow : Window
 
     private void RebuildLibrary()
     {
-        var openKey = _openAlbum?.Key;
+        var keys = _albumStack.Select(album => album.Key).ToList();
+        if (_openAlbum != null)
+            keys.Add(_openAlbum.Key);
         _albums = AlbumShelf.Group(_tracks, _showDuplicates);
-        if (openKey != null)
+        _albumStack.Clear();
+        _openAlbum = null;
+        AlbumItem? shown = null;
+        foreach (var key in keys)
         {
-            var still = _albums.FirstOrDefault(album => album.Key == openKey);
-            if (still != null)
-            {
-                ShowTracks(still);
-                return;
-            }
+            var found = shown == null
+                ? _albums.FirstOrDefault(album => album.Key == key)
+                : ChildAlbum(shown, key);
+            if (found == null)
+                break;
+            if (shown != null)
+                _albumStack.Add(shown);
+            shown = found;
         }
 
-        _openAlbum = null;
-        ShowAlbumList();
+        if (shown == null)
+            ShowAlbumList();
+        else
+            ShowTracks(shown);
     }
 
     private void ShowAlbumList()
     {
+        _albumStack.Clear();
         _openAlbum = null;
         BackButton.Visibility = Visibility.Collapsed;
         ListTitle.Text = "专辑";
-        Playlist.ItemsSource = _albums;
+        var shown = ShownAlbums();
+        BindPlaylist(shown);
         if (_current != null)
         {
             var album = AlbumOf(_current);
-            if (album != null)
+            if (album != null && shown.Contains(album))
             {
                 Playlist.SelectedItem = album;
                 Playlist.ScrollIntoView(album);
@@ -465,37 +479,167 @@ public partial class MainWindow : Window
         _openAlbum = album;
         BackButton.Visibility = Visibility.Visible;
         ListTitle.Text = album.Title;
-        AlbumShelf.Number(album.Tracks);
-        Playlist.ItemsSource = album.Tracks;
-        var current = album.Tracks.FirstOrDefault(track => track.IsCurrent);
-        if (current != null)
+        var rows = ShownRows(album);
+        var numbered = new List<TrackItem>();
+        foreach (var row in rows)
         {
-            Playlist.SelectedItem = current;
-            Playlist.ScrollIntoView(current);
+            if (row is TrackItem track)
+                numbered.Add(track);
         }
 
+        AlbumShelf.Number(numbered);
+        BindPlaylist(rows);
+        SelectPlaying(album);
         UpdateEmpty();
+    }
+
+    private static List<object> Rows(AlbumItem album) =>
+        album.Entries.Count > 0 ? album.Entries.ToList() : album.Tracks.Cast<object>().ToList();
+
+    private static AlbumItem? ChildAlbum(AlbumItem album, string key)
+    {
+        foreach (var row in Rows(album))
+        {
+            if (row is AlbumItem child && child.Key == key)
+                return child;
+        }
+
+        return null;
+    }
+
+    private void SelectPlaying(AlbumItem album)
+    {
+        if (_current == null)
+            return;
+        foreach (var row in Playlist.Items)
+        {
+            if (ReferenceEquals(row, _current))
+            {
+                Playlist.SelectedItem = _current;
+                Playlist.ScrollIntoView(_current);
+                return;
+            }
+        }
+
+        foreach (var row in Playlist.Items)
+        {
+            if (row is AlbumItem child && child.Tracks.Contains(_current))
+            {
+                Playlist.SelectedItem = child;
+                Playlist.ScrollIntoView(child);
+                return;
+            }
+        }
     }
 
     private void OpenAlbum(AlbumItem album)
     {
         _openedAlbumAt = DateTime.UtcNow;
+        if (_openAlbum != null)
+            _albumStack.Add(_openAlbum);
         ShowTracks(album);
     }
 
-    private void Back_Click(object sender, RoutedEventArgs e) => ShowAlbumList();
+    private void Back_Click(object sender, RoutedEventArgs e)
+    {
+        if (_albumStack.Count == 0)
+        {
+            ShowAlbumList();
+            return;
+        }
+
+        var parent = _albumStack[^1];
+        _albumStack.RemoveAt(_albumStack.Count - 1);
+        ShowTracks(parent);
+    }
 
     private AlbumItem? AlbumOf(TrackItem track) =>
         _albums.FirstOrDefault(album => album.Tracks.Contains(track));
 
+    private AlbumItem? ContainerOf(TrackItem track)
+    {
+        if (_openAlbum != null && Holds( _openAlbum, track))
+            return _openAlbum;
+        for (var i = _albumStack.Count - 1; i >= 0; i--)
+        {
+            if (Holds(_albumStack[i], track))
+                return _albumStack[i];
+        }
+
+        return null;
+    }
+
+    private static bool Holds(AlbumItem album, TrackItem track)
+    {
+        foreach (var row in Rows(album))
+        {
+            if (ReferenceEquals(row, track))
+                return true;
+            if (row is AlbumItem child && child.Tracks.Contains(track))
+                return true;
+        }
+
+        return false;
+    }
+
     private void UpdateEmpty()
     {
-        var visible = _openAlbum != null ? _openAlbum.Tracks.Count > 0 : _albums.Count > 0;
+        var shown = Playlist.Items.Count > 0;
         if (_tracks.Count == 0)
             EmptyHint.Text = "把音频拖到窗口里";
-        else if (!visible)
+        else if (LibrarySearch.Active(_libraryQuery) && !shown)
+            EmptyHint.Text = "没有匹配";
+        else if (!shown)
             EmptyHint.Text = "重复的已藏起";
-        EmptyHint.Visibility = visible ? Visibility.Collapsed : Visibility.Visible;
+        EmptyHint.Visibility = shown ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private void LibraryQuery_Changed(object sender, TextChangedEventArgs e)
+    {
+        _libraryQuery = LibraryQuery.Text;
+        UpdateLibraryHint();
+        if (!_listReady)
+            return;
+        if (_openAlbum == null)
+            ShowAlbumList();
+        else
+            ShowTracks(_openAlbum);
+    }
+
+    private void LibraryQuery_Focus(object sender, RoutedEventArgs e) => UpdateLibraryHint();
+
+    private void UpdateLibraryHint()
+    {
+        LibraryQueryHint.Visibility = LibraryQuery.Text.Length == 0 && !LibraryQuery.IsKeyboardFocused
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
+    private List<AlbumItem> ShownAlbums() =>
+        LibrarySearch.Active(_libraryQuery) ? _albums.Where(album => LibrarySearch.MatchesAlbum(_libraryQuery, album)).ToList() : _albums;
+
+    private List<object> ShownRows(AlbumItem album)
+    {
+        var rows = Rows(album);
+        if (!LibrarySearch.Active(_libraryQuery) || LibrarySearch.Matches(_libraryQuery, album.Title, album.Detail))
+            return rows;
+        var kept = new List<object>();
+        foreach (var row in rows)
+        {
+            if (row is TrackItem track && LibrarySearch.MatchesTrack(_libraryQuery, track))
+                kept.Add(track);
+            else if (row is AlbumItem child && LibrarySearch.MatchesAlbum(_libraryQuery, child))
+                kept.Add(child);
+        }
+
+        return kept;
+    }
+
+    private void BindPlaylist(System.Collections.IEnumerable rows)
+    {
+        _refreshingList = true;
+        Playlist.ItemsSource = rows;
+        _refreshingList = false;
     }
 
     private void ShowDuplicates_Changed(object sender, RoutedEventArgs e)
@@ -784,23 +928,41 @@ public partial class MainWindow : Window
     private static void RemoveEmptyWorkFolder(string directory)
     {
         var root = Path.TrimEndingDirectorySeparator(TrackLoader.LibraryRoot());
-        var parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(directory));
-        if (parent == null || !parent.Equals(root, StringComparison.OrdinalIgnoreCase) || !Directory.Exists(directory))
-            return;
-        if (Directory.EnumerateFiles(directory).Any(TrackLoader.IsAudioFile))
-            return;
-        TryDeleteFile(Path.Combine(directory, "cover.jpg"));
-        TryDeleteFile(Path.Combine(directory, "work.json"));
-        try
+        var current = Path.TrimEndingDirectorySeparator(directory);
+        while (current.Length > root.Length && current.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
         {
-            if (!Directory.EnumerateFileSystemEntries(directory).Any())
-                Directory.Delete(directory);
-        }
-        catch (IOException)
-        {
-        }
-        catch (UnauthorizedAccessException)
-        {
+            if (!Directory.Exists(current))
+            {
+                var missingParent = Path.GetDirectoryName(current);
+                if (string.IsNullOrEmpty(missingParent))
+                    return;
+                current = Path.TrimEndingDirectorySeparator(missingParent);
+                continue;
+            }
+
+            if (Directory.EnumerateFiles(current, "*", SearchOption.AllDirectories).Any(TrackLoader.IsAudioFile))
+                return;
+            TryDeleteFile(Path.Combine(current, "cover.jpg"));
+            TryDeleteFile(Path.Combine(current, "work.json"));
+            TryDeleteFile(Path.Combine(current, "videos.json"));
+            try
+            {
+                if (!Directory.EnumerateFileSystemEntries(current).Any())
+                    Directory.Delete(current);
+            }
+            catch (IOException)
+            {
+                return;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return;
+            }
+
+            var parent = Path.GetDirectoryName(current);
+            if (string.IsNullOrEmpty(parent))
+                return;
+            current = Path.TrimEndingDirectorySeparator(parent);
         }
     }
 
@@ -840,11 +1002,51 @@ public partial class MainWindow : Window
         if (split <= 2)
             return null;
         var folder = rest[..split];
+        if (folder.StartsWith("YTPL", StringComparison.Ordinal))
+            return VideoLink(library, folder, rest[(split + 1)..]) ?? ("https://www.youtube.com/playlist?list=" + Uri.EscapeDataString(folder[4..]));
         if (folder.StartsWith("YT", StringComparison.Ordinal))
             return "https://www.youtube.com/watch?v=" + Uri.EscapeDataString(folder[2..]);
         if (folder.StartsWith("BV", StringComparison.OrdinalIgnoreCase))
             return "https://www.bilibili.com/video/" + folder;
-        return null;
+        return VideoLink(library, folder, rest[(split + 1)..]);
+    }
+
+    private static string? VideoLink(string library, string folder, string relative)
+    {
+        var path = Path.Combine(library, folder, "videos.json");
+        if (!File.Exists(path))
+            return BvidLink(relative);
+        try
+        {
+            var map = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(path));
+            if (map != null)
+            {
+                var cut = relative.IndexOf(Path.DirectorySeparatorChar);
+                var key = cut >= 0 ? relative[..cut] : Path.GetFileName(relative);
+                if (map.TryGetValue(key, out var bvid))
+                {
+                    if (bvid.StartsWith("YT", StringComparison.Ordinal) && bvid.Length > 2)
+                        return "https://www.youtube.com/watch?v=" + Uri.EscapeDataString(bvid[2..]);
+                    var match = Regex.Match(bvid, @"BV[0-9A-Za-z]{10}");
+                    if (match.Success)
+                        return "https://www.bilibili.com/video/" + match.Value;
+                }
+            }
+        }
+        catch (IOException)
+        {
+        }
+        catch (JsonException)
+        {
+        }
+
+        return BvidLink(relative);
+    }
+
+    private static string? BvidLink(string text)
+    {
+        var match = Regex.Match(text, @"BV[0-9A-Za-z]{10}");
+        return match.Success ? "https://www.bilibili.com/video/" + match.Value : null;
     }
 
     private static void Reveal(string path)
@@ -866,7 +1068,7 @@ public partial class MainWindow : Window
 
     private void Playlist_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_current != null || Playlist.SelectedItem is not TrackItem track)
+        if (_refreshingList || _current != null || Playlist.SelectedItem is not TrackItem track)
             return;
         ShowTrack(track);
         OutputText.Text = track.FileFormatText;
@@ -1073,7 +1275,10 @@ public partial class MainWindow : Window
     {
         var pending = start ?? (ReferenceEquals(_shownTrack, track) ? _pendingSeek : null);
         SetCurrent(track);
-        var result = _player.Play(track.FilePath, track.Title, track.Artist, track.Duration, pending ?? TimeSpan.Zero);
+        DlnaSidecar? sidecar = null;
+        if (_player.PlaysOnNetwork)
+            sidecar = DlnaSidecar.FromTrack(track);
+        var result = _player.Play(track.FilePath, track.Title, track.Artist, track.Duration, pending ?? TimeSpan.Zero, sidecar);
         if (!result.Ok)
         {
             OutputText.Text = StatusLine(result.Message);
@@ -1100,15 +1305,34 @@ public partial class MainWindow : Window
         _current = track;
         _current.IsCurrent = true;
         var album = AlbumOf(track);
-        if (_openAlbum != null && album != null && album.Key == _openAlbum.Key)
+        var container = ContainerOf(track);
+        if (_openAlbum == null)
         {
-            Playlist.SelectedItem = track;
-            Playlist.ScrollIntoView(track);
+            if (album != null)
+            {
+                Playlist.SelectedItem = album;
+                Playlist.ScrollIntoView(album);
+            }
         }
-        else if (_openAlbum == null && album != null)
+        else if (container == null)
         {
-            Playlist.SelectedItem = album;
-            Playlist.ScrollIntoView(album);
+            ShowAlbumList();
+            if (album != null)
+            {
+                Playlist.SelectedItem = album;
+                Playlist.ScrollIntoView(album);
+            }
+        }
+        else if (!ReferenceEquals(container, _openAlbum))
+        {
+            var index = _albumStack.FindIndex(item => item.Key == container.Key);
+            if (index >= 0)
+                _albumStack.RemoveRange(index, _albumStack.Count - index);
+            ShowTracks(container);
+        }
+        else
+        {
+            SelectPlaying(container);
         }
 
         ShowTrack(track);
@@ -1210,7 +1434,7 @@ public partial class MainWindow : Window
     {
         _draggingSeek = true;
         SeekBar.CaptureMouse();
-        SeekTo(e.GetPosition(SeekBar).X);
+        PaintSeekAt(e.GetPosition(SeekBar).X);
         e.Handled = true;
     }
 
@@ -1218,7 +1442,7 @@ public partial class MainWindow : Window
     {
         if (!_draggingSeek || e.LeftButton != MouseButtonState.Pressed)
             return;
-        SeekTo(e.GetPosition(SeekBar).X);
+        PaintSeekAt(e.GetPosition(SeekBar).X);
     }
 
     private void SeekBar_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
@@ -1228,33 +1452,48 @@ public partial class MainWindow : Window
         _draggingSeek = false;
         if (SeekBar.IsMouseCaptured)
             SeekBar.ReleaseMouseCapture();
-        SeekTo(e.GetPosition(SeekBar).X);
+        CommitSeek(e.GetPosition(SeekBar).X);
     }
 
     private void SeekBar_SizeChanged(object sender, SizeChangedEventArgs e) =>
         PaintSeek(_paintedPosition, _paintedDuration);
 
-    private void SeekTo(double x)
+    private void PaintSeekAt(double x)
     {
-        var duration = _player.Duration;
-        if (duration <= TimeSpan.Zero)
-            duration = _shownTrack?.Duration ?? _paintedDuration;
-        if (duration <= TimeSpan.Zero || SeekBar.ActualWidth <= 0)
+        if (LocateSeek(x) is not { } located)
             return;
+        PaintSeek(located.Position, located.Duration);
+    }
 
-        var ratio = Math.Clamp(x / SeekBar.ActualWidth, 0, 1);
-        var position = TimeSpan.FromMilliseconds(duration.TotalMilliseconds * ratio);
-        PaintSeek(position, duration);
+    private void CommitSeek(double x)
+    {
+        if (LocateSeek(x) is not { } located)
+            return;
+        var position = located.Position;
+        PaintSeek(position, located.Duration);
         if (_player.IsPlaying || _player.IsPaused)
         {
             _pendingSeek = null;
-            _player.Position = position;
+            var result = _player.Seek(position);
+            if (!result.Ok)
+                OutputText.Text = StatusLine(result.Message);
             ShowCue(position);
             return;
         }
 
         _pendingSeek = position;
         ShowCue(position);
+    }
+
+    private (TimeSpan Position, TimeSpan Duration)? LocateSeek(double x)
+    {
+        var duration = _player.Duration;
+        if (duration <= TimeSpan.Zero)
+            duration = _shownTrack?.Duration ?? _paintedDuration;
+        if (duration <= TimeSpan.Zero || SeekBar.ActualWidth <= 0)
+            return null;
+        var ratio = Math.Clamp(x / SeekBar.ActualWidth, 0, 1);
+        return (TimeSpan.FromMilliseconds(duration.TotalMilliseconds * ratio), duration);
     }
 
     private void PaintSeek(TimeSpan position, TimeSpan duration)

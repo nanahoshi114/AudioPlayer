@@ -116,9 +116,119 @@ public static partial class YouTubeClient
     public static Task<CrawlBatch> PlaylistPageAsync(ServiceSettings settings, string playlistId, string? continuation, CancellationToken cancellationToken) =>
         BrowsePageAsync(settings, playlistId, continuation, cancellationToken);
 
+    public static async Task<CrawlBatch?> DetailAsync(ServiceSettings settings, CrawlHit hit, CancellationToken cancellationToken)
+    {
+        if (hit.PlaylistId.Length == 0)
+            return null;
+        var batch = await PlaylistPageAsync(settings, hit.PlaylistId, null, cancellationToken);
+        var title = hit.AlbumTitle.Length > 0 ? hit.AlbumTitle : hit.Title;
+        var order = 1;
+        foreach (var video in batch.Hits)
+        {
+            video.ShelfId = "YTPL" + hit.PlaylistId;
+            video.ShelfTitle = title;
+            video.ShelfCircle = hit.WorkCircle;
+            video.ShelfOrder = order++;
+        }
+
+        return batch;
+    }
+
     public static async Task<IReadOnlyList<string>> DownloadAsync(
         ServiceSettings settings,
         CrawlHit hit,
+        IProgress<CrawlProgress> progress,
+        CancellationToken cancellationToken)
+    {
+        if (hit.PlaylistId.Length > 0)
+            return await DownloadPlaylistAsync(settings, hit, progress, cancellationToken);
+        if (hit.ShelfId.Length > 0)
+            return await DownloadShelvedAsync(settings, hit, progress, cancellationToken);
+        return [await DownloadVideoAsync(settings, hit, null, null, true, progress, cancellationToken)];
+    }
+
+    private static async Task<IReadOnlyList<string>> DownloadPlaylistAsync(
+        ServiceSettings settings,
+        CrawlHit hit,
+        IProgress<CrawlProgress> progress,
+        CancellationToken cancellationToken)
+    {
+        var videos = new List<CrawlHit>();
+        string? cursor = null;
+        do
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var page = await PlaylistPageAsync(settings, hit.PlaylistId, cursor, cancellationToken);
+            videos.AddRange(page.Hits);
+            cursor = page.More;
+        }
+        while (cursor != null && videos.Count < 500);
+
+        if (videos.Count == 0)
+            throw new InvalidOperationException("这个播放列表里没有视频");
+        var root = Path.Combine(TrackLoader.LibraryRoot(), Safe("YTPL" + hit.PlaylistId));
+        Directory.CreateDirectory(root);
+        var owner = hit.WorkCircle.Length > 0 ? hit.WorkCircle : hit.Circle;
+        WriteWork(root, hit.AlbumTitle.Length == 0 ? hit.Title : hit.AlbumTitle, owner);
+        await TryCoverAsync(hit.CoverUrl, root, cancellationToken);
+        var saved = new List<string>();
+        string? lastError = null;
+        for (var i = 0; i < videos.Count; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var video = videos[i];
+            var order = i + 1;
+            try
+            {
+                var prefix = $"{order}/{videos.Count}  ";
+                var scoped = new Progress<CrawlProgress>(step => progress.Report(new CrawlProgress(prefix + step.Text, (order - 1 + step.Ratio) / videos.Count)));
+                var stem = $"{order:000} {Safe(video.Title)}";
+                var path = await DownloadVideoAsync(settings, video, root, stem, false, scoped, cancellationToken);
+                saved.Add(path);
+                RememberLink(root, Path.GetFileName(path), video.SourceId.StartsWith("YT", StringComparison.Ordinal) ? video.SourceId : "YT" + video.SourceId);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                lastError = string.IsNullOrWhiteSpace(ex.Message) ? "有一个视频下不来" : ex.Message;
+            }
+        }
+
+        if (saved.Count == 0)
+            throw new InvalidOperationException(lastError ?? "这个播放列表下不来");
+        return saved;
+    }
+
+    private static async Task<IReadOnlyList<string>> DownloadShelvedAsync(
+        ServiceSettings settings,
+        CrawlHit hit,
+        IProgress<CrawlProgress> progress,
+        CancellationToken cancellationToken)
+    {
+        var root = Path.Combine(TrackLoader.LibraryRoot(), Safe(hit.ShelfId));
+        Directory.CreateDirectory(root);
+        var owner = hit.ShelfCircle.Length > 0 ? hit.ShelfCircle : hit.WorkCircle;
+        WriteWork(root, hit.ShelfTitle.Length > 0 ? hit.ShelfTitle : hit.Title, owner);
+        await TryCoverAsync(hit.CoverUrl, root, cancellationToken);
+        var title = hit.AlbumTitle.Length > 0 ? hit.AlbumTitle : hit.Title;
+        var stem = hit.ShelfOrder > 0 ? $"{hit.ShelfOrder:000} {Safe(title)}" : Safe(title);
+        var videoId = hit.SourceId.StartsWith("YT", StringComparison.Ordinal) ? hit.SourceId[2..] : hit.SourceId;
+        var folderId = videoId.StartsWith("YT", StringComparison.Ordinal) ? videoId : "YT" + videoId;
+        LooseAlbum.Absorb(Safe(folderId), root, stem, false);
+        var path = await DownloadVideoAsync(settings, hit, root, stem, false, progress, cancellationToken);
+        RememberLink(root, Path.GetFileName(path), hit.SourceId.StartsWith("YT", StringComparison.Ordinal) ? hit.SourceId : "YT" + hit.SourceId);
+        return [path];
+    }
+
+    private static async Task<string> DownloadVideoAsync(
+        ServiceSettings settings,
+        CrawlHit hit,
+        string? directory,
+        string? stem,
+        bool writeWork,
         IProgress<CrawlProgress> progress,
         CancellationToken cancellationToken)
     {
@@ -129,12 +239,14 @@ public static partial class YouTubeClient
         if (string.IsNullOrWhiteSpace(resolved.MediaUrl))
             throw new InvalidOperationException(NoAudio);
         var folderId = videoId.StartsWith("YT", StringComparison.Ordinal) ? videoId : "YT" + videoId;
-        var root = Path.Combine(TrackLoader.LibraryRoot(), Safe(folderId));
+        var root = directory ?? Path.Combine(TrackLoader.LibraryRoot(), Safe(folderId));
         Directory.CreateDirectory(root);
-        WriteWork(root, resolved.AlbumTitle.Length == 0 ? resolved.Title : resolved.AlbumTitle, resolved.Circle);
+        if (writeWork)
+            WriteWork(root, resolved.AlbumTitle.Length == 0 ? resolved.Title : resolved.AlbumTitle, resolved.Circle);
         var extension = string.Equals(resolved.MediaExtension, ".webm", StringComparison.OrdinalIgnoreCase) ? ".webm" : ".m4a";
-        var path = Path.Combine(root, Safe(resolved.Title) + extension);
-        var replaced = extension == ".webm" ? Path.Combine(root, Safe(resolved.Title) + ".m4a") : "";
+        var fileStem = stem ?? Safe(resolved.Title);
+        var path = Path.Combine(root, fileStem + extension);
+        var replaced = extension == ".webm" ? Path.Combine(root, fileStem + ".m4a") : "";
         if (File.Exists(path) && new FileInfo(path).Length > 0)
         {
             if (replaced.Length > 0)
@@ -164,9 +276,10 @@ public static partial class YouTubeClient
             }
         }
 
-        await TryCoverAsync(resolved.CoverUrl, root, cancellationToken);
+        if (directory == null)
+            await TryCoverAsync(resolved.CoverUrl, root, cancellationToken);
         await TrySubtitleAsync(videoId, path, progress, resolved.Title, cancellationToken);
-        return [path];
+        return path;
     }
 
     private static async Task<CrawlHit> VideoAsync(ServiceSettings settings, string videoId, CancellationToken cancellationToken)
@@ -450,9 +563,11 @@ public static partial class YouTubeClient
             case JsonValueKind.Object:
                 if (element.TryGetProperty("videoRenderer", out var video))
                     Add(video, hits, seen);
+                if (element.TryGetProperty("playlistRenderer", out var playlist))
+                    AddPlaylist(playlist, hits, seen);
                 foreach (var property in element.EnumerateObject())
                 {
-                    if (property.NameEquals("videoRenderer"))
+                    if (property.NameEquals("videoRenderer") || property.NameEquals("playlistRenderer"))
                         continue;
                     CollectSearch(property.Value, hits, seen);
                 }
@@ -509,6 +624,81 @@ public static partial class YouTubeClient
             AlbumTitle = title.Length == 0 ? id : title,
             CoverReferer = "https://www.youtube.com/",
         });
+    }
+
+    private static void AddPlaylist(JsonElement playlist, List<CrawlHit> hits, HashSet<string> seen)
+    {
+        if (hits.Count >= 80)
+            return;
+        var id = Text(playlist, "playlistId");
+        if (id.Length < 2 || !seen.Add("list:" + id))
+            return;
+        var title = Runs(playlist, "title");
+        if (title.Length == 0)
+            title = id;
+        var author = Runs(playlist, "shortBylineText");
+        if (author.Length == 0)
+            author = Runs(playlist, "longBylineText");
+        var count = Text(playlist, "videoCount");
+        var tail = count.Length == 0 ? "播放列表" : "播放列表 · " + count + " 个视频";
+        var circle = author.Length == 0 ? tail : author + " · " + tail;
+        var thumb = PlaylistThumb(playlist);
+        hits.Add(new CrawlHit(0, "YTPL" + id, title, circle, thumb)
+        {
+            Origin = "youtube",
+            AlbumTitle = title,
+            CoverReferer = "https://www.youtube.com/",
+            PlaylistId = id,
+            WorkCircle = author,
+        });
+    }
+
+    private static string? PlaylistThumb(JsonElement playlist)
+    {
+        string? best = null;
+        var bestWidth = -1;
+        if (playlist.TryGetProperty("thumbnails", out var groups) && groups.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var group in groups.EnumerateArray())
+            {
+                if (!group.TryGetProperty("thumbnails", out var thumbs) || thumbs.ValueKind != JsonValueKind.Array)
+                    continue;
+                foreach (var thumb in thumbs.EnumerateArray())
+                {
+                    var url = Text(thumb, "url");
+                    var width = (int)Long(thumb, "width");
+                    if (url.Length == 0 || width < bestWidth)
+                        continue;
+                    best = url.StartsWith("//", StringComparison.Ordinal) ? "https:" + url : url;
+                    bestWidth = width;
+                }
+            }
+        }
+
+        return best ?? ThumbnailOf(playlist);
+    }
+
+    private static void RememberLink(string root, string name, string id)
+    {
+        if (name.Length == 0 || id.Length == 0)
+            return;
+        try
+        {
+            var path = Path.Combine(root, "videos.json");
+            Dictionary<string, string> map;
+            if (File.Exists(path))
+                map = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(path)) ?? new Dictionary<string, string>();
+            else
+                map = new Dictionary<string, string>();
+            map[name] = id;
+            File.WriteAllText(path, JsonSerializer.Serialize(map));
+        }
+        catch (IOException)
+        {
+        }
+        catch (JsonException)
+        {
+        }
     }
 
     private static string? Continuation(JsonElement element)

@@ -15,6 +15,29 @@ public partial class App : Application
             return;
         }
 
+        if (Has(e.Args, "--seektest"))
+        {
+            var code = Playback.SeekTest.Run();
+            Shutdown(code);
+            return;
+        }
+
+        if (Has(e.Args, "--nesttest"))
+        {
+            var error = Library.AlbumShelf.SelfCheck();
+            Console.WriteLine(error == null ? "NEST ok" : "NEST " + error);
+            Shutdown(error == null ? 0 : 1);
+            return;
+        }
+
+        if (Has(e.Args, "--searchtest"))
+        {
+            var error = Library.LibrarySearch.SelfCheck();
+            Console.WriteLine(error == null ? "SEARCH ok" : "SEARCH " + error);
+            Shutdown(error == null ? 0 : 1);
+            return;
+        }
+
         if (Has(e.Args, "--dlnatest"))
         {
             var error = Playback.DlnaTest.Run();

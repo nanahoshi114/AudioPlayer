@@ -1,4 +1,5 @@
 using System.IO;
+using System.Linq;
 using System.Text;
 using NAudio.Wave;
 
@@ -10,15 +11,19 @@ namespace PlayerDemo.Library;
 /// </summary>
 static class FragmentedMp4
 {
+    public static Exception? LastError { get; private set; }
     public static void EnsureProgressive(string path)
     {
         try
         {
             if (IsOurRemux(path))
                 RepairSampleTimes(path);
+            RepairMovieDuration(path);
+            LastError = null;
         }
-        catch
+        catch (Exception ex)
         {
+            LastError = ex;
             // 时间表修不好就按原来的文件继续。
         }
 
@@ -122,6 +127,281 @@ static class FragmentedMp4
         }
     }
 
+    public static bool TryMediaDuration(string path, out TimeSpan duration)
+    {
+        duration = TimeSpan.Zero;
+        try
+        {
+            using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            double longest = 0;
+            foreach (var moov in Boxes(stream, 0, stream.Length, "moov"))
+            {
+                foreach (var trak in Boxes(stream, moov.Payload, moov.End, "trak"))
+                {
+                    if (!IsSound(stream, trak) || !TryTrackSeconds(stream, trak, out var seconds))
+                        continue;
+                    if (seconds > longest)
+                        longest = seconds;
+                }
+            }
+
+            if (longest <= 0)
+                return false;
+            duration = TimeSpan.FromSeconds(longest);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool TryTrackSeconds(Stream stream, BoxAt trak, out double seconds)
+    {
+        seconds = 0;
+        BoxAt mediaBox = default;
+        BoxAt timesBox = default;
+        foreach (var mdia in Boxes(stream, trak.Payload, trak.End, "mdia"))
+        {
+            mediaBox = Boxes(stream, mdia.Payload, mdia.End, "mdhd").FirstOrDefault();
+            foreach (var minf in Boxes(stream, mdia.Payload, mdia.End, "minf"))
+            foreach (var stbl in Boxes(stream, minf.Payload, minf.End, "stbl"))
+                timesBox = Boxes(stream, stbl.Payload, stbl.End, "stts").FirstOrDefault();
+        }
+
+        if (mediaBox.End == 0 || timesBox.End == 0)
+            return false;
+        if (!TryReadClock(stream, mediaBox, out var mediaScale, out var mediaDuration, out _, out _))
+            return false;
+        if (!TrySumSamples(stream, timesBox, out var ticks) || !Close(ticks, mediaDuration, mediaScale))
+            return false;
+        seconds = ticks / (double)mediaScale;
+        return seconds > 0;
+    }
+
+    /// <summary>
+    /// 重写时把采样总数原样写进了 mvhd。mvhd 的 timescale 通常是 1000，
+    /// 30 分钟就会被读成 24 小时，进度条轻轻一拖就落到真实音频的后面。
+    /// 采样表和 mdhd 对得上时，把 mvhd、tkhd 改回电影时间轴。
+    /// </summary>
+    private static void RepairMovieDuration(string path)
+    {
+        using var stream = File.Open(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
+        foreach (var moov in Boxes(stream, 0, stream.Length, "moov"))
+        {
+            var movieBox = Boxes(stream, moov.Payload, moov.End, "mvhd").FirstOrDefault();
+            if (movieBox.End == 0 || !TryReadClock(stream, movieBox, out var movieScale, out var movieDuration, out var movieWide, out var movieAt))
+                continue;
+
+            ulong longest = 0;
+            var sound = 0;
+            foreach (var trak in Boxes(stream, moov.Payload, moov.End, "trak"))
+            {
+                if (!IsSound(stream, trak))
+                    continue;
+                sound++;
+                BoxAt mediaBox = default;
+                BoxAt trackBox = default;
+                BoxAt timesBox = default;
+                foreach (var mdia in Boxes(stream, trak.Payload, trak.End, "mdia"))
+                {
+                    mediaBox = Boxes(stream, mdia.Payload, mdia.End, "mdhd").FirstOrDefault();
+                    foreach (var minf in Boxes(stream, mdia.Payload, mdia.End, "minf"))
+                    foreach (var stbl in Boxes(stream, minf.Payload, minf.End, "stbl"))
+                        timesBox = Boxes(stream, stbl.Payload, stbl.End, "stts").FirstOrDefault();
+                }
+
+                trackBox = Boxes(stream, trak.Payload, trak.End, "tkhd").FirstOrDefault();
+                if (mediaBox.End == 0 || timesBox.End == 0 || trackBox.End == 0)
+                    continue;
+                if (!TryReadClock(stream, mediaBox, out var mediaScale, out var mediaDuration, out _, out _))
+                    continue;
+                if (!TrySumSamples(stream, timesBox, out var ticks) || !Close(ticks, mediaDuration, mediaScale))
+                    continue;
+                if (ticks > ulong.MaxValue / movieScale)
+                    continue;
+
+                var expected = (ticks * movieScale + mediaScale / 2) / mediaScale;
+                if (expected == 0)
+                    continue;
+                if (expected > longest)
+                    longest = expected;
+                if (TryReadTrackDuration(stream, trackBox, out var trackDuration, out var trackWide, out var trackAt)
+                    && NeedsRewrite(trackDuration, expected, movieScale))
+                    WriteDuration(stream, trackAt, expected, trackWide);
+                foreach (var edts in Boxes(stream, trak.Payload, trak.End, "edts"))
+                foreach (var elst in Boxes(stream, edts.Payload, edts.End, "elst"))
+                    AlignEdit(stream, elst, movieDuration, expected);
+            }
+
+            if (sound == 0)
+                continue;
+            if (longest > 0 && NeedsRewrite(movieDuration, longest, movieScale))
+                WriteDuration(stream, movieAt, longest, movieWide);
+        }
+    }
+
+    private static bool IsSound(Stream stream, BoxAt trak)
+    {
+        foreach (var mdia in Boxes(stream, trak.Payload, trak.End, "mdia"))
+        foreach (var hdlr in Boxes(stream, mdia.Payload, mdia.End, "hdlr"))
+        {
+            if (hdlr.Payload + 12 > hdlr.End)
+                return false;
+            stream.Position = hdlr.Payload + 8;
+            var buffer = new byte[4];
+            return stream.Read(buffer, 0, 4) == 4 && Encoding.ASCII.GetString(buffer) == "soun";
+        }
+
+        return false;
+    }
+
+    private static bool TryReadClock(Stream stream, BoxAt box, out uint scale, out ulong duration, out bool wide, out long durationAt)
+    {
+        scale = 0;
+        duration = 0;
+        wide = false;
+        durationAt = 0;
+        stream.Position = box.Payload;
+        var version = stream.ReadByte();
+        if (version < 0)
+            return false;
+        var scaleAt = box.Payload + (version == 0 ? 12 : 20);
+        var durationBytes = version == 0 ? 4 : 8;
+        if (scaleAt + 4 + durationBytes > box.End)
+            return false;
+        stream.Position = scaleAt;
+        scale = ReadBe32(stream);
+        durationAt = stream.Position;
+        wide = version != 0;
+        duration = wide ? ReadBe64(stream) : ReadBe32(stream);
+        return scale != 0;
+    }
+
+    private static bool TryReadTrackDuration(Stream stream, BoxAt box, out ulong duration, out bool wide, out long durationAt)
+    {
+        duration = 0;
+        wide = false;
+        durationAt = 0;
+        stream.Position = box.Payload;
+        var version = stream.ReadByte();
+        if (version < 0)
+            return false;
+        durationAt = box.Payload + (version == 0 ? 20 : 28);
+        wide = version != 0;
+        var bytes = wide ? 8 : 4;
+        if (durationAt + bytes > box.End)
+            return false;
+        stream.Position = durationAt;
+        duration = wide ? ReadBe64(stream) : ReadBe32(stream);
+        return true;
+    }
+
+    private static bool TrySumSamples(Stream stream, BoxAt stts, out ulong ticks)
+    {
+        ticks = 0;
+        if (stts.Payload + 8 > stts.End)
+            return false;
+        stream.Position = stts.Payload + 4;
+        var entries = ReadBe32(stream);
+        if (entries == 0 || entries > 1_000_000 || stts.Payload + 8 + entries * 8L > stts.End)
+            return false;
+        for (var i = 0u; i < entries; i++)
+        {
+            var count = ReadBe32(stream);
+            var delta = ReadBe32(stream);
+            ticks += (ulong)count * delta;
+        }
+
+        return ticks != 0;
+    }
+
+    private static bool Close(ulong left, ulong right, uint scale)
+    {
+        var delta = left > right ? left - right : right - left;
+        if (delta <= scale)
+            return true;
+        var larger = left > right ? left : right;
+        return larger != 0 && delta <= larger / 100;
+    }
+
+    private static bool NeedsRewrite(ulong actual, ulong expected, uint scale)
+    {
+        if (expected == 0 || scale == 0)
+            return false;
+        if (actual == 0)
+            return true;
+        if (actual <= expected + scale)
+            return false;
+        return expected <= ulong.MaxValue / 3 && actual > expected * 3 / 2;
+    }
+
+    private static void WriteDuration(Stream stream, long at, ulong duration, bool wide)
+    {
+        if (!wide && duration > uint.MaxValue)
+            return;
+        stream.Position = at;
+        if (wide)
+            WriteU64(stream, duration);
+        else
+            WriteU32(stream, (uint)duration);
+    }
+
+    private static void AlignEdit(Stream stream, BoxAt elst, ulong oldDuration, ulong expected)
+    {
+        if (oldDuration == 0 || oldDuration == expected || elst.Payload + 8 > elst.End)
+            return;
+        stream.Position = elst.Payload;
+        var version = stream.ReadByte();
+        if (version < 0)
+            return;
+        stream.Position = elst.Payload + 4;
+        var count = ReadBe32(stream);
+        if (count == 0 || count > 64)
+            return;
+        for (var i = 0u; i < count; i++)
+        {
+            var at = stream.Position;
+            if (version == 0)
+            {
+                if (at + 12 > elst.End)
+                    return;
+                var segment = ReadBe32(stream);
+                stream.Position = at + 12;
+                if (segment == oldDuration && expected <= uint.MaxValue)
+                {
+                    stream.Position = at;
+                    WriteU32(stream, (uint)expected);
+                    stream.Position = at + 12;
+                }
+            }
+            else
+            {
+                if (at + 20 > elst.End)
+                    return;
+                var segment = ReadBe64(stream);
+                stream.Position = at + 20;
+                if (segment == oldDuration)
+                {
+                    stream.Position = at;
+                    WriteU64(stream, expected);
+                    stream.Position = at + 20;
+                }
+            }
+        }
+    }
+
+    private static uint Timescale(byte[] box)
+    {
+        if (box.Length < 24)
+            return 0;
+        var version = box[8];
+        var offset = version == 0 ? 20 : 28;
+        if (box.Length < offset + 4)
+            return 0;
+        return Be32(box, offset);
+    }
+
     private readonly record struct BoxAt(long Start, long End, int Header, string Type)
     {
         public long Payload => Start + Header;
@@ -168,6 +448,29 @@ static class FragmentedMp4
         if (stream.Read(bytes, 0, 4) < 4)
             throw new EndOfStreamException();
         return ((uint)bytes[0] << 24) | ((uint)bytes[1] << 16) | ((uint)bytes[2] << 8) | bytes[3];
+    }
+
+    private static ulong ReadBe64(Stream stream)
+    {
+        var bytes = new byte[8];
+        if (stream.Read(bytes, 0, 8) < 8)
+            throw new EndOfStreamException();
+        ulong value = 0;
+        foreach (var part in bytes)
+            value = (value << 8) | part;
+        return value;
+    }
+
+    private static void WriteU64(Stream stream, ulong value)
+    {
+        Span<byte> bytes = stackalloc byte[8];
+        for (var i = 7; i >= 0; i--)
+        {
+            bytes[i] = (byte)value;
+            value >>= 8;
+        }
+
+        stream.Write(bytes);
     }
 
     private static bool IsFragmented(string path)
@@ -348,9 +651,14 @@ static class FragmentedMp4
 
     private static byte[] Movie(Audio trak, List<Sample> samples, ulong duration, long dataStart)
     {
-        PatchDuration(trak.Mvhd, duration, false);
+        var mediaScale = Timescale(trak.Mdhd);
+        var movieScale = Timescale(trak.Mvhd);
+        var movieDuration = mediaScale == 0 || movieScale == 0
+            ? duration
+            : (duration * movieScale + mediaScale / 2) / mediaScale;
+        PatchDuration(trak.Mvhd, movieDuration, false);
         PatchDuration(trak.Mdhd, duration, false);
-        PatchDuration(trak.Tkhd, duration, true);
+        PatchDuration(trak.Tkhd, movieDuration, true);
         var table = SampleTable(trak.Stsd, samples, dataStart);
         var minf = Box("minf", Concat(trak.Smhd, trak.Dinf, table));
         var mdia = Box("mdia", Concat(trak.Mdhd, trak.Hdlr, minf));

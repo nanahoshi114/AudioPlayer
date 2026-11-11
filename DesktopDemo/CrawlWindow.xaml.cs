@@ -27,6 +27,17 @@ public partial class CrawlPage : UserControl
     private string? _more;
     private int _generation;
     private bool _loadingMore;
+    private bool _resumeTried;
+    private readonly List<HitFrame> _stack = [];
+
+    private sealed class HitFrame
+    {
+        public required List<CrawlHit> Hits { get; init; }
+        public required string Title { get; init; }
+        public FeedKind Feed { get; init; }
+        public string FeedKey { get; init; } = "";
+        public string? More { get; init; }
+    }
 
     public event Action<IReadOnlyList<string>>? Finished;
 
@@ -79,6 +90,17 @@ public partial class CrawlPage : UserControl
 
     public void Bind(ServiceSettings settings) => _settings = settings;
 
+    public void ResumeInterrupted()
+    {
+        if (_resumeTried || _job != null)
+            return;
+        _resumeTried = true;
+        var pending = DownloadQueue.Load();
+        if (pending == null)
+            return;
+        _ = RunDownloadsAsync(pending.Value.Hits, pending.Value.Extensions, resumed: true);
+    }
+
     private ServiceSettings Settings => _settings ?? ServiceSettings.Load();
 
     private void Source_Click(object sender, RoutedEventArgs e)
@@ -95,17 +117,13 @@ public partial class CrawlPage : UserControl
         foreach (ToggleButton other in Sources.Children)
             other.IsChecked = ReferenceEquals(other, chip);
         StopPaging();
+        ClearDetail();
         _hits.Clear();
         Formats.Visibility = source == "asmr" ? Visibility.Visible : Visibility.Collapsed;
         BiliFavButton.Visibility = source == "bili" ? Visibility.Visible : Visibility.Collapsed;
         YouTubeLikedButton.Visibility = source == "youtube" ? Visibility.Visible : Visibility.Collapsed;
         YouTubeLaterButton.Visibility = source == "youtube" ? Visibility.Visible : Visibility.Collapsed;
-        Status.Text = source switch
-        {
-            "bili" => "输入关键词、BV 号或视频链接，或点「我的收藏」",
-            "youtube" => "输入关键词、视频或播放列表链接。喜欢的视频和稍后观看需要 Cookie",
-            _ => "左键点选作品，可以多选，然后点右下角下载",
-        };
+        Status.Text = source == "youtube" ? "喜欢的视频和稍后观看需要 Cookie" : "";
         RefreshStart();
     }
 
@@ -119,12 +137,120 @@ public partial class CrawlPage : UserControl
         await SearchAsync();
     }
 
+    private DateTime _lastHitDownAt;
+    private CrawlHit? _lastHitDown;
+    private bool _skipHitClick;
+
+    private void Hit_Down(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (_job != null || _loadingMore || sender is not FrameworkElement { DataContext: CrawlHit hit })
+            return;
+        var now = DateTime.UtcNow;
+        var again = ReferenceEquals(hit, _lastHitDown) && (now - _lastHitDownAt).TotalMilliseconds <= 500;
+        _lastHitDownAt = now;
+        _lastHitDown = hit;
+        if (e.ClickCount < 2 && !again)
+            return;
+        e.Handled = true;
+        _skipHitClick = true;
+        _ = OpenHitAsync(hit);
+    }
+
     private void Hit_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
-        if (_job != null || sender is not FrameworkElement { DataContext: CrawlHit hit })
+        if (_skipHitClick)
+        {
+            _skipHitClick = false;
+            return;
+        }
+
+        if (_job != null || _loadingMore || sender is not FrameworkElement { DataContext: CrawlHit hit })
             return;
         hit.IsPicked = !hit.IsPicked;
         RefreshStart();
+    }
+
+    private async Task OpenHitAsync(CrawlHit hit)
+    {
+        if (_job != null || _loadingMore)
+            return;
+        if (hit.Origin is not ("bili" or "youtube"))
+            return;
+        if (hit.RemoteCid > 0 || (hit.Origin == "youtube" && hit.PlaylistId.Length == 0))
+            return;
+
+        var generation = ++_generation;
+        _loadingMore = true;
+        var previous = Status.Text;
+        Status.Text = "正在读取…";
+        try
+        {
+            var batch = hit.Origin == "bili"
+                ? await BilibiliClient.DetailAsync(Settings, hit, CancellationToken.None)
+                : await YouTubeClient.DetailAsync(Settings, hit, CancellationToken.None);
+            if (generation != _generation)
+                return;
+            if (batch == null || batch.Value.Hits.Count == 0)
+            {
+                Status.Text = previous;
+                return;
+            }
+
+            _stack.Add(new HitFrame
+            {
+                Hits = _hits.ToList(),
+                Title = DetailTitle.Text,
+                Feed = _feed,
+                FeedKey = _feedKey,
+                More = _more,
+            });
+            Remember(batch.Value, hit.PlaylistId.Length > 0 ? hit.PlaylistId : hit.SourceId);
+            DetailTitle.Text = hit.Title;
+            DetailBar.Visibility = Visibility.Visible;
+            var count = batch.Value.Hits.Count;
+            var note = hit.SeasonId > 0 || hit.PlaylistId.Length > 0 ? $"{count} 个视频" : $"{count} P";
+            ShowHits(batch.Value.Hits, _more == null ? note : note + "。往下滚动可以继续加载");
+            HitScroll.ScrollToVerticalOffset(0);
+        }
+        catch (Exception ex)
+        {
+            if (generation == _generation)
+                Status.Text = string.IsNullOrWhiteSpace(ex.Message) ? "读不了" : ex.Message;
+        }
+        finally
+        {
+            if (generation == _generation)
+                _loadingMore = false;
+        }
+    }
+
+    private void DetailBack_Click(object sender, RoutedEventArgs e)
+    {
+        if (_job != null || _loadingMore || _stack.Count == 0)
+            return;
+        _generation++;
+        var frame = _stack[^1];
+        _stack.RemoveAt(_stack.Count - 1);
+        _hits.Clear();
+        foreach (var hit in frame.Hits)
+            _hits.Add(hit);
+        _feed = frame.Feed;
+        _feedKey = frame.FeedKey;
+        _more = frame.More;
+        DetailTitle.Text = frame.Title;
+        DetailBar.Visibility = _stack.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
+        RefreshStart();
+        Status.Text = _stack.Count == 0
+            ? (_hits.Count == 0 ? "" : _more == null ? $"找到 {_hits.Count} 部" : $"找到 {_hits.Count} 部。往下滚动可以继续加载")
+            : frame.Title;
+        HitScroll.ScrollToVerticalOffset(0);
+    }
+
+    private void ClearDetail()
+    {
+        _stack.Clear();
+        DetailTitle.Text = "";
+        DetailBar.Visibility = Visibility.Collapsed;
     }
 
     private void SelectAll_Click(object sender, RoutedEventArgs e)
@@ -137,7 +263,7 @@ public partial class CrawlPage : UserControl
         RefreshStart();
     }
 
-    private async void Start_Click(object sender, RoutedEventArgs e)
+    private void Start_Click(object sender, RoutedEventArgs e)
     {
         if (_job != null)
             return;
@@ -155,20 +281,29 @@ public partial class CrawlPage : UserControl
             return;
         }
 
+        _ = RunDownloadsAsync(picks, extensions, resumed: false);
+    }
+
+    private async Task RunDownloadsAsync(List<CrawlHit> picks, List<string> extensions, bool resumed)
+    {
+        if (_job != null || picks.Count == 0)
+            return;
         var job = new CancellationTokenSource();
         _job = job;
         CancelButton.Visibility = Visibility.Visible;
         RefreshStart();
-        ShowDownload(new CrawlProgress("准备下载", 0));
+        ShowDownload(new CrawlProgress(resumed ? $"继续下载，还剩 {picks.Count} 部" : "准备下载", 0));
         var saved = new List<string>();
         var missed = 0;
         var failed = 0;
         string? lastError = null;
+        var finished = false;
         try
         {
             for (var i = 0; i < picks.Count; i++)
             {
                 job.Token.ThrowIfCancellationRequested();
+                DownloadQueue.Save(picks.Skip(i).ToList(), extensions);
                 var hit = picks[i];
                 var label = hit.SourceId.Length > 0 ? hit.SourceId : hit.Title;
                 var index = i;
@@ -214,6 +349,8 @@ public partial class CrawlPage : UserControl
                 }
             }
 
+            finished = true;
+            DownloadQueue.Clear();
             var summary = saved.Count == 0 && lastError != null
                 ? lastError
                 : $"已保存 {saved.Count} 首";
@@ -225,11 +362,13 @@ public partial class CrawlPage : UserControl
         }
         catch (OperationCanceledException)
         {
+            DownloadQueue.Clear();
             Status.Text = saved.Count == 0 ? "已中止" : $"已中止，已保存 {saved.Count} 首";
         }
         catch (Exception ex)
         {
-            Status.Text = string.IsNullOrWhiteSpace(ex.Message) ? "爬取失败" : ex.Message;
+            if (!finished)
+                Status.Text = string.IsNullOrWhiteSpace(ex.Message) ? "爬取失败" : ex.Message;
         }
         finally
         {
@@ -266,6 +405,7 @@ public partial class CrawlPage : UserControl
         if (_job != null || _loadingMore)
             return;
         StopPaging();
+        ClearDetail();
         Status.Text = "正在读取收藏…";
         try
         {
@@ -285,6 +425,7 @@ public partial class CrawlPage : UserControl
         var generation = ++_generation;
         _loadingMore = true;
         StopPaging();
+        ClearDetail();
         Status.Text = "正在读取列表…";
         var opened = false;
         try
@@ -319,6 +460,7 @@ public partial class CrawlPage : UserControl
         var text = Query.Text;
         _loadingMore = true;
         StopPaging();
+        ClearDetail();
         Status.Text = "正在查找…";
         var opened = false;
         try
@@ -392,8 +534,20 @@ public partial class CrawlPage : UserControl
                 return;
             }
 
+            var shelf = _hits.FirstOrDefault(item => item.ShelfId.Length > 0);
+            var order = _hits.Count;
             foreach (var hit in fresh)
+            {
+                if (shelf != null)
+                {
+                    hit.ShelfId = shelf.ShelfId;
+                    hit.ShelfTitle = shelf.ShelfTitle;
+                    hit.ShelfCircle = shelf.ShelfCircle;
+                    hit.ShelfOrder = ++order;
+                }
+
                 _hits.Add(hit);
+            }
             _more = batch.More;
             RefreshStart();
             _ = ShowCoversAsync(fresh);

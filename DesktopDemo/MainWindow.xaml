@@ -499,6 +499,7 @@
           <Grid Margin="28,10,28,4">
             <Grid.RowDefinitions>
               <RowDefinition Height="36"/>
+              <RowDefinition Height="Auto"/>
               <RowDefinition Height="*"/>
             </Grid.RowDefinitions>
             <Grid Margin="16,0,16,0">
@@ -514,7 +515,14 @@
                 <TextBlock Text="时间" Foreground="{DynamicResource MutedBrush}" FontSize="12" VerticalAlignment="Center"/>
               </StackPanel>
             </Grid>
-            <ListBox x:Name="Playlist" Grid.Row="1"
+            <Grid Grid.Row="1" Margin="16,0,16,8">
+              <TextBox x:Name="LibraryQuery" TextChanged="LibraryQuery_Changed"
+                       GotKeyboardFocus="LibraryQuery_Focus" LostKeyboardFocus="LibraryQuery_Focus"/>
+              <TextBlock x:Name="LibraryQueryHint" Text="搜索专辑或曲目" IsHitTestVisible="False"
+                         Margin="15,0,0,0" VerticalAlignment="Center"
+                         Foreground="{DynamicResource MutedBrush}" FontSize="13"/>
+            </Grid>
+            <ListBox x:Name="Playlist" Grid.Row="2"
                      Background="Transparent" BorderThickness="0"
                      ItemContainerStyle="{StaticResource PlaylistItem}"
                      ItemTemplateSelector="{StaticResource LibraryTemplates}"
@@ -525,7 +533,7 @@
                      PreviewMouseRightButtonUp="Playlist_PreviewMouseRightButtonUp"
                      MouseDoubleClick="Playlist_MouseDoubleClick"
                      SelectionChanged="Playlist_SelectionChanged"/>
-            <TextBlock x:Name="EmptyHint" Grid.Row="1" Text="把音频拖到窗口里" TextWrapping="Wrap" TextAlignment="Center"
+            <TextBlock x:Name="EmptyHint" Grid.Row="2" Text="把音频拖到窗口里" TextWrapping="Wrap" TextAlignment="Center"
                        Foreground="{DynamicResource MutedBrush}" HorizontalAlignment="Center" VerticalAlignment="Center"
                        Margin="24,0" FontSize="13"/>
           </Grid>

@@ -206,16 +206,28 @@ public sealed class OutputSession : IDisposable
         throw new InvalidOperationException(DeviceProblem ?? "DLNA 设备不在网上");
     }
 
-    public PlayResult Play(string path, string? title = null, string? artist = null, TimeSpan duration = default, TimeSpan start = default)
+    public bool PlaysOnNetwork => _kind == Kind.Network;
+
+    public PlayResult Play(string path, string? title = null, string? artist = null, TimeSpan duration = default, TimeSpan start = default, DlnaSidecar? sidecar = null)
     {
         if (_kind == Kind.Network)
-            return _network.Play(path, title, artist, duration, start);
+            return _network.Play(path, title, artist, duration, start, sidecar);
         if (_kind == Kind.Missing)
             return PlayResult.Fail(DeviceProblem ?? "DLNA 设备不在网上");
-        var result = _local.Play(path);
-        if (result.Ok && start > TimeSpan.Zero)
-            _local.Position = start;
-        return result;
+        return _local.Play(path, start);
+    }
+
+    public PlayResult Seek(TimeSpan position)
+    {
+        if (_kind == Kind.Network)
+        {
+            _network.Position = position;
+            return PlayResult.Success("");
+        }
+
+        if (_kind != Kind.Local)
+            return PlayResult.Fail(DeviceProblem ?? "DLNA 设备不在网上");
+        return _local.Seek(position);
     }
 
     public void Pause()

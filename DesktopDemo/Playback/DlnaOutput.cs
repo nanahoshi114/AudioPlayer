@@ -33,8 +33,12 @@ public sealed class DlnaOutput : IDisposable
     private int _errors;
     private int _seekSerial;
     private int _volumeSerial;
+    private int _stalls;
+    private long _length;
     private TimeSpan _position;
     private TimeSpan _duration;
+    private TimeSpan _trusted;
+    private TimeSpan _reported;
     private DateTime _positionAt;
     private DateTime _holdUntil;
 
@@ -114,7 +118,7 @@ public sealed class DlnaOutput : IDisposable
         TryStop(previous, 1200);
     }
 
-    public PlayResult Play(string path, string? title, string? artist, TimeSpan duration, TimeSpan start)
+    public PlayResult Play(string path, string? title, string? artist, TimeSpan duration, TimeSpan start, DlnaSidecar? sidecar = null)
     {
         DlnaRenderer? renderer;
         bool replace;
@@ -141,7 +145,7 @@ public sealed class DlnaOutput : IDisposable
             return PlayResult.Fail("DLNA 端口打不开：" + ex.Message);
         }
 
-        if (!server.TryPublish(path, kind, out var publication, out var error))
+        if (!server.TryPublish(path, kind, out var publication, out var error, sidecar?.CoverJpeg, sidecar?.Lyrics))
             return PlayResult.Fail(error);
 
         System.Net.IPAddress local;
@@ -155,50 +159,59 @@ public sealed class DlnaOutput : IDisposable
             return PlayResult.Fail("到不了这台 DLNA 设备：" + ex.Message);
         }
 
-        var url = "http://" + local + ":" + server.Port.ToString(CultureInfo.InvariantCulture) + publication.Path;
+        var root = "http://" + local + ":" + server.Port.ToString(CultureInfo.InvariantCulture);
+        var url = root + publication.Path;
+        var artUrl = publication.Cover == null ? null : root + publication.CoverRoute;
+        var lyricsUrl = publication.Lyrics == null ? null : root + publication.LyricsRoute;
         var converted = kind != DlnaServeKind.Original;
         var protocol = DlnaProtocols.ProtocolInfo(kind, mime, publication.Layout, converted);
-        var metadata = DlnaSoap.Metadata(url, title, artist, protocol, publication.Length, duration);
+        var metadata = DlnaSoap.Metadata(url, title, artist, protocol, publication.Length, duration, sidecar?.Album, artUrl, lyricsUrl);
+        var withoutLyrics = DlnaSoap.Metadata(url, title, artist, protocol, publication.Length, duration, sidecar?.Album, artUrl, null);
+        var titleOnly = DlnaSoap.Metadata(url, title, artist, protocol, publication.Length, duration);
         // 先让进度查询停下来，再 Stop。否则设备进入 STOPPED 会被当成这一首播完了。
-        var generation = Begin(duration);
+        var generation = Begin(duration, publication.Length);
         if (replace)
             TryStop(renderer, 1200);
 
         try
         {
-            try
+            var sentMeta = false;
+            DlnaException? last = null;
+            string? previousMeta = null;
+            foreach (var item in new[] { metadata, withoutLyrics, titleOnly, "" })
             {
-                Post(renderer.AvTransport, renderer.AvType, "SetAVTransportURI", 3000,
-                    ("InstanceID", "0"),
-                    ("CurrentURI", url),
-                    ("CurrentURIMetaData", metadata));
+                if (item == previousMeta)
+                    continue;
+                previousMeta = item;
+                try
+                {
+                    Post(renderer.AvTransport, renderer.AvType, "SetAVTransportURI", 3000,
+                        ("InstanceID", "0"),
+                        ("CurrentURI", url),
+                        ("CurrentURIMetaData", item));
+                    sentMeta = true;
+                    break;
+                }
+                catch (DlnaException ex)
+                {
+                    last = ex;
+                }
             }
-            catch (DlnaException) when (metadata.Length > 0)
-            {
-                Post(renderer.AvTransport, renderer.AvType, "SetAVTransportURI", 3000,
-                    ("InstanceID", "0"),
-                    ("CurrentURI", url),
-                    ("CurrentURIMetaData", ""));
-            }
+
+            if (!sentMeta)
+                throw last ?? new DlnaException("设备拒绝了曲目信息");
 
             Post(renderer.AvTransport, renderer.AvType, "Play", 3000,
                 ("InstanceID", "0"),
                 ("Speed", "1"));
             if (start > TimeSpan.Zero)
             {
-                try
+                TrySeek(renderer, start, wait: true);
+                lock (_gate)
                 {
-                    Seek(renderer, start);
-                    lock (_gate)
-                    {
-                        _position = start;
-                        _positionAt = DateTime.UtcNow;
-                        _holdUntil = DateTime.UtcNow.AddMilliseconds(1200);
-                    }
-                }
-                catch
-                {
-                    // 设备不能拖动时就从头播。
+                    _position = start;
+                    _positionAt = DateTime.UtcNow;
+                    _holdUntil = DateTime.UtcNow.AddMilliseconds(3500);
                 }
             }
 
@@ -234,7 +247,7 @@ public sealed class DlnaOutput : IDisposable
             return;
         try
         {
-            Seek(renderer, position);
+            TrySeek(renderer, position, wait: false);
             Post(renderer.AvTransport, renderer.AvType, "Pause", 2000, ("InstanceID", "0"));
         }
         catch (Exception ex)
@@ -405,7 +418,7 @@ public sealed class DlnaOutput : IDisposable
                 value = _duration;
             _position = value;
             _positionAt = DateTime.UtcNow;
-            _holdUntil = DateTime.UtcNow.AddMilliseconds(1200);
+            _holdUntil = DateTime.UtcNow.AddMilliseconds(3500);
             renderer = _renderer;
             generation = _generation;
             serial = Interlocked.Increment(ref _seekSerial);
@@ -424,7 +437,7 @@ public sealed class DlnaOutput : IDisposable
 
             try
             {
-                Seek(renderer, value);
+                TrySeek(renderer, value, wait: true);
             }
             catch
             {
@@ -433,7 +446,7 @@ public sealed class DlnaOutput : IDisposable
         });
     }
 
-    private int Begin(TimeSpan duration)
+    private int Begin(TimeSpan duration, long length)
     {
         lock (_gate)
         {
@@ -447,7 +460,11 @@ public sealed class DlnaOutput : IDisposable
             _startMisses = 0;
             _endPolls = 0;
             _errors = 0;
-            _duration = duration > TimeSpan.Zero ? duration : TimeSpan.Zero;
+            _stalls = 0;
+            _length = length;
+            _trusted = duration > TimeSpan.Zero ? duration : TimeSpan.Zero;
+            _duration = _trusted;
+            _reported = TimeSpan.MinValue;
             _position = TimeSpan.Zero;
             _positionAt = DateTime.UtcNow;
             _holdUntil = DateTime.UtcNow;
@@ -509,11 +526,64 @@ public sealed class DlnaOutput : IDisposable
 
     private DlnaFileServer Server() => _server ??= new DlnaFileServer();
 
-    private void Seek(DlnaRenderer renderer, TimeSpan value) =>
-        Post(renderer.AvTransport, renderer.AvType, "Seek", 2000,
-            ("InstanceID", "0"),
-            ("Unit", "REL_TIME"),
-            ("Target", DlnaSoap.FormatTime(value)));
+    private bool TrySeek(DlnaRenderer renderer, TimeSpan value, bool wait)
+    {
+        if (PostSeek(renderer, "REL_TIME", DlnaSoap.FormatTime(value)))
+            return true;
+        if (wait)
+        {
+            Thread.Sleep(450);
+            if (PostSeek(renderer, "REL_TIME", DlnaSoap.FormatTime(value)))
+                return true;
+        }
+
+        long length;
+        TimeSpan duration;
+        lock (_gate)
+        {
+            length = _length;
+            duration = _duration > TimeSpan.Zero ? _duration : _trusted;
+        }
+
+        var bytes = ByteTarget(value, duration, length);
+        if (bytes < 0)
+            return false;
+        var text = bytes.ToString(CultureInfo.InvariantCulture);
+        return PostSeek(renderer, "X_DLNA_REL_BYTE", text) || PostSeek(renderer, "REL_BYTE", text);
+    }
+
+    private bool PostSeek(DlnaRenderer renderer, string unit, string target)
+    {
+        try
+        {
+            Post(renderer.AvTransport, renderer.AvType, "Seek", 2000,
+                ("InstanceID", "0"),
+                ("Unit", unit),
+                ("Target", target));
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static long ByteTarget(TimeSpan position, TimeSpan duration, long length)
+    {
+        if (length <= 0 || duration <= TimeSpan.Zero)
+            return -1;
+        if (position <= TimeSpan.Zero)
+            return 0;
+        var ratio = position.TotalSeconds / duration.TotalSeconds;
+        if (ratio < 0)
+            ratio = 0;
+        if (ratio > 1)
+            ratio = 1;
+        var bytes = (long)(length * ratio);
+        if (bytes >= length)
+            bytes = length - 1;
+        return bytes;
+    }
 
     private void TryStop(DlnaRenderer renderer, int timeoutMs)
     {
@@ -599,6 +669,7 @@ public sealed class DlnaOutput : IDisposable
     {
         var end = false;
         var fail = false;
+        var stallEnd = false;
         var failMessage = "";
         lock (_gate)
         {
@@ -606,13 +677,35 @@ public sealed class DlnaOutput : IDisposable
                 return;
             _errors = 0;
             if (DlnaSoap.TryTime(durationText, out var reportedDuration) && reportedDuration > TimeSpan.Zero)
-                _duration = reportedDuration;
+            {
+                var believable = _trusted <= TimeSpan.Zero
+                    || reportedDuration <= _trusted + TimeSpan.FromSeconds(3)
+                    || reportedDuration.TotalSeconds < _trusted.TotalSeconds * 1.25 + 5;
+                if (believable)
+                    _duration = reportedDuration;
+            }
+
             if (DateTime.UtcNow >= _holdUntil && DlnaSoap.TryTime(rel, out var reported))
             {
                 if (reported < TimeSpan.Zero)
                     reported = TimeSpan.Zero;
-                _position = reported;
-                _positionAt = DateTime.UtcNow;
+                var clock = PlayingClock();
+                var stuckAtZero = reported < TimeSpan.FromMilliseconds(800) && clock > TimeSpan.FromSeconds(5);
+                if (!stuckAtZero)
+                {
+                    _position = reported;
+                    _positionAt = DateTime.UtcNow;
+                }
+
+                if (reported == _reported)
+                    _stalls++;
+                else
+                {
+                    _stalls = 0;
+                    _reported = reported;
+                }
+
+                stallEnd = _stalls >= 6 && _duration > TimeSpan.FromSeconds(1) && reported >= _duration - TimeSpan.FromSeconds(6);
             }
 
             var token = state.Trim().ToUpperInvariant();
@@ -622,6 +715,13 @@ public sealed class DlnaOutput : IDisposable
                 _playing = true;
                 _paused = false;
                 _startMisses = 0;
+                if (stallEnd)
+                {
+                    _playing = false;
+                    _running = false;
+                    end = !_ended;
+                    _ended = true;
+                }
             }
             else if (token is "PAUSED_PLAYBACK" or "PAUSED")
             {
@@ -630,7 +730,7 @@ public sealed class DlnaOutput : IDisposable
                 _paused = true;
                 _startMisses = 0;
             }
-            else if (token is "STOPPED" or "NO_MEDIA_PRESENT")
+            else if (token is "STOPPED" or "NO_MEDIA_PRESENT" or "COMPLETED" or "END_OF_MEDIA" or "EOS" or "STOPPED_PLAYBACK")
             {
                 if (_seenPlaying)
                 {
@@ -657,7 +757,7 @@ public sealed class DlnaOutput : IDisposable
             if (_playing && _duration > TimeSpan.Zero)
             {
                 var cursor = PlayingClock();
-                if (cursor >= _duration - TimeSpan.FromMilliseconds(400))
+                if (cursor >= _duration - TimeSpan.FromMilliseconds(1200))
                 {
                     _endPolls++;
                     if (_endPolls >= 2)

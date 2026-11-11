@@ -207,9 +207,67 @@ public static partial class BilibiliClient
         var text = input.Trim();
         if (text.Length == 0)
             throw new InvalidOperationException("请输入关键词");
-        if (Bvid().IsMatch(text))
+        var bvid = Bvid().Match(text);
+        if (bvid.Success)
+        {
+            var card = await SeasonCardAsync(settings, bvid.Value, cancellationToken);
+            if (card != null && card.Id > 0)
+                return new CrawlBatch([SeasonHit(card, bvid.Value)], null);
             return new CrawlBatch(await LookupAsync(settings, text, cancellationToken), null);
+        }
+
         return await SearchPageAsync(settings, text, 1, cancellationToken);
+    }
+
+    public static async Task<CrawlBatch?> DetailAsync(ServiceSettings settings, CrawlHit hit, CancellationToken cancellationToken)
+    {
+        if (hit.SeasonId > 0)
+        {
+            var episodes = await LoadEpisodesAsync(settings, hit.SeasonId, hit.OwnerMid, hit.SeedBvid, cancellationToken);
+            if (episodes.Count == 0)
+                throw new InvalidOperationException("这个合集里没有视频");
+            var owner = hit.WorkCircle;
+            var shelfTitle = hit.AlbumTitle.Length > 0 ? hit.AlbumTitle : hit.Title;
+            var hits = new List<CrawlHit>(episodes.Count);
+            for (var i = 0; i < episodes.Count; i++)
+            {
+                var episode = episodes[i];
+                hits.Add(new CrawlHit(0, episode.Bvid, episode.Title, owner, episode.Cover.Length == 0 ? hit.CoverUrl : episode.Cover)
+                {
+                    Origin = "bili",
+                    AlbumTitle = episode.Title,
+                    CoverReferer = "https://www.bilibili.com/",
+                    ShelfId = hit.SourceId,
+                    ShelfTitle = shelfTitle,
+                    ShelfCircle = owner,
+                    ShelfOrder = i + 1,
+                });
+            }
+
+            return new CrawlBatch(hits, null);
+        }
+
+        if (hit.RemoteCid <= 0 && Bvid().IsMatch(hit.SourceId))
+        {
+            var title = hit.AlbumTitle.Length > 0 ? hit.AlbumTitle : hit.Title;
+            var parts = await EpisodePartsAsync(settings, new SeasonEpisode(hit.SourceId, title, hit.CoverUrl ?? ""), hit.Circle, cancellationToken);
+            if (parts.Count <= 1)
+                return null;
+            if (hit.ShelfId.Length > 0)
+            {
+                foreach (var part in parts)
+                {
+                    part.ShelfId = hit.ShelfId;
+                    part.ShelfTitle = hit.ShelfTitle;
+                    part.ShelfCircle = hit.ShelfCircle;
+                    part.ShelfOrder = hit.ShelfOrder;
+                }
+            }
+
+            return new CrawlBatch(parts, null);
+        }
+
+        return null;
     }
 
     public static async Task<CrawlBatch> SearchPageAsync(ServiceSettings settings, string keyword, int page, CancellationToken cancellationToken)
@@ -258,7 +316,123 @@ public static partial class BilibiliClient
             return new CrawlBatch([], null);
         }
 
-        return new CrawlBatch(hits, (page + 1).ToString(CultureInfo.InvariantCulture));
+        return new CrawlBatch(await FoldSeasonsAsync(settings, hits, cancellationToken), (page + 1).ToString(CultureInfo.InvariantCulture));
+    }
+
+    private sealed record SeasonCard(long Id, long Mid, string Title, string Owner, string Cover, int Count, string Bvid);
+
+    private readonly record struct SeasonEpisode(string Bvid, string Title, string Cover);
+
+    private readonly record struct ListedPage(long Cid, int Page, string Name);
+
+    private static readonly Dictionary<string, SeasonCard?> SeasonCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly object SeasonCacheGate = new();
+
+    private static async Task<List<CrawlHit>> FoldSeasonsAsync(ServiceSettings settings, List<CrawlHit> hits, CancellationToken cancellationToken)
+    {
+        var cards = new SeasonCard?[hits.Count];
+        await Parallel.ForEachAsync(
+            Enumerable.Range(0, hits.Count),
+            new ParallelOptions { MaxDegreeOfParallelism = 3, CancellationToken = cancellationToken },
+            async (index, token) => cards[index] = await SeasonCardAsync(settings, hits[index].SourceId, token));
+        var folded = new List<CrawlHit>();
+        var seen = new HashSet<long>();
+        for (var i = 0; i < hits.Count; i++)
+        {
+            var card = cards[i];
+            if (card == null || card.Id <= 0)
+            {
+                folded.Add(hits[i]);
+                continue;
+            }
+
+            if (!seen.Add(card.Id))
+                continue;
+            folded.Add(SeasonHit(card, hits[i].Title, hits[i].CoverUrl));
+        }
+
+        return folded;
+    }
+
+    private static CrawlHit SeasonHit(SeasonCard card, string fallbackTitle, string? fallbackCover = null)
+    {
+        var title = card.Title.Length == 0 ? fallbackTitle : card.Title;
+        var tail = card.Count > 0 ? "合集 · " + card.Count.ToString(CultureInfo.InvariantCulture) + " 个视频" : "合集";
+        var circle = card.Owner.Length == 0 ? tail : card.Owner + " · " + tail;
+        var cover = card.Cover.Length == 0 ? fallbackCover : card.Cover;
+        return new CrawlHit(0, "SS" + card.Id.ToString(CultureInfo.InvariantCulture), title, circle, cover)
+        {
+            Origin = "bili",
+            AlbumTitle = title,
+            CoverReferer = "https://www.bilibili.com/",
+            SeasonId = card.Id,
+            OwnerMid = card.Mid,
+            WorkCircle = card.Owner,
+            SeedBvid = card.Bvid,
+        };
+    }
+
+    private static async Task<SeasonCard?> SeasonCardAsync(ServiceSettings settings, string bvid, CancellationToken cancellationToken)
+    {
+        lock (SeasonCacheGate)
+        {
+            if (SeasonCache.TryGetValue(bvid, out var cached))
+                return cached;
+        }
+
+        try
+        {
+            using var document = await GetJsonAsync(settings, "https://api.bilibili.com/x/web-interface/view?bvid=" + Uri.EscapeDataString(bvid), "https://www.bilibili.com/video/" + bvid, false, cancellationToken);
+            var root = document.RootElement;
+            var data = Child(root, "data");
+            var season = Child(data, "ugc_season");
+            if (Code(root) != 0)
+                return null;
+            SeasonCard? card = null;
+            if (season.ValueKind == JsonValueKind.Object)
+            {
+                var id = Long(season, "id");
+                if (id <= 0)
+                    id = Long(season, "season_id");
+                if (id > 0)
+                {
+                    var mid = Long(season, "mid");
+                    if (mid <= 0)
+                        mid = Long(Child(data, "owner"), "mid");
+                    card = new SeasonCard(id, mid, Text(season, "title"), Text(Child(data, "owner"), "name"), ToHttps(Text(season, "cover")), EpisodeCount(season), bvid);
+                }
+            }
+
+            lock (SeasonCacheGate)
+                SeasonCache[bvid] = card;
+            return card;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static int EpisodeCount(JsonElement season)
+    {
+        var count = (int)Long(season, "ep_count");
+        if (count > 0)
+            return count;
+        var total = 0;
+        if (!season.TryGetProperty("sections", out var sections) || sections.ValueKind != JsonValueKind.Array)
+            return 0;
+        foreach (var section in sections.EnumerateArray())
+        {
+            var episodes = Child(section, "episodes");
+            if (episodes.ValueKind == JsonValueKind.Array)
+                total += episodes.GetArrayLength();
+        }
+
+        return total;
     }
 
     private static string Plain(string text)
@@ -279,6 +453,10 @@ public static partial class BilibiliClient
         IProgress<CrawlProgress> progress,
         CancellationToken cancellationToken)
     {
+        if (hit.SeasonId > 0)
+            return await DownloadSeasonAsync(settings, hit, progress, cancellationToken);
+        if (hit.ShelfId.Length > 0)
+            return await DownloadShelvedAsync(settings, hit, progress, cancellationToken);
         var parts = hit.RemoteCid > 0
             ? new List<CrawlHit> { hit }
             : (await LookupAsync(settings, hit.SourceId, cancellationToken)).ToList();
@@ -351,20 +529,341 @@ public static partial class BilibiliClient
         return hits;
     }
 
-    private static async Task<IReadOnlyList<string>> DownloadPartAsync(
+    private static async Task<IReadOnlyList<string>> DownloadSeasonAsync(
+        ServiceSettings settings,
+        CrawlHit hit,
+        IProgress<CrawlProgress> progress,
+        CancellationToken cancellationToken)
+    {
+        var episodes = await LoadEpisodesAsync(settings, hit.SeasonId, hit.OwnerMid, hit.SeedBvid, cancellationToken);
+        if (episodes.Count == 0)
+            throw new InvalidOperationException("这个合集里没有视频");
+        var root = Path.Combine(TrackLoader.LibraryRoot(), Safe(hit.SourceId));
+        Directory.CreateDirectory(root);
+        var owner = hit.WorkCircle.Length > 0 ? hit.WorkCircle : hit.Circle;
+        WriteWork(root, hit.AlbumTitle.Length == 0 ? hit.Title : hit.AlbumTitle, owner);
+        await TryCoverAsync(hit.CoverUrl, root, progress, "", cancellationToken);
+        var saved = new List<string>();
+        string? lastError = null;
+        for (var i = 0; i < episodes.Count; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var episode = episodes[i];
+            var order = i + 1;
+            var prefix = $"{order}/{episodes.Count}  ";
+            try
+            {
+                var parts = await EpisodePartsAsync(settings, episode, owner, cancellationToken);
+                if (parts.Count == 0)
+                    throw new InvalidOperationException("找不到「" + episode.Title + "」");
+                if (parts.Count == 1)
+                {
+                    var stem = $"{order:000} {Safe(episode.Title)}";
+                    var paths = await SavePlacedAsync(settings, parts[0], root, stem, false, false, progress, prefix, cancellationToken);
+                    saved.AddRange(paths);
+                    if (paths.Count > 0)
+                        RememberVideo(root, Path.GetFileName(paths[0]), episode.Bvid);
+                }
+                else
+                {
+                    var folder = $"{order:000} {Safe(episode.Title)}";
+                    var directory = Path.Combine(root, folder);
+                    Directory.CreateDirectory(directory);
+                    WriteWork(directory, episode.Title, owner);
+                    await TryCoverAsync(episode.Cover.Length == 0 ? hit.CoverUrl : episode.Cover, directory, progress, prefix, cancellationToken);
+                    RememberVideo(root, folder, episode.Bvid);
+                    for (var p = 0; p < parts.Count; p++)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        var part = parts[p];
+                        var name = part.Title.Length == 0 ? episode.Title : part.Title;
+                        var stem = $"{part.Page:00} {Safe(name)}";
+                        var paths = await SavePlacedAsync(settings, part, directory, stem, false, false, progress, prefix + $"{p + 1}/{parts.Count}  ", cancellationToken);
+                        saved.AddRange(paths);
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                lastError = string.IsNullOrWhiteSpace(ex.Message) ? "有一集下不来" : ex.Message;
+            }
+        }
+
+        if (saved.Count == 0)
+            throw new InvalidOperationException(lastError ?? "这个合集下不来");
+        return saved;
+    }
+
+    private static async Task<IReadOnlyList<string>> DownloadShelvedAsync(
+        ServiceSettings settings,
+        CrawlHit hit,
+        IProgress<CrawlProgress> progress,
+        CancellationToken cancellationToken)
+    {
+        var root = Path.Combine(TrackLoader.LibraryRoot(), Safe(hit.ShelfId));
+        Directory.CreateDirectory(root);
+        var owner = hit.ShelfCircle.Length > 0 ? hit.ShelfCircle : hit.WorkCircle.Length > 0 ? hit.WorkCircle : hit.Circle;
+        WriteWork(root, hit.ShelfTitle.Length > 0 ? hit.ShelfTitle : hit.Title, owner);
+        await TryCoverAsync(hit.CoverUrl, root, progress, "", cancellationToken);
+        var parts = hit.RemoteCid > 0
+            ? new List<CrawlHit> { hit }
+            : (await LookupAsync(settings, hit.SourceId, cancellationToken)).ToList();
+        if (parts.Count == 0)
+            throw new InvalidOperationException("找不到这个视频");
+        var episodeTitle = hit.AlbumTitle.Length > 0 ? hit.AlbumTitle : hit.Title;
+        var episodeStem = hit.ShelfOrder > 0 ? $"{hit.ShelfOrder:000} {Safe(episodeTitle)}" : Safe(episodeTitle);
+        var nested = parts.Count > 1 || hit.RemoteCid > 0;
+        var saved = new List<string>();
+        if (!nested)
+        {
+            var part = parts[0];
+            LooseAlbum.Absorb(Safe(part.SourceId), root, episodeStem, false);
+            var paths = await SavePlacedAsync(settings, part, root, episodeStem, false, false, progress, "", cancellationToken);
+            saved.AddRange(paths);
+            if (paths.Count > 0)
+                RememberVideo(root, Path.GetFileName(paths[0]), part.SourceId);
+            return saved;
+        }
+
+        var directory = Path.Combine(root, episodeStem);
+        Directory.CreateDirectory(directory);
+        WriteWork(directory, episodeTitle, owner);
+        await TryCoverAsync(hit.CoverUrl, directory, progress, "", cancellationToken);
+        RememberVideo(root, episodeStem, hit.SourceId);
+        for (var p = 0; p < parts.Count; p++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var part = parts[p];
+            var name = part.Title.Length == 0 ? episodeTitle : part.Title;
+            var stem = $"{(part.Page > 0 ? part.Page : p + 1):00} {Safe(name)}";
+            LooseAlbum.Absorb(Safe(part.SourceId), directory, stem, true);
+            var paths = await SavePlacedAsync(settings, part, directory, stem, false, false, progress, $"{p + 1}/{parts.Count}  ", cancellationToken);
+            saved.AddRange(paths);
+        }
+
+        return saved;
+    }
+
+    private static async Task<List<SeasonEpisode>> LoadEpisodesAsync(ServiceSettings settings, long seasonId, long mid, string seedBvid, CancellationToken cancellationToken)
+    {
+        var episodes = new List<SeasonEpisode>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var complete = false;
+        if (mid > 0 && seasonId > 0)
+        {
+            try
+            {
+                for (var page = 1; page <= 40 && episodes.Count < 1000; page++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var url = "https://api.bilibili.com/x/polymer/web-space/seasons_archives_list?mid="
+                        + mid.ToString(CultureInfo.InvariantCulture)
+                        + "&season_id=" + seasonId.ToString(CultureInfo.InvariantCulture)
+                        + "&sort_reverse=false&page_num=" + page.ToString(CultureInfo.InvariantCulture)
+                        + "&page_size=30";
+                    using var document = await GetJsonAsync(settings, url, "https://space.bilibili.com/" + mid.ToString(CultureInfo.InvariantCulture), false, cancellationToken);
+                    var root = document.RootElement;
+                    if (Code(root) != 0)
+                        break;
+                    var data = Child(root, "data");
+                    var archives = Child(data, "archives");
+                    var added = 0;
+                    if (archives.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var arc in archives.EnumerateArray())
+                        {
+                            var bvid = Text(arc, "bvid");
+                            if (!Bvid().IsMatch(bvid) || !seen.Add(bvid))
+                                continue;
+                            var title = Plain(Text(arc, "title"));
+                            episodes.Add(new SeasonEpisode(bvid, title.Length == 0 ? bvid : title, ToHttps(Text(arc, "pic"))));
+                            added++;
+                        }
+                    }
+
+                    var total = Long(Child(data, "page"), "total");
+                    if (total <= 0)
+                        total = Long(Child(data, "meta"), "total");
+                    if (added == 0 || (total > 0 && episodes.Count >= total))
+                    {
+                        complete = episodes.Count > 0;
+                        break;
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch
+            {
+                complete = false;
+            }
+        }
+
+        if (!complete && Bvid().IsMatch(seedBvid))
+        {
+            try
+            {
+                var fromVideo = await EpisodesFromVideoAsync(settings, seedBvid, cancellationToken);
+                if (fromVideo.Count > episodes.Count)
+                    return fromVideo;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch
+            {
+            }
+        }
+
+        return episodes;
+    }
+
+    private static async Task<List<SeasonEpisode>> EpisodesFromVideoAsync(ServiceSettings settings, string bvid, CancellationToken cancellationToken)
+    {
+        using var document = await GetJsonAsync(settings, "https://api.bilibili.com/x/web-interface/view?bvid=" + Uri.EscapeDataString(bvid), "https://www.bilibili.com/video/" + bvid, false, cancellationToken);
+        var root = document.RootElement;
+        if (Code(root) != 0)
+            return [];
+        return ReadEpisodes(Child(Child(root, "data"), "ugc_season"));
+    }
+
+    private static List<SeasonEpisode> ReadEpisodes(JsonElement season)
+    {
+        var episodes = new List<SeasonEpisode>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (!season.TryGetProperty("sections", out var sections) || sections.ValueKind != JsonValueKind.Array)
+            return episodes;
+        foreach (var section in sections.EnumerateArray())
+        {
+            var list = Child(section, "episodes");
+            if (list.ValueKind != JsonValueKind.Array)
+                continue;
+            foreach (var episode in list.EnumerateArray())
+            {
+                var bvid = Text(episode, "bvid");
+                if (bvid.Length == 0)
+                    bvid = Text(Child(episode, "arc"), "bvid");
+                if (!Bvid().IsMatch(bvid) || !seen.Add(bvid))
+                    continue;
+                var title = Plain(Text(episode, "title"));
+                if (title.Length == 0)
+                    title = Plain(Text(Child(episode, "arc"), "title"));
+                var cover = ToHttps(Text(Child(episode, "arc"), "pic"));
+                episodes.Add(new SeasonEpisode(bvid, title.Length == 0 ? bvid : title, cover));
+            }
+        }
+
+        return episodes;
+    }
+
+    private static async Task<List<CrawlHit>> EpisodePartsAsync(ServiceSettings settings, SeasonEpisode episode, string owner, CancellationToken cancellationToken)
+    {
+        var pages = await PageListAsync(settings, episode.Bvid, cancellationToken);
+        if (pages.Count == 0)
+            return (await LookupAsync(settings, episode.Bvid, cancellationToken)).ToList();
+        var hits = new List<CrawlHit>(pages.Count);
+        foreach (var page in pages)
+        {
+            var name = page.Name.Length > 0 ? page.Name : episode.Title;
+            var title = pages.Count > 1 ? name : episode.Title;
+            hits.Add(new CrawlHit(page.Cid, episode.Bvid, title, owner, episode.Cover)
+            {
+                RemoteCid = page.Cid,
+                Page = page.Page,
+                Origin = "bili",
+                AlbumTitle = episode.Title,
+                CoverReferer = "https://www.bilibili.com/",
+            });
+        }
+
+        return hits;
+    }
+
+    private static async Task<List<ListedPage>> PageListAsync(ServiceSettings settings, string bvid, CancellationToken cancellationToken)
+    {
+        using var document = await GetJsonAsync(settings, "https://api.bilibili.com/x/player/pagelist?bvid=" + Uri.EscapeDataString(bvid), "https://www.bilibili.com/video/" + bvid, false, cancellationToken);
+        var root = document.RootElement;
+        if (Code(root) != 0 || !root.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array)
+            return [];
+        var pages = new List<ListedPage>();
+        foreach (var page in data.EnumerateArray())
+        {
+            var cid = Long(page, "cid");
+            if (cid <= 0)
+                continue;
+            var number = (int)Long(page, "page");
+            if (number <= 0)
+                number = pages.Count + 1;
+            pages.Add(new ListedPage(cid, number, Text(page, "part")));
+        }
+
+        return pages;
+    }
+
+    private static void RememberVideo(string root, string name, string bvid)
+    {
+        if (name.Length == 0 || !Bvid().IsMatch(bvid))
+            return;
+        try
+        {
+            var path = Path.Combine(root, "videos.json");
+            Dictionary<string, string> map;
+            if (File.Exists(path))
+            {
+                map = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(path)) ?? new Dictionary<string, string>();
+            }
+            else
+            {
+                map = new Dictionary<string, string>();
+            }
+
+            map[name] = bvid;
+            File.WriteAllText(path, JsonSerializer.Serialize(map));
+        }
+        catch (IOException)
+        {
+        }
+        catch (JsonException)
+        {
+        }
+    }
+
+    private static Task<IReadOnlyList<string>> DownloadPartAsync(
         ServiceSettings settings,
         CrawlHit hit,
         IProgress<CrawlProgress> progress,
         string prefix,
         CancellationToken cancellationToken)
     {
-        var audio = await ResolveAudioAsync(settings, hit.SourceId, hit.RemoteCid, cancellationToken);
         var root = Path.Combine(TrackLoader.LibraryRoot(), Safe(hit.SourceId));
-        Directory.CreateDirectory(root);
-        WriteWork(root, hit.AlbumTitle.Length == 0 ? hit.Title : hit.AlbumTitle, hit.Circle);
         var stem = hit.Page > 1 ? $"{hit.Page:00} {Safe(hit.Title)}" : Safe(hit.Title);
+        return SavePlacedAsync(settings, hit, root, stem, true, true, progress, prefix, cancellationToken);
+    }
+
+    private static async Task<IReadOnlyList<string>> SavePlacedAsync(
+        ServiceSettings settings,
+        CrawlHit hit,
+        string directory,
+        string stem,
+        bool writeWork,
+        bool withCover,
+        IProgress<CrawlProgress> progress,
+        string prefix,
+        CancellationToken cancellationToken)
+    {
+        var audio = await ResolveAudioAsync(settings, hit.SourceId, hit.RemoteCid, cancellationToken);
+        Directory.CreateDirectory(directory);
+        if (writeWork)
+            WriteWork(directory, hit.AlbumTitle.Length == 0 ? hit.Title : hit.AlbumTitle, hit.Circle);
         var extension = audio.Mime.Contains("webm", StringComparison.OrdinalIgnoreCase) ? ".webm" : ".m4a";
-        var path = Path.Combine(root, stem + extension);
+        var path = Path.Combine(directory, stem + extension);
         var steps = 3;
         if (File.Exists(path) && new FileInfo(path).Length > 0)
         {
@@ -377,7 +876,8 @@ public static partial class BilibiliClient
                 Report(progress, prefix, 1, steps, hit.Title, received, total, false), cancellationToken);
         }
 
-        await TryCoverAsync(audio.CoverUrl.Length == 0 ? hit.CoverUrl : audio.CoverUrl, root, progress, prefix, cancellationToken);
+        if (withCover)
+            await TryCoverAsync(audio.CoverUrl.Length == 0 ? hit.CoverUrl : audio.CoverUrl, directory, progress, prefix, cancellationToken);
         await TrySubtitleAsync(settings, hit, path, progress, prefix, cancellationToken);
         return [path];
     }

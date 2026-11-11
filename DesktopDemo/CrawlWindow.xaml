@@ -35,11 +35,18 @@
         </WrapPanel>
       </StackPanel>
       <Border Grid.Row="1" Margin="0,16,0,0" Background="{DynamicResource CardBrush}" CornerRadius="18" Padding="8">
+        <DockPanel>
+          <StackPanel x:Name="DetailBar" DockPanel.Dock="Top" Orientation="Horizontal" Margin="8,2,8,6" Visibility="Collapsed">
+            <Button x:Name="DetailBack" Content="返回" Style="{StaticResource QuietButton}" Padding="10,3" Margin="0,0,10,0" Click="DetailBack_Click"/>
+            <TextBlock x:Name="DetailTitle" VerticalAlignment="Center" Foreground="{DynamicResource MutedBrush}" FontSize="12"
+                       TextTrimming="CharacterEllipsis" MaxWidth="640"/>
+          </StackPanel>
         <ScrollViewer x:Name="HitScroll" ScrollChanged="HitScroll_ScrollChanged" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
           <ItemsControl x:Name="Hits">
             <ItemsControl.ItemTemplate>
               <DataTemplate>
-                <Border x:Name="Row" CornerRadius="14" Padding="8,6" Margin="0,2" Cursor="Hand" MouseLeftButtonUp="Hit_Click">
+                <Border x:Name="Row" CornerRadius="14" Padding="8,6" Margin="0,2" Cursor="Hand"
+                        MouseLeftButtonDown="Hit_Down" MouseLeftButtonUp="Hit_Click">
                   <Border.Style>
                     <Style TargetType="Border">
                       <Setter Property="Background" Value="Transparent"/>
@@ -101,6 +108,7 @@
             </ItemsControl.ItemTemplate>
           </ItemsControl>
         </ScrollViewer>
+        </DockPanel>
       </Border>
       <DockPanel Grid.Row="2" Margin="0,14,0,0" LastChildFill="True">
         <Button x:Name="SelectAllButton" Content="全选" DockPanel.Dock="Right" Style="{StaticResource QuietButton}" Padding="14,6" Margin="8,0,0,0" Click="SelectAll_Click"/>
