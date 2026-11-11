@@ -23,8 +23,9 @@ public static class AlbumShelf
         foreach (var group in visible.GroupBy(KeyOf))
         {
             var items = group.ToList();
-            var folders = NestedFolders(group.Key, items);
-            albums.Add(folders.Count == 0 ? Flat(group.Key, items) : Nest(group.Key, items, folders));
+            albums.Add(group.Key.StartsWith("work:", StringComparison.Ordinal)
+                ? BuildWork(group.Key, items)
+                : Flat(group.Key, items));
         }
 
         albums.Sort((a, b) => string.Compare(a.Title, b.Title, StringComparison.OrdinalIgnoreCase));
@@ -37,57 +38,81 @@ public static class AlbumShelf
         return Make(key, items, items.Cast<object>().ToList(), items);
     }
 
-    private static AlbumItem Nest(string key, List<TrackItem> items, Dictionary<string, List<TrackItem>> folders)
+    private static AlbumItem BuildWork(string key, List<TrackItem> items)
     {
         var sourceId = key["work:".Length..];
         var root = Path.Combine(TrackLoader.LibraryRoot(), sourceId);
-        var nested = new HashSet<TrackItem>(folders.SelectMany(pair => pair.Value));
-        var loose = items.Where(track => !nested.Contains(track)).ToList();
-        var pieces = new List<(string Name, object Entry, List<TrackItem> Tracks)>();
-        foreach (var track in loose)
-            pieces.Add((Path.GetRelativePath(root, track.FilePath), track, [track]));
-        foreach (var (folder, tracks) in folders)
-        {
-            tracks.Sort(CompareTracks);
-            var directory = Path.Combine(root, folder);
-            var childKey = "nest:" + sourceId + "/" + folder;
-            var child = Make(childKey, tracks, tracks.Cast<object>().ToList(), tracks, directory);
-            pieces.Add((folder, child, tracks));
-        }
-
-        pieces.Sort((a, b) => Natural(a.Name, b.Name));
-        var entries = pieces.Select(piece => piece.Entry).ToList();
-        var flat = pieces.SelectMany(piece => piece.Tracks).ToList();
-        return Make(key, items, entries, flat, root);
+        return BuildLevel(key, root, "", items);
     }
 
-    private static Dictionary<string, List<TrackItem>> NestedFolders(string key, IReadOnlyList<TrackItem> tracks)
+    /// <summary>
+    /// 作品里的每一层文件夹都能再点进去。ASMR.one 经常是「格式/章节」套着音频，没有 work.json 也要能穿越。
+    /// </summary>
+    private static AlbumItem BuildLevel(string key, string root, string relative, List<TrackItem> items)
     {
-        var found = new Dictionary<string, List<TrackItem>>(StringComparer.OrdinalIgnoreCase);
-        if (!key.StartsWith("work:", StringComparison.Ordinal))
-            return found;
-        var root = Path.Combine(TrackLoader.LibraryRoot(), key["work:".Length..]);
-        foreach (var track in tracks)
+        var prefix = relative.Replace('/', Path.DirectorySeparatorChar);
+        var loose = new List<TrackItem>();
+        var groups = new Dictionary<string, List<TrackItem>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var track in items)
         {
-            var relative = Path.GetRelativePath(root, track.FilePath);
-            var split = relative.IndexOf(Path.DirectorySeparatorChar);
-            if (split <= 0)
+            var path = Path.GetRelativePath(root, track.FilePath);
+            var rest = path;
+            if (prefix.Length > 0)
+            {
+                var head = prefix + Path.DirectorySeparatorChar;
+                if (!path.StartsWith(head, StringComparison.OrdinalIgnoreCase))
+                {
+                    loose.Add(track);
+                    continue;
+                }
+
+                rest = path[head.Length..];
+            }
+
+            var split = rest.IndexOf(Path.DirectorySeparatorChar);
+            if (split <= 0 || rest[..split] is "." or "..")
+            {
+                loose.Add(track);
                 continue;
-            var folder = relative[..split];
-            if (folder is "." or "..")
-                continue;
-            if (!File.Exists(Path.Combine(root, folder, "work.json")))
-                continue;
-            if (!found.TryGetValue(folder, out var list))
+            }
+
+            var folder = rest[..split];
+            if (!groups.TryGetValue(folder, out var list))
             {
                 list = [];
-                found[folder] = list;
+                groups[folder] = list;
             }
 
             list.Add(track);
         }
 
-        return found;
+        if (groups.Count == 0)
+            return Flat(key, items);
+
+        var pieces = new List<(string Name, object Entry, List<TrackItem> Tracks)>();
+        foreach (var track in loose)
+            pieces.Add((Path.GetFileName(track.FilePath), track, [track]));
+        foreach (var (folder, tracks) in groups)
+        {
+            var childRelative = relative.Length == 0 ? folder : relative + "/" + folder;
+            var childKey = "nest:" + RelativeKey(root, childRelative);
+            var child = BuildLevel(childKey, root, childRelative, tracks);
+            pieces.Add((folder, child, child.Tracks.ToList()));
+        }
+
+        pieces.Sort((a, b) => Natural(a.Name, b.Name));
+        var entries = pieces.Select(piece => piece.Entry).ToList();
+        var flat = pieces.SelectMany(piece => piece.Tracks).ToList();
+        var cover = prefix.Length == 0 ? root : Path.Combine(root, prefix);
+        return Make(key, items, entries, flat, cover);
+    }
+
+    private static string RelativeKey(string root, string relative)
+    {
+        var library = TrackLoader.LibraryRoot();
+        var full = Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar));
+        var fromLibrary = Path.GetRelativePath(library, full);
+        return fromLibrary.Replace(Path.DirectorySeparatorChar, '/');
     }
 
     private static AlbumItem Make(string key, IReadOnlyList<TrackItem> titled, IReadOnlyList<object> entries, IReadOnlyList<TrackItem> flat, string? coverDirectory = null)
@@ -134,6 +159,7 @@ public static class AlbumShelf
         var root = TrackLoader.LibraryRoot();
         var seasonDir = Path.Combine(root, "SS-nest-check");
         var plainDir = Path.Combine(root, "BV1nestcheck0");
+        var nestedDir = Path.Combine(root, "RJ-nest-check");
         try
         {
             var partDir = Path.Combine(seasonDir, "002 multi");
@@ -173,6 +199,28 @@ public static class AlbumShelf
             var plain = albums.FirstOrDefault(album => album.Title == "普通视频");
             if (plain == null || plain.Entries.OfType<AlbumItem>().Any())
                 return "普通专辑被嵌套了";
+
+            var waveDir = Path.Combine(nestedDir, "02_wave");
+            var cutDir = Path.Combine(nestedDir, "03_SEcut", "mp3");
+            Directory.CreateDirectory(waveDir);
+            Directory.CreateDirectory(cutDir);
+            File.WriteAllText(Path.Combine(nestedDir, "work.json"), "{\"title\":\"套文件夹\",\"circle\":\"社团\"}");
+            var nested = Group(
+            [
+                Track(Path.Combine(nestedDir, "01_mp3", "track00.mp3"), "标题"),
+                Track(Path.Combine(waveDir, "track00.wav"), "标题wav"),
+                Track(Path.Combine(cutDir, "track01.mp3"), "效果音"),
+            ], true).FirstOrDefault(album => album.Key == "work:RJ-nest-check");
+            if (nested == null || nested.Entries.Count != 3)
+                return "套文件夹没有拆开";
+            if (nested.Entries[0] is not AlbumItem mp3 || mp3.Title != "01_mp3" || mp3.Tracks.Count != 1)
+                return "第一层目录进不去";
+            if (nested.Entries[2] is not AlbumItem omake || omake.Title != "03_SEcut")
+                return "深层目录没有露出来";
+            if (omake.Entries.Count != 1 || omake.Entries[0] is not AlbumItem cut || cut.Title != "mp3" || cut.Tracks[0].Title != "效果音")
+                return "穿越第二层失败";
+            if (nested.Tracks.Count != 3 || nested.Tracks[2].Title != "效果音")
+                return "套文件夹播放顺序不对";
             return null;
         }
         catch (Exception ex)
@@ -187,6 +235,8 @@ public static class AlbumShelf
                     Directory.Delete(seasonDir, true);
                 if (Directory.Exists(plainDir))
                     Directory.Delete(plainDir, true);
+                if (Directory.Exists(nestedDir))
+                    Directory.Delete(nestedDir, true);
             }
             catch (IOException)
             {
