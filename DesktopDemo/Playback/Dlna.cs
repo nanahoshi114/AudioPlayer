@@ -331,7 +331,7 @@ public static class DlnaSoap
         return body.ToString();
     }
 
-    public static string Metadata(string url, string? title, string? artist, string protocolInfo, long size, TimeSpan duration, string? album = null, string? artUrl = null, string? lyricsUrl = null)
+    public static string Metadata(string url, string? title, string? artist, string protocolInfo, long size, TimeSpan duration, string? album = null, string? artUrl = null, string? lyricsUrl = null, string? lyricsText = null)
     {
         var safeTitle = Xml(string.IsNullOrWhiteSpace(title) ? "音频" : title.Trim());
         var safeArtist = Xml(artist?.Trim() ?? "");
@@ -344,7 +344,9 @@ public static class DlnaSoap
         var art = string.IsNullOrWhiteSpace(artUrl)
             ? ""
             : "<upnp:albumArtURI dlna:profileID=\"JPEG_SM\" xmlns:dlna=\"urn:schemas-dlna-org:metadata-1-0/\">" + Xml(artUrl) + "</upnp:albumArtURI>";
-        var lyrics = string.IsNullOrWhiteSpace(lyricsUrl) ? "" : "<upnp:lyrics>" + Xml(lyricsUrl) + "</upnp:lyrics>";
+        var lyricsUri = string.IsNullOrWhiteSpace(lyricsUrl) ? "" : "<upnp:lyricsURI>" + Xml(lyricsUrl) + "</upnp:lyricsURI>";
+        var lyricsBody = LyricsBody(lyricsText);
+        var lyrics = lyricsBody.Length == 0 ? "" : "<upnp:lyrics>" + lyricsBody + "</upnp:lyrics>";
         return "<DIDL-Lite xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\">"
             + "<item id=\"0\" parentID=\"-1\" restricted=\"1\">"
             + "<dc:title>" + safeTitle + "</dc:title>"
@@ -352,9 +354,23 @@ public static class DlnaSoap
             + albumText
             + "<upnp:class>object.item.audioItem.musicTrack</upnp:class>"
             + art
+            + lyricsUri
             + lyrics
             + "<res protocolInfo=\"" + Xml(protocolInfo) + "\"" + durationText + sizeText + ">" + Xml(url) + "</res>"
             + "</item></DIDL-Lite>";
+    }
+
+    /// <summary>
+    /// 山灵和 ONIX 有的读标准地址，有的把 upnp:lyrics 当成歌词正文。正文过长时只留地址。
+    /// </summary>
+    private static string LyricsBody(string? lyricsText)
+    {
+        if (string.IsNullOrWhiteSpace(lyricsText))
+            return "";
+        var text = lyricsText.Trim().TrimStart('\uFEFF');
+        if (text.Length == 0 || text.Length > 96000)
+            return "";
+        return Xml(text);
     }
 
     public static bool IsFault(string xml)
@@ -462,7 +478,7 @@ public static class DlnaSoap
                     builder.Append("&quot;");
                     break;
                 default:
-                    if (ch < 32 && ch != '\t')
+                    if (ch < 32 && ch is not '\t' and not '\n' and not '\r')
                         continue;
                     builder.Append(ch);
                     break;

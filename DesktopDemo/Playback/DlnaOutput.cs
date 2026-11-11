@@ -163,9 +163,11 @@ public sealed class DlnaOutput : IDisposable
         var url = root + publication.Path;
         var artUrl = publication.Cover == null ? null : root + publication.CoverRoute;
         var lyricsUrl = publication.Lyrics == null ? null : root + publication.LyricsRoute;
+        var lyricsText = publication.Lyrics == null ? null : Encoding.UTF8.GetString(publication.Lyrics);
         var converted = kind != DlnaServeKind.Original;
         var protocol = DlnaProtocols.ProtocolInfo(kind, mime, publication.Layout, converted);
-        var metadata = DlnaSoap.Metadata(url, title, artist, protocol, publication.Length, duration, sidecar?.Album, artUrl, lyricsUrl);
+        var metadata = DlnaSoap.Metadata(url, title, artist, protocol, publication.Length, duration, sidecar?.Album, artUrl, lyricsUrl, lyricsText);
+        var lyricsUriOnly = DlnaSoap.Metadata(url, title, artist, protocol, publication.Length, duration, sidecar?.Album, artUrl, lyricsUrl, null);
         var withoutLyrics = DlnaSoap.Metadata(url, title, artist, protocol, publication.Length, duration, sidecar?.Album, artUrl, null);
         var titleOnly = DlnaSoap.Metadata(url, title, artist, protocol, publication.Length, duration);
         // 先让进度查询停下来，再 Stop。否则设备进入 STOPPED 会被当成这一首播完了。
@@ -178,7 +180,7 @@ public sealed class DlnaOutput : IDisposable
             var sentMeta = false;
             DlnaException? last = null;
             string? previousMeta = null;
-            foreach (var item in new[] { metadata, withoutLyrics, titleOnly, "" })
+            foreach (var item in new[] { metadata, lyricsUriOnly, withoutLyrics, titleOnly, "" })
             {
                 if (item == previousMeta)
                     continue;

@@ -116,11 +116,13 @@ public static class DlnaTest
 
     private static string? TestSoap()
     {
-        var metadata = DlnaSoap.Metadata("http://a/b", "A & B", "甲", "http-get:*:audio/mpeg:*", 12, TimeSpan.FromSeconds(65), "专辑", "http://a/cover.jpg", "http://a/t.lrc");
+        var metadata = DlnaSoap.Metadata("http://a/b", "A & B", "甲", "http-get:*:audio/mpeg:*", 12, TimeSpan.FromSeconds(65), "专辑", "http://a/cover.jpg", "http://a/t.lrc", "[00:01.50]你好\n");
         if (!metadata.Contains("A &amp; B", StringComparison.Ordinal) || !metadata.Contains("duration=\"00:01:05\"", StringComparison.Ordinal))
             return "metadata";
-        if (!metadata.Contains("upnp:album>专辑", StringComparison.Ordinal) || !metadata.Contains("albumArtURI", StringComparison.Ordinal) || !metadata.Contains("http://a/t.lrc", StringComparison.Ordinal))
+        if (!metadata.Contains("upnp:album>专辑", StringComparison.Ordinal) || !metadata.Contains("albumArtURI", StringComparison.Ordinal) || !metadata.Contains("<upnp:lyricsURI>http://a/t.lrc</upnp:lyricsURI>", StringComparison.Ordinal))
             return "metadata art";
+        if (!metadata.Contains("<upnp:lyrics>[00:01.50]你好", StringComparison.Ordinal))
+            return "metadata lyrics";
         var envelope = DlnaSoap.Envelope(DlnaSoap.AvTransport1, "Ping", [("CurrentURIMetaData", "<item>")]);
         if (!envelope.Contains("&lt;item&gt;", StringComparison.Ordinal) || envelope.Contains("<item>", StringComparison.Ordinal))
             return "soap escape";

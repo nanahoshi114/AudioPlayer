@@ -47,7 +47,12 @@ public sealed class DlnaSidecar
         var text = LyricsText(track);
         if (string.IsNullOrWhiteSpace(text))
             return null;
-        return Encoding.UTF8.GetBytes(text);
+        var payload = Encoding.UTF8.GetBytes(text);
+        var bom = Encoding.UTF8.GetPreamble();
+        var bytes = new byte[bom.Length + payload.Length];
+        bom.CopyTo(bytes, 0);
+        payload.CopyTo(bytes, bom.Length);
+        return bytes;
     }
 
     private static string? LyricsText(TrackItem track)
