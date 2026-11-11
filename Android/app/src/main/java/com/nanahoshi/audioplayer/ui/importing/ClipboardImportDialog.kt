@@ -23,34 +23,36 @@ internal fun ClipboardImportDialog(
     state: ClipboardImportState,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
-    onRetry: () -> Unit,
+    onOpenDetails: (String) -> Unit,
 ) {
     val preview = state.preview
-    val multiPartBili = preview?.target?.source == ClipboardSource.BILIBILI && preview.parts.size > 1
+    val multiPartBili = preview.target.source == ClipboardSource.BILIBILI && preview.parts.size > 1
+    val sourceLabel = if (preview.dlsiteWork != null) "DLsite" else preview.target.source.label
     AlertDialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(dismissOnBackPress = !state.saving, dismissOnClickOutside = !state.saving),
-        title = { Text("导入这个内容？") },
+        title = { Text(if (preview.detailsOnly) "找到作品" else "导入这个内容？") },
         text = { Column {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                CoverImage(preview?.cover, size = 88.dp, modifier = Modifier.semantics { contentDescription = "导入内容封面" })
+                CoverImage(preview.cover, size = 88.dp, modifier = Modifier.semantics { contentDescription = "导入内容封面" })
                 Column(Modifier.weight(1f).padding(start = 12.dp)) {
-                    Text(preview?.title ?: if (state.loading) "正在读取标题和封面…" else "无法读取标题和封面",
+                    Text(preview.title,
                         style = MaterialTheme.typography.titleMedium, maxLines = 4, overflow = TextOverflow.Ellipsis)
-                    Text("${state.candidate.target.source.label} · ${state.candidate.target.id}", Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodySmall)
+                    Text("$sourceLabel · ${preview.target.id}", Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodySmall)
                 }
             }
-            if (preview?.alreadySaved == true) Text(if (multiPartBili) "已在音频库，可调整导入方式" else "已在音频库", Modifier.padding(top = 12.dp))
-            if (state.loading || state.saving) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 12.dp))
-            if (state.saving) Text("正在导入…", Modifier.padding(top = 8.dp))
+            if (preview.alreadySaved) Text(if (multiPartBili) "已在音频库，可调整导入方式" else "已在音频库", Modifier.padding(top = 12.dp))
+            if (preview.detailsOnly) Text("没有有效来源，无法加入音频库", Modifier.padding(top = 12.dp))
+            if (state.saving) {
+                LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 12.dp))
+                Text("正在导入…", Modifier.padding(top = 8.dp))
+            }
             state.error?.let { Text(it, Modifier.padding(top = 12.dp), color = MaterialTheme.colorScheme.error) }
         } },
         confirmButton = {
-            if (preview == null && state.error != null) {
-                TextButton(onClick = onRetry, enabled = !state.loading) { Text("重试") }
-            } else if (preview?.alreadySaved == true && preview.target.source != ClipboardSource.BILIBILI) {
-                // 已保存的内容没有可执行动作，状态放在正文里，不把状态做成禁用按钮。
-            } else {
+            if (preview.detailsOnly) {
+                TextButton(onClick = { onOpenDetails(preview.target.id) }) { Text("查看详情页") }
+            } else if (!preview.alreadySaved || preview.target.source == ClipboardSource.BILIBILI) {
                 TextButton(onClick = onConfirm, enabled = state.canImport) {
                     Text(when {
                         multiPartBili -> "选择导入方式"
@@ -60,7 +62,7 @@ internal fun ClipboardImportDialog(
             }
         },
         dismissButton = {
-            val alreadySaved = preview?.alreadySaved == true && preview.target.source != ClipboardSource.BILIBILI
+            val alreadySaved = preview.alreadySaved && preview.target.source != ClipboardSource.BILIBILI
             TextButton(onClick = onDismiss, enabled = !state.saving) { Text(if (alreadySaved) "关闭" else "取消") }
         },
     )

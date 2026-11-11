@@ -5,15 +5,24 @@ import java.security.MessageDigest
 
 internal enum class ClipboardSource(val label: String) { BILIBILI("B 站"), ASMR("asmr.one"), YOUTUBE("YouTube") }
 internal data class ClipboardTarget(val source: ClipboardSource, val id: String)
-internal data class ClipboardImportCandidate(val target: ClipboardTarget, val timestamp: Long = 0) {
-    // 只持久化内容身份和系统复制时间的摘要，不保存剪贴板原文或链接参数。
-    val fingerprint: String get() = MessageDigest.getInstance("SHA-256")
-        .digest("${target.source}:${target.id}:$timestamp".toByteArray()).joinToString("") { "%02x".format(it) }
+internal data class ClipboardImportCandidate(
+    val target: ClipboardTarget,
+    val timestamp: Long = 0,
+    val requiresLookupConfirmation: Boolean = false,
+) {
+    val fingerprint: String
+        get() {
+            // 保留明确编号的旧摘要。忽略纯数字后，仍可复制明确的 RJ 号查询同一作品。
+            val prefix = if (requiresLookupConfirmation) "bare-rj:" else ""
+            val identity = "$prefix${target.source}:${target.id}:$timestamp"
+            return MessageDigest.getInstance("SHA-256").digest(identity.toByteArray())
+                .joinToString("") { "%02x".format(it) }
+        }
 }
 
 internal const val MAX_IMPORT_CLIPBOARD_LENGTH = 32 * 1024
-private val clipboardBv = Regex("(?<![A-Za-z0-9])BV[0-9A-Za-z]{10}(?![A-Za-z0-9])")
-private val clipboardRj = Regex("(?<![A-Za-z0-9])(?i:RJ)([0-9]{1,12})(?![A-Za-z0-9])")
+private val clipboardExplicitId = Regex("(?<![A-Za-z0-9])BV[0-9A-Za-z]{10}(?![A-Za-z0-9])|(?i:RJ)([0-9]{1,12})(?![0-9])")
+private val clipboardBareRj = Regex("(?<![0-9])(?:01[0-9]{6}|[0-9]{6})(?![0-9])")
 private val clipboardUrl = Regex("(?:https?://|(?<![A-Za-z0-9./])(?:www\\.|m\\.|music\\.)?(?:youtube\\.com|youtu\\.be)/)[^\\s<>\"'（）【】]+", RegexOption.IGNORE_CASE)
 private val youtubeId = Regex("[A-Za-z0-9_-]{11}")
 
@@ -44,9 +53,25 @@ internal fun clipboardImportTarget(raw: String): ClipboardTarget? {
         }
         if (video != null && youtubeId.matches(video)) return ClipboardTarget(ClipboardSource.YOUTUBE, video)
     }
-    val bv = clipboardBv.find(text)
-    val rj = clipboardRj.findAll(text).firstOrNull { match -> match.groupValues[1].any { it != '0' } }
-    if (bv != null && (rj == null || bv.range.first < rj.range.first)) return ClipboardTarget(ClipboardSource.BILIBILI, bv.value)
-    // RJ 是作品标识，前导零属于编号；只给不足六位的旧式简写补零，不做数值转换。
-    return rj?.let { ClipboardTarget(ClipboardSource.ASMR, "RJ" + it.groupValues[1].padStart(6, '0')) }
+    var firstBv: String? = null
+    for (match in clipboardExplicitId.findAll(text)) {
+        val digits = match.groups[1]?.value
+        if (digits == null) {
+            if (firstBv == null) firstBv = match.value
+        } else if (digits.any { it != '0' }) {
+            return ClipboardTarget(ClipboardSource.ASMR, "RJ" + digits.padStart(6, '0'))
+        }
+    }
+    return firstBv?.let { ClipboardTarget(ClipboardSource.BILIBILI, it) }
 }
+
+internal fun clipboardBareWorkCandidate(text: String, timestamp: Long = 0): ClipboardImportCandidate? =
+    clipboardBareRj.findAll(text.take(MAX_IMPORT_CLIPBOARD_LENGTH))
+        .firstOrNull { match -> match.value.any { it != '0' } }
+        ?.let { match ->
+            ClipboardImportCandidate(
+                ClipboardTarget(ClipboardSource.ASMR, "RJ" + match.value),
+                timestamp,
+                requiresLookupConfirmation = true,
+            )
+        }

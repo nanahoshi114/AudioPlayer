@@ -174,7 +174,7 @@ private suspend fun Call.awaitHeaders(): Response = suspendCancellableCoroutine 
     })
 }
 
-private suspend fun <T> Call.withResponse(block: suspend (Response) -> T): T = coroutineScope {
+internal suspend fun <T> Call.withResponse(block: suspend (Response) -> T): T = coroutineScope {
     val watcher = launch(start = CoroutineStart.UNDISPATCHED) {
         try { awaitCancellation() } finally { this@withResponse.cancel() }
     }

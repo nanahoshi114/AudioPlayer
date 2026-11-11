@@ -18,6 +18,9 @@ import com.nanahoshi.audioplayer.data.db.TrackEntity
 import com.nanahoshi.audioplayer.data.db.WhisperJobEntity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.InputStream
@@ -47,6 +50,9 @@ class SubtitleSource(
     private val bilibili: BilibiliClient,
     private val asmr: AsmrClient,
 ) {
+    private val _revision = MutableStateFlow(0L)
+    internal val revision = _revision.asStateFlow()
+
     suspend fun load(row: QueuedTrack): LoadedSubtitles = withContext(Dispatchers.IO) {
         try {
             when (val state = generatedState(row)) {
@@ -72,10 +78,16 @@ class SubtitleSource(
     suspend fun discard(row: QueuedTrack) = withContext(Dispatchers.IO) {
         removeGenerated(row)
         db.translations().deleteForQueue(row.queueItemId)
+        invalidate()
     }
 
     suspend fun discardStored(trackId: Long?, localPath: String?, remoteUrl: String?) = withContext(Dispatchers.IO) {
         removeGenerated(storedRow(trackId, localPath, remoteUrl))
+        invalidate()
+    }
+
+    internal fun invalidate() {
+        _revision.update { it + 1 }
     }
 
     /** 是否有可保留的生成字幕；删除音频前据此决定要不要询问。 */

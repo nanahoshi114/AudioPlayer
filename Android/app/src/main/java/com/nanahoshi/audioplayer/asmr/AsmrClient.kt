@@ -1,5 +1,6 @@
 package com.nanahoshi.audioplayer.asmr
 
+import com.nanahoshi.audioplayer.data.withResponse
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -241,9 +242,9 @@ class AsmrClient {
             .header("Referer", REFERER)
             .header("Origin", ORIGIN)
             .build()
-        client.newCall(request).execute().use { response ->
+        client.newCall(request).withResponse { response ->
             if (!response.isSuccessful) throw AsmrException("无法打开这个文件")
-            val input = response.body?.byteStream() ?: return@withContext ""
+            val input = response.body?.byteStream() ?: return@withResponse ""
             val buffer = ByteArray(limit + 1)
             var total = 0
             while (total < buffer.size) {

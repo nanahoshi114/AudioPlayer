@@ -18,9 +18,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.SharedFlow
-import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
@@ -40,8 +40,8 @@ class TranslateCenter(
     private val runners = ConcurrentHashMap<Long, Job>()
     private val inflight = ConcurrentHashMap<String, Deferred<Boolean>>()
     private val polishInflight = ConcurrentHashMap<String, Deferred<Boolean>>()
-    private val updatesFlow = MutableSharedFlow<Unit>(extraBufferCapacity = 8)
-    val updates: SharedFlow<Unit> = updatesFlow.asSharedFlow()
+    private val revision = MutableStateFlow(0L)
+    internal val updates = revision.asStateFlow()
 
     fun readyToTranslate(fingerprint: String): Boolean {
         if (!credentials.hasTranslate()) return false
@@ -104,7 +104,7 @@ class TranslateCenter(
             val finished = finishWithPolish(lines, ticket) { whisperTranslating(jobId) }
             if (!whisperTranslating(jobId)) throw CancellationException()
             commitTranslated(jobId, fingerprint, finished)
-            updatesFlow.tryEmit(Unit)
+            revision.update { it + 1 }
             null
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -181,7 +181,7 @@ class TranslateCenter(
                 subtitles.saveTranslations(row, finished)
             }
             if (db.translations().finishIfActive(jobId) == 0) throw CancellationException()
-            updatesFlow.tryEmit(Unit)
+            revision.update { it + 1 }
             return true
         } catch (cancelled: CancellationException) {
             abandon(jobId)
@@ -262,7 +262,7 @@ class TranslateCenter(
         val ticket = calls.prepare("polish-${rowKey(row)}")
         val polished = polishAll(cues, ticket) ?: return false
         subtitles.saveTranslations(row, polished)
-        updatesFlow.tryEmit(Unit)
+        revision.update { it + 1 }
         return true
     }
 

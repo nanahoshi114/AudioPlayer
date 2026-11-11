@@ -243,8 +243,13 @@ fun NowPlayingScreen(
     val reorderState = rememberReorderableLazyListState(listState) { from, to ->
         viewModel.client.move(from.index, to.index)
     }
-    val cues = viewModel.subtitleCues
-    val subtitle = cues.textAt(state.positionMs, viewModel.showChinese)
+    val subtitleState by viewModel.subtitles.collectAsStateWithLifecycle()
+    val subtitleSelection by viewModel.subtitleSelection.collectAsStateWithLifecycle()
+    val selected = subtitleSelection.queueItemId == state.queueItemId
+    val loaded = if (selected) subtitleState.forItem(state.queueItemId) else null
+    val cues = loaded?.cues.orEmpty()
+    val chinese = !selected || subtitleSelection.chinese
+    val subtitle = cues.textAt(state.positionMs, chinese)
     var showSubtitles by remember { mutableStateOf(false) }
     var discardPrompt by remember { mutableStateOf(false) }
     var fullTitle by remember { mutableStateOf(false) }
@@ -378,7 +383,7 @@ fun NowPlayingScreen(
                             when {
                                 subtitle.isNotEmpty() -> CueLine(subtitle)
                                 cues.isNotEmpty() -> Unit
-                                viewModel.generatedEmpty -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                loaded?.generatedEmpty == true -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                     Text(
                                         "未检测到人声",
                                         textAlign = TextAlign.Center,
@@ -386,8 +391,8 @@ fun NowPlayingScreen(
                                     )
                                     TextButton(onClick = { discardPrompt = true }) { Text("删除字幕") }
                                 }
-                                viewModel.subtitlesReady -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                    viewModel.subtitleNotice?.let { notice ->
+                                loaded != null -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    loaded.notice?.let { notice ->
                                         Text(
                                             notice,
                                             style = MaterialTheme.typography.bodySmall,
@@ -482,13 +487,13 @@ fun NowPlayingScreen(
                     mediaId = state.queueItemId,
                     cues = cues,
                     positionMs = state.positionMs,
-                    chinese = viewModel.showChinese,
+                    chinese = chinese,
                     translating = viewModel.translating,
-                    canDelete = viewModel.fromGenerated,
-                    onChinese = { viewModel.showChinese = true },
-                    onJapanese = { viewModel.showChinese = false },
+                    canDelete = loaded?.generated == true,
+                    onChinese = { viewModel.showChinese(state.queueItemId, true) },
+                    onJapanese = { viewModel.showChinese(state.queueItemId, false) },
                     onTranslate = viewModel::requestTranslation,
-                    canTranslate = viewModel.canTranslateSubtitles,
+                    canTranslate = loaded?.canTranslate == true,
                     onStop = viewModel::cancelTranslation,
                     polishing = viewModel.polishing,
                     onPolish = viewModel::requestPolish,

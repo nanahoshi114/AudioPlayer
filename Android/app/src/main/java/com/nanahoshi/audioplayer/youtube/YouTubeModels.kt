@@ -6,7 +6,11 @@ import java.security.MessageDigest
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.io.File
 
-class YouTubeException(message: String, cause: Throwable? = null) : java.io.IOException(message, cause)
+class YouTubeException(
+    message: String,
+    cause: Throwable? = null,
+    internal val statusCode: Int? = null,
+) : java.io.IOException(message, cause)
 
 /** 仅记录阶段、错误类型和计数；不包含网址、请求头、凭证或异常原文。 */
 data class YouTubeDiagnostic(

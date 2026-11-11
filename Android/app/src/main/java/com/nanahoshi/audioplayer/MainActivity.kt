@@ -52,8 +52,10 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -68,6 +70,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.IntOffset
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.nanahoshi.audioplayer.data.db.DownloadStatus
 import com.nanahoshi.audioplayer.ui.components.LocalTopBarOverride
 import com.nanahoshi.audioplayer.ui.theme.LocalReduceMotion
@@ -75,6 +78,8 @@ import com.nanahoshi.audioplayer.ui.theme.Motion
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
 import androidx.navigation.navArgument
@@ -103,6 +108,11 @@ import com.nanahoshi.audioplayer.ui.settings.SettingsScreen
 import com.nanahoshi.audioplayer.ui.theme.AudioPlayerTheme
 import com.nanahoshi.audioplayer.ui.importing.ClipboardImportDialog
 import com.nanahoshi.audioplayer.ui.importing.ClipboardImportViewModel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val clipboardImport by lazy { ViewModelProvider(this)[ClipboardImportViewModel::class.java] }
@@ -110,7 +120,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        application.graph().subtitleDisplay.appVisible.value = true
         clipboardCheckedThisEntry = false
+    }
+
+    override fun onStop() {
+        application.graph().subtitleDisplay.appVisible.value = false
+        super.onStop()
     }
 
     override fun onResume() {
@@ -131,6 +147,20 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val client = application.graph().player
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                client.state.map { it.isPlaying }.distinctUntilChanged().collectLatest { playing ->
+                    client.publishNow()
+                    if (playing) {
+                        while (true) {
+                            delay(400)
+                            client.publishNow()
+                        }
+                    }
+                }
+            }
+        }
         enableEdgeToEdge()
         setContent {
             val graph = (application as AudioPlayerApplication).graph
@@ -227,6 +257,9 @@ private fun PlayerApp(clipboardImport: ClipboardImportViewModel) {
     val sleepFinished by graph.player.sleepFinished
         .collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
+    val clipboardController = clipboardImport.controller
+    val pendingLookup = clipboardController.pendingLookup
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
     val topBarOverride = remember { mutableStateOf<(@Composable () -> Unit)?>(null) }
     val reduceMotion = LocalReduceMotion.current
     val downloads by graph.downloads.observe().collectAsStateWithLifecycle(emptyList())
@@ -263,6 +296,18 @@ private fun PlayerApp(clipboardImport: ClipboardImportViewModel) {
         snackbar.showSnackbar(text)
         messages.value = null
     }
+    LaunchedEffect(pendingLookup, sleepFinished, lifecycle) {
+        if (pendingLookup == null || sleepFinished) return@LaunchedEffect
+        lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            val result = snackbar.showSnackbar(
+                message = "可能是作品编号",
+                actionLabel = "查找作品",
+                withDismissAction = true,
+                duration = SnackbarDuration.Long,
+            )
+            clipboardController.resolveLookup(pendingLookup, confirmed = result == SnackbarResult.ActionPerformed)
+        }
+    }
     if (sleepFinished) {
         AlertDialog(
             onDismissRequest = {},
@@ -274,9 +319,11 @@ private fun PlayerApp(clipboardImport: ClipboardImportViewModel) {
             },
         )
     }
-    if (!sleepFinished) clipboardImport.controller.state?.let { state ->
-        val controller = clipboardImport.controller
-        ClipboardImportDialog(state, controller::dismiss, controller::confirm, controller::load)
+    if (!sleepFinished) clipboardController.state?.let { state ->
+        ClipboardImportDialog(state, clipboardController::dismiss, clipboardController::confirm) { workno ->
+            clipboardController.dismiss()
+            navController.navigate(Routes.onlineWork(workno)) { launchSingleTop = true }
+        }
     }
     SharedTransitionLayout {
     val shared = this

@@ -26,8 +26,17 @@ import com.nanahoshi.audioplayer.data.WhisperCenter
 import com.nanahoshi.audioplayer.data.LibraryRepository
 import com.nanahoshi.audioplayer.data.SenseVoiceModelManager
 import com.nanahoshi.audioplayer.data.db.AppDatabase
+import com.nanahoshi.audioplayer.data.db.DownloadStatus
+import com.nanahoshi.audioplayer.playback.CurrentSubtitles
 import com.nanahoshi.audioplayer.playback.PlayerClient
+import com.nanahoshi.audioplayer.playback.SubtitleDisplayPreferences
 import com.nanahoshi.audioplayer.playback.SubtitleSource
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.MutableStateFlow
 import okhttp3.OkHttpClient
 
@@ -60,6 +69,19 @@ class AppGraph(app: Application) {
     val translator = TranslateCenter(app, db, credentials, subtitles)
     val senseVoice = SenseVoiceModelManager(app)
     val whisper = WhisperCenter(app, db, credentials, downloads, translator, senseVoice)
+    internal val subtitleDisplay = SubtitleDisplayPreferences(app)
+    internal val currentSubtitles = CurrentSubtitles(
+        CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+        library.observeQueue(),
+        combine(
+            whisper.observe().map { jobs ->
+                jobs.filter { it.status == DownloadStatus.DONE }.map { it.id to it.translatedAt }
+            }.distinctUntilChanged(),
+            subtitles.revision,
+            translator.updates,
+        ) { _, _, _ -> Unit },
+        subtitles::load,
+    )
     val player = PlayerClient(app, library) { messages.value = it }
 }
 

@@ -85,6 +85,8 @@ Referer: https://www.dlsite.com/{站点}/
 
 `showcase` 先请求 `product.json`，站点用返回的 `site_id`；然后打开作品网页取图库，图库为空时用 `product.json` 里的 `image_samples`。`product.json` 本身为空时，只从作品页读标题、社团、封面和试听。
 
+剪贴板导入在 asmr.one 确认未收录时，后台请求 `product.json` 取得标题和封面。由纯数字推断的候选在用户点击「查找作品」后才启动查询。空数组或 `404` 表示商品未找到，主动查找时底部提示「没有找到这部作品」。连接失败时显示对应的网络提示。查到商品后用 Play 的已购记录核对作品编号。已购作品在用户确认后才读取 Play 文件树并加入音频库，未购作品提供「查看详情页」。
+
 试听来自 chobit：
 
 1. 用 `https://chobit.cc/api/v1/dlsite/embed?workno={编号}` 取嵌入页，编号会把 `worknoCandidates` 试一遍。

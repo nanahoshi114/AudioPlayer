@@ -1,7 +1,14 @@
 package com.nanahoshi.audioplayer.ui.settings
 
 import android.app.Application
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -13,14 +20,17 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.DownloadDone
-import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -28,6 +38,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -51,6 +63,11 @@ fun SettingsScreen(
 ) {
     val limit by viewModel.limitBytes.collectAsStateWithLifecycle()
     val appearance by viewModel.appearance.collectAsStateWithLifecycle()
+    val desktop by viewModel.subtitleDisplay.desktop.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val overlayPermission = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        viewModel.subtitleDisplay.enableDesktop(Settings.canDrawOverlays(context))
+    }
     LaunchedEffect(limit) { viewModel.refreshUsage() }
     val used = viewModel.usedBytes
     val cacheLine = if (used == null) {
@@ -103,6 +120,37 @@ fun SettingsScreen(
                     summary = "${viewModel.whisperLabel()}，${viewModel.translateLabel()}",
                     onClick = onOpenModels,
                 )
+                HorizontalDivider()
+                SubtitleSwitch(
+                    icon = { Icon(Icons.Default.Subtitles, contentDescription = null) },
+                    title = "桌面字幕",
+                    summary = "离开播放器后，在其他应用上层显示字幕",
+                    checked = desktop.enabled,
+                ) { enabled ->
+                    if (!enabled || Settings.canDrawOverlays(context)) {
+                        viewModel.subtitleDisplay.enableDesktop(enabled)
+                    } else {
+                        try {
+                            overlayPermission.launch(
+                                Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.fromParts("package", context.packageName, null)),
+                            )
+                        } catch (_: ActivityNotFoundException) {
+                            viewModel.reportOverlaySettingsUnavailable()
+                        } catch (_: SecurityException) {
+                            viewModel.reportOverlaySettingsUnavailable()
+                        }
+                    }
+                }
+                if (desktop.enabled || desktop.locked) {
+                    HorizontalDivider()
+                    SubtitleSwitch(
+                        icon = { Icon(Icons.Default.Lock, contentDescription = null) },
+                        title = "锁定桌面字幕",
+                        summary = "锁定后触摸会传给下方应用，回这里解锁",
+                        checked = desktop.locked,
+                        onChange = viewModel.subtitleDisplay::lockDesktop,
+                    )
+                }
             }
         }
         item(key = "app-title") {
@@ -116,6 +164,23 @@ fun SettingsScreen(
             Spacer(Modifier.height(24.dp))
         }
     }
+}
+
+@Composable
+private fun SubtitleSwitch(
+    icon: @Composable () -> Unit,
+    title: String,
+    summary: String,
+    checked: Boolean,
+    onChange: (Boolean) -> Unit,
+) {
+    ListItem(
+        headlineContent = { Text(title, style = MaterialTheme.typography.titleMedium) },
+        supportingContent = { Text(summary) },
+        leadingContent = icon,
+        trailingContent = { Switch(checked = checked, onCheckedChange = null) },
+        modifier = Modifier.toggleable(value = checked, role = Role.Switch, onValueChange = onChange),
+    )
 }
 
 @Composable
@@ -149,6 +214,7 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     private val graph = app.graph()
     val limitBytes = graph.cache.limitBytes
     val appearance = graph.appearance.state
+    internal val subtitleDisplay = graph.subtitleDisplay
     internal val version = installedAppVersion(app)
     var usedBytes by mutableStateOf<Long?>(null)
         private set
@@ -156,6 +222,10 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     fun whisperLabel(): String = whisperModelLabel(graph.credentials.resolvedWhisperModel())
 
     fun translateLabel(): String = if (graph.credentials.hasTranslate()) "翻译已配置" else "翻译未配置"
+
+    internal fun reportOverlaySettingsUnavailable() {
+        graph.messages.value = "无法打开悬浮窗设置，可在系统设置中允许显示在其他应用上层"
+    }
 
     fun refreshUsage() {
         viewModelScope.launch {

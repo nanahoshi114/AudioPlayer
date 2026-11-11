@@ -245,7 +245,7 @@ class StoredCatalog(
                 if (file.isFile) file.delete()
             }
             StoredKind.SUBTITLE -> {
-                if (file.isFile) file.delete()
+                if (file.isFile && file.delete()) subtitles.invalidate()
             }
             StoredKind.AUDIO -> deleteAudio(item, file, deleteSubtitles)
         }

@@ -1,5 +1,6 @@
 package com.nanahoshi.audioplayer.playback
 
+import android.content.res.Configuration
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.PlaybackException
@@ -23,6 +24,7 @@ class PlaybackService : MediaSessionService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var player: ExoPlayer? = null
     private var session: MediaSession? = null
+    private var subtitles: PlaybackSubtitles? = null
     private var retriedMediaId: String? = null
 
     override fun onCreate() {
@@ -81,6 +83,10 @@ class PlaybackService : MediaSessionService() {
         })
         player = exoPlayer
         session = MediaSession.Builder(this, exoPlayer).build()
+        subtitles = PlaybackSubtitles(
+            this, scope, exoPlayer, graph.currentSubtitles, graph.subtitleDisplay,
+            onDesktopUnavailable = { graph.messages.value = "无法显示桌面字幕，请检查悬浮窗权限" },
+        )
         scope.launch {
             while (isActive) {
                 delay(5_000)
@@ -91,7 +97,14 @@ class PlaybackService : MediaSessionService() {
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        subtitles?.relayout()
+    }
+
     override fun onDestroy() {
+        subtitles?.close()
+        subtitles = null
         player?.let { exoPlayer ->
             val queueItemId = exoPlayer.currentMediaItem?.mediaId?.toLongOrNull() ?: -1L
             val position = exoPlayer.currentPosition.coerceAtLeast(0L)

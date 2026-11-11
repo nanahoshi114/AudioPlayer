@@ -2,9 +2,11 @@ package com.nanahoshi.audioplayer.bilibili
 
 import com.nanahoshi.audioplayer.data.CredentialStore
 import com.nanahoshi.audioplayer.data.toHttps
+import com.nanahoshi.audioplayer.data.withResponse
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -19,6 +21,7 @@ import org.json.JSONObject
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
+import okhttp3.Response
 import okhttp3.RequestBody.Companion.toRequestBody
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
@@ -493,7 +496,9 @@ class BilibiliClient(
     ): String =
         withContext(Dispatchers.IO) {
             prepareIdentity()
-            execute(Request.Builder().url(url).get(), referer, guestOnly)
+            ensureActive()
+            val request = buildRequest(Request.Builder().url(url).get(), referer, guestOnly)
+            http.newCall(request).withResponse { readExchange(it, allowHtml = false).body }
         }
 
     private fun prepareIdentity() {
@@ -652,26 +657,31 @@ class BilibiliClient(
         referer: String,
         guestOnly: Boolean = false,
         allowHtml: Boolean = false,
-    ): Exchange {
+    ): Exchange = http.newCall(buildRequest(builder, referer, guestOnly)).execute().use {
+        readExchange(it, allowHtml)
+    }
+
+    private fun buildRequest(builder: Request.Builder, referer: String, guestOnly: Boolean): Request {
         val cookie = if (guestOnly) credentials.guestCookieHeader() else credentials.cookieHeader()
         if (cookie.isNotBlank()) builder.header("Cookie", cookie)
-        val request = builder
+        return builder
             .header("User-Agent", USER_AGENT)
             .header("Referer", referer)
             .header("Origin", originOf(referer))
             .header("Accept", "application/json, text/plain, */*")
             .header("Accept-Language", "zh-CN,zh;q=0.9")
             .build()
-        http.newCall(request).execute().use { response ->
-            val body = response.body?.string().orEmpty()
-            if (!allowHtml && body.trimStart().startsWith("<")) {
-                throw BilibiliException(-412, "B 站没有返回播放数据，请检查登录信息或稍后再试")
-            }
-            if (response.code in 300..399 || (!response.isSuccessful && body.isBlank())) {
-                throw BilibiliException(response.code, "网络请求失败，请重试")
-            }
-            return Exchange(body, response.headers("Set-Cookie"))
+    }
+
+    private fun readExchange(response: Response, allowHtml: Boolean): Exchange {
+        val body = response.body?.string().orEmpty()
+        if (!allowHtml && body.trimStart().startsWith("<")) {
+            throw BilibiliException(-412, "B 站没有返回播放数据，请检查登录信息或稍后再试")
         }
+        if (response.code in 300..399 || (!response.isSuccessful && body.isBlank())) {
+            throw BilibiliException(response.code, "网络请求失败，请重试")
+        }
+        return Exchange(body, response.headers("Set-Cookie"))
     }
 
     private fun keyFromUrl(url: String): String =

@@ -25,7 +25,7 @@ import java.io.IOException
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
-class DlsiteException(message: String) : Exception(message)
+class DlsiteException(message: String, internal val statusCode: Int? = null) : Exception(message)
 
 data class DlsiteHit(
     val workno: String,
@@ -204,6 +204,14 @@ class DlsiteClient(private val credentials: CredentialStore) {
             acceptJson = true,
         )
         return parseProductCards(body)
+    }
+
+    internal suspend fun lookupProduct(input: String): DlsiteShowcase? = withContext(Dispatchers.IO) {
+        try {
+            product(worknoOf(input))
+        } catch (error: DlsiteException) {
+            if (error.statusCode == 404) null else throw error
+        }
     }
 
     suspend fun showcase(input: String): DlsiteShowcase = withContext(Dispatchers.IO) {
@@ -440,7 +448,8 @@ class DlsiteClient(private val credentials: CredentialStore) {
             acceptJson = true,
         )
         val array = JSONArray(body)
-        val item = array.optJSONObject(0) ?: return null
+        if (array.length() == 0) return null
+        val item = array.getJSONObject(0)
         val makers = item.optJSONObject("creaters")
         val gallery = sampleImages(item)
         return DlsiteShowcase(
@@ -546,8 +555,8 @@ class DlsiteClient(private val credentials: CredentialStore) {
         try {
             client.newCall(request).execute().use { response ->
                 val body = response.body?.string().orEmpty()
-                if (response.code == 401) throw DlsiteException("登录已失效，请重新登录")
-                if (!response.isSuccessful) throw DlsiteException("暂时无法连接 DLsite")
+                if (response.code == 401) throw DlsiteException("登录已失效，请重新登录", response.code)
+                if (!response.isSuccessful) throw DlsiteException("暂时无法连接 DLsite", response.code)
                 return body
             }
         } catch (error: DlsiteException) {

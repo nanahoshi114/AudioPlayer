@@ -360,7 +360,12 @@ class YouTubeClient(
                         }
                         if (continuation.isActive) continuation.resume(value)
                     } catch (_: Exception) {
-                        if (continuation.isActive) continuation.resumeWithException(YouTubeException("YouTube 请求失败，请检查网络和登录信息"))
+                        if (continuation.isActive) {
+                            continuation.resumeWithException(YouTubeException(
+                                "YouTube 请求失败，请检查网络和登录信息",
+                                statusCode = response.code.takeUnless { response.isSuccessful },
+                            ))
+                        }
                     }
                 }
             })
