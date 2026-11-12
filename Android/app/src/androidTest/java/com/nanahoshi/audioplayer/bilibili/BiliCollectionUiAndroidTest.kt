@@ -12,8 +12,11 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.nanahoshi.audioplayer.ui.bilibili.BiliCollectionRouteError
 import com.nanahoshi.audioplayer.ui.bilibili.CollectionAction
+import com.nanahoshi.audioplayer.ui.bilibili.CollectionFailureDialog
 import com.nanahoshi.audioplayer.ui.bilibili.CollectionMenuItems
+import com.nanahoshi.audioplayer.ui.bilibili.CollectionPreparation
 import com.nanahoshi.audioplayer.ui.bilibili.CollectionPlaybackActions
 import com.nanahoshi.audioplayer.ui.bilibili.CollectionSort
 import com.nanahoshi.audioplayer.ui.bilibili.CollectionSortSelector
@@ -86,5 +89,54 @@ class BiliCollectionUiAndroidTest {
         compose.onNodeWithText("复制为自建播放列表").performClick()
         compose.onNodeWithText("取消收藏").performClick()
         compose.runOnIdle { assertEquals(1, opened); assertEquals(CollectionAction.COPY, action); assertEquals(1, unbookmarked) }
+    }
+
+    @Test fun allFailedShowsFailureTitleWithoutContinue() {
+        var continued = 0
+        var retried = 0
+        var cancelled = 0
+        val video = BiliVideoHit("BV1234567890", "视频A", "UP", "", 2000)
+        val prepared = CollectionPreparation(CollectionAction.PLAY, emptyList(), listOf("视频A：读取失败"), listOf(video))
+        compose.setContent {
+            MaterialTheme {
+                CollectionFailureDialog(prepared, { continued++ }, { retried++ }, { cancelled++ })
+            }
+        }
+        compose.onNodeWithText("视频读取失败").assertIsDisplayed()
+        compose.onNodeWithText("视频A：读取失败").assertIsDisplayed()
+        compose.onNodeWithText("继续处理其余", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("取消").performClick()
+        compose.runOnIdle { assertEquals(1, cancelled); assertEquals(0, continued); assertEquals(0, retried) }
+    }
+
+    @Test fun partialFailureKeepsContinueWithCount() {
+        var continued = 0
+        var retried = 0
+        val video = BiliVideoHit("BV1234567890", "视频A", "UP", "", 2000)
+        val part = BiliPart(video.bvid, 101L, 1, "P1", "UP", 1000, "")
+        val prepared = CollectionPreparation(
+            CollectionAction.PLAY, listOf(BiliVideoDetails(video, listOf(part))), listOf("视频B：读取失败"), listOf(video))
+        compose.setContent {
+            MaterialTheme {
+                CollectionFailureDialog(prepared, { continued++ }, { retried++ }, {})
+            }
+        }
+        compose.onNodeWithText("部分视频读取失败").assertIsDisplayed()
+        compose.onNodeWithText("继续处理其余 1 个视频").assertIsDisplayed().performClick()
+        compose.onNodeWithText("重试").performClick()
+        compose.runOnIdle { assertEquals(1, continued); assertEquals(1, retried) }
+    }
+
+    @Test fun invalidRouteShowsErrorPageWithBack() {
+        var backs = 0
+        compose.setContent {
+            MaterialTheme { BiliCollectionRouteError { backs++ } }
+        }
+        compose.onNodeWithText("无法打开这个合集").assertIsDisplayed()
+        compose.onNodeWithText("链接参数无效，请返回后重试").assertIsDisplayed()
+        compose.onNodeWithContentDescription("返回").performClick()
+        compose.runOnIdle { assertEquals(1, backs) }
+        compose.onNodeWithText("返回").performClick()
+        compose.runOnIdle { assertEquals(2, backs) }
     }
 }

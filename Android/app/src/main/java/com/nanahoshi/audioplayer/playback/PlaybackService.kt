@@ -11,14 +11,17 @@ import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import com.nanahoshi.audioplayer.AudioPlayerApplication
 import com.nanahoshi.audioplayer.data.db.PlaybackStateEntity
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 
 class PlaybackService : MediaSessionService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -26,6 +29,11 @@ class PlaybackService : MediaSessionService() {
     private var session: MediaSession? = null
     private var subtitles: PlaybackSubtitles? = null
     private var retriedMediaId: String? = null
+    private var lastSaved: PlaybackStateEntity? = null
+    private var restorePending = true
+    private var restoreJob: Job? = null
+    // 单线程串行写：去重后不再周期性重写，乱序的并发写会把旧进度永久留在库里。
+    private val saveDispatcher = Dispatchers.IO.limitedParallelism(1)
 
     override fun onCreate() {
         super.onCreate()
@@ -40,23 +48,6 @@ class PlaybackService : MediaSessionService() {
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_LOCAL)
             .build()
-        val restored = runBlocking(Dispatchers.IO) {
-            val rows = graph.db.queue().snapshot()
-            val state = graph.db.queue().playbackState()
-            rows to state
-        }
-        val (rows, state) = restored
-        if (rows.isNotEmpty()) {
-            try {
-                val items = rows.map { it.toMediaItem() }
-                val index = rows.indexOfFirst { it.queueItemId == state?.queueItemId }.coerceAtLeast(0)
-                exoPlayer.setMediaItems(items, index, state?.positionMs ?: 0L)
-                exoPlayer.prepare()
-                exoPlayer.playWhenReady = false
-            } catch (error: Exception) {
-                graph.messages.value = error.message ?: "无法恢复上次播放"
-            }
-        }
         exoPlayer.addListener(object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: androidx.media3.common.MediaItem?, reason: Int) {
                 retriedMediaId = null
@@ -82,11 +73,57 @@ class PlaybackService : MediaSessionService() {
             }
         })
         player = exoPlayer
+        // Session 必须在 onCreate 返回前建好：onBind 经 onGetSession 取它。
         session = MediaSession.Builder(this, exoPlayer).build()
         subtitles = PlaybackSubtitles(
             this, scope, exoPlayer, graph.currentSubtitles, graph.subtitleDisplay,
             onDesktopUnavailable = { graph.messages.value = "无法显示桌面字幕，请检查悬浮窗权限" },
         )
+        // 恢复异步化：DB 读取与逐条 content: 探测不再阻塞主线程。
+        // 应用与 PlayerClient 共用 queueMutex，并在锁内重读快照，避免覆盖抢先的队列操作。
+        restoreJob = scope.launch {
+            val (rows, state) = withContext(Dispatchers.IO) {
+                graph.db.queue().snapshot() to graph.db.queue().playbackState()
+            }
+            if (rows.isEmpty()) {
+                restorePending = false
+                return@launch
+            }
+            val items = try {
+                withContext(Dispatchers.IO) { rows.map { it.toMediaItem(this@PlaybackService) } }
+            } catch (error: Exception) {
+                restorePending = false
+                graph.messages.value = error.message ?: "无法恢复上次播放"
+                return@launch
+            }
+            try {
+                graph.player.withQueueLock {
+                    if (!restorePending) return@withQueueLock
+                    if (exoPlayer.mediaItemCount > 0) {
+                        // 客户端已抢先填充播放器，用户操作优先。
+                        restorePending = false
+                        return@withQueueLock
+                    }
+                    val fresh = graph.db.queue().snapshot()
+                    val unchanged = fresh == rows
+                    val applyRows = if (unchanged) rows else fresh
+                    val applyItems = if (unchanged) items else withContext(Dispatchers.IO) {
+                        fresh.map { it.toMediaItem(this@PlaybackService) }
+                    }
+                    // 先解除进度保存抑制再应用：setMediaItems 同步触发的过渡回调要能记录恢复态。
+                    restorePending = false
+                    val index = applyRows.indexOfFirst { it.queueItemId == state?.queueItemId }.coerceAtLeast(0)
+                    exoPlayer.setMediaItems(applyItems, index, state?.positionMs ?: 0L)
+                    if (applyItems.isNotEmpty()) exoPlayer.prepare()
+                    exoPlayer.playWhenReady = false
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                restorePending = false
+                graph.messages.value = error.message ?: "无法恢复上次播放"
+            }
+        }
         scope.launch {
             while (isActive) {
                 delay(5_000)
@@ -103,14 +140,21 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onDestroy() {
+        val pending = restorePending
+        restorePending = false
+        restoreJob?.cancel()
+        restoreJob = null
         subtitles?.close()
         subtitles = null
         player?.let { exoPlayer ->
-            val queueItemId = exoPlayer.currentMediaItem?.mediaId?.toLongOrNull() ?: -1L
-            val position = exoPlayer.currentPosition.coerceAtLeast(0L)
-            val db = (application as AudioPlayerApplication).graph.db
-            runBlocking(Dispatchers.IO) {
-                db.queue().savePlayback(PlaybackStateEntity(queueItemId = queueItemId, positionMs = position))
+            // 恢复未应用且播放器为空时，当前状态不代表库里的队列，跳过存盘避免 (-1, 0) 覆盖。
+            if (!pending || exoPlayer.mediaItemCount > 0) {
+                val queueItemId = exoPlayer.currentMediaItem?.mediaId?.toLongOrNull() ?: -1L
+                val position = exoPlayer.currentPosition.coerceAtLeast(0L)
+                val db = (application as AudioPlayerApplication).graph.db
+                runBlocking(Dispatchers.IO) {
+                    db.queue().savePlayback(PlaybackStateEntity(queueItemId = queueItemId, positionMs = position))
+                }
             }
         }
         scope.cancel()
@@ -129,11 +173,15 @@ class PlaybackService : MediaSessionService() {
     }
 
     private fun saveProgress(exoPlayer: ExoPlayer) {
+        // 恢复未应用前播放器为空，(-1, 0) 复位信号不能覆盖库里的上次播放状态。
+        if (restorePending) return
         val queueItemId = exoPlayer.currentMediaItem?.mediaId?.toLongOrNull() ?: -1L
         val position = exoPlayer.currentPosition.coerceAtLeast(0L)
+        val state = PlaybackStateEntity(queueItemId = queueItemId, positionMs = position)
+        // 相等去重：暂停、静止或无媒体时不再每 5 秒重复写。(-1, 0) 是清空队列的复位信号，仍要写一次。
+        if (state == lastSaved) return
+        lastSaved = state
         val db = (application as AudioPlayerApplication).graph.db
-        scope.launch(Dispatchers.IO) {
-            db.queue().savePlayback(PlaybackStateEntity(queueItemId = queueItemId, positionMs = position))
-        }
+        scope.launch(saveDispatcher) { db.queue().savePlayback(state) }
     }
 }

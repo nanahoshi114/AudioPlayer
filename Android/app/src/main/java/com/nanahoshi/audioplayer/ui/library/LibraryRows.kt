@@ -105,20 +105,31 @@ internal fun rememberLibraryClimb(
         climbing = true
         scope.launch {
             try {
-                repeat(steps) {
-                    val before = currentFolderId()
-                    if (before == null) return@launch
-                    up()
+                climbUp(steps, currentFolderId, up) { before ->
                     withTimeoutOrNull(2000) {
                         snapshotFlow { currentFolderId() }.first { it != before }
-                    }
+                    } != null
                 }
-            }             finally {
+            } finally {
                 climbing = false
             }
         }
     }
     return climb
+}
+
+/** 逐层上移；某层未在等待内刷新即停止，避免超时后继续 up() 越过目标层级。 */
+internal suspend fun climbUp(
+    steps: Int,
+    currentFolderId: () -> Long?,
+    up: () -> Unit,
+    awaitChange: suspend (Long) -> Boolean,
+) {
+    repeat(steps) {
+        val before = currentFolderId() ?: return
+        up()
+        if (!awaitChange(before)) return
+    }
 }
 
 @Composable

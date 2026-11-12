@@ -16,6 +16,10 @@ internal fun biliRefreshDueAt(checkedAt: Long, failedAt: Long, now: Long): Boole
     return failedAt > 0L
 }
 
+/** ticket 至少还要有效 60 秒才随请求发送；过期或临期一律不带，避免触发 -403。 */
+internal fun ticketIsFresh(expiresAtEpochSec: Long, nowEpochSec: Long): Boolean =
+    expiresAtEpochSec > nowEpochSec + 60
+
 class CredentialStore(context: Context) {
     private val appContext = context.applicationContext
     private val plainPrefs: SharedPreferences =
@@ -70,7 +74,7 @@ class CredentialStore(context: Context) {
         val token = refreshToken.trim()
         if (token.isEmpty()) edit.remove(KEY_BILI_REFRESH) else edit.putString(KEY_BILI_REFRESH, token)
         edit.apply()
-        plainPrefs.edit().remove(KEY_BILI_REFRESH_FAILED).apply()
+        plainPrefs.edit().remove(KEY_BILI_REFRESH_CHECKED).remove(KEY_BILI_REFRESH_FAILED).apply()
         biliRefreshFailure.value = false
         val oldMid = com.nanahoshi.audioplayer.bilibili.cookieField(old, "DedeUserID")
         val newMid = com.nanahoshi.audioplayer.bilibili.cookieField(value, "DedeUserID")
@@ -335,7 +339,7 @@ class CredentialStore(context: Context) {
 
     fun ticketExpiresAt(): Long = plainPrefs.getLong(KEY_TICKET_EXPIRES, 0L)
 
-    fun hasFreshTicket(): Boolean = ticketExpiresAt() > System.currentTimeMillis() / 1000 + 60
+    fun hasFreshTicket(): Boolean = ticketIsFresh(ticketExpiresAt(), System.currentTimeMillis() / 1000)
 
     fun saveTicket(ticket: String, expiresAtEpochSec: Long) {
         plainPrefs.edit()
@@ -361,8 +365,10 @@ class CredentialStore(context: Context) {
         val buvid3 = buvid3()
         if (buvid3.contains("-")) parts += "buvid3=$buvid3"
         if (buvid4().isNotBlank()) parts += "buvid4=${buvid4()}"
-        ticket()?.let { parts += "bili_ticket=$it" }
-        if (ticketExpiresAt() > 0) parts += "bili_ticket_expires=${ticketExpiresAt()}"
+        if (hasFreshTicket()) {
+            ticket()?.let { parts += "bili_ticket=$it" }
+            parts += "bili_ticket_expires=${ticketExpiresAt()}"
+        }
         if (!user.isNullOrBlank()) {
             parts += if (user.contains("=")) stripManagedCookies(user) else "SESSDATA=$user"
         }

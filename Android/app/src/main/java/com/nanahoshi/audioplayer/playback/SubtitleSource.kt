@@ -3,6 +3,7 @@ package com.nanahoshi.audioplayer.playback
 import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
+import androidx.room.withTransaction
 import com.nanahoshi.audioplayer.asmr.AsmrClient
 import com.nanahoshi.audioplayer.bilibili.BiliSubtitle
 import com.nanahoshi.audioplayer.bilibili.BilibiliClient
@@ -77,12 +78,22 @@ class SubtitleSource(
 
     suspend fun discard(row: QueuedTrack) = withContext(Dispatchers.IO) {
         removeGenerated(row)
-        db.translations().deleteForQueue(row.queueItemId)
+        db.translations().deleteInactiveForQueue(row.queueItemId)
         invalidate()
     }
 
     suspend fun discardStored(trackId: Long?, localPath: String?, remoteUrl: String?) = withContext(Dispatchers.IO) {
-        removeGenerated(storedRow(trackId, localPath, remoteUrl))
+        removeGenerated(storedQueueRow(trackId, localPath, remoteUrl))
+        invalidate()
+    }
+
+    /** 只清理翻译覆盖对应的已完成/失败记录，进行中的翻译保留；文件由下载管理负责删除，听写记录不动。 */
+    suspend fun discardTranslationRecords(trackId: Long?, remoteUrl: String?, queueItemId: Long?) = withContext(Dispatchers.IO) {
+        db.withTransaction {
+            trackId?.takeIf { it > 0L }?.let { db.translations().deleteInactiveForTrack(it) }
+            remoteUrl?.takeIf { it.isNotBlank() }?.let { db.translations().deleteInactiveForUrl(it) }
+            queueItemId?.let { db.translations().deleteInactiveForQueue(it) }
+        }
         invalidate()
     }
 
@@ -92,8 +103,9 @@ class SubtitleSource(
 
     /** 是否有可保留的生成字幕；删除音频前据此决定要不要询问。 */
     suspend fun hasGenerated(trackId: Long?, localPath: String?, remoteUrl: String?): Boolean = withContext(Dispatchers.IO) {
-        val row = storedRow(trackId, localPath, remoteUrl)
-        overlayFile(row).isFile || generatedState(row) != GeneratedState.Missing
+        val row = storedQueueRow(trackId, localPath, remoteUrl)
+        val identities = listOf(row) + recoveredOverlayIdentities(row, relatedDone(row))
+        identities.any { overlayFile(it).isFile } || generatedState(row) != GeneratedState.Missing
     }
 
     suspend fun cuesFor(track: TrackEntity): TrackSubtitles = withContext(Dispatchers.IO) {
@@ -137,25 +149,6 @@ class SubtitleSource(
         data object Missing : GeneratedState
     }
 
-    private fun storedRow(trackId: Long?, localPath: String?, remoteUrl: String?) = QueuedTrack(
-        queueItemId = -1,
-        position = 0,
-        trackId = trackId?.takeIf { it > 0L },
-        source = TrackSource.LOCAL,
-        title = "",
-        artist = null,
-        durationMs = 0,
-        coverUri = null,
-        localUri = localPath,
-        bvid = null,
-        cid = null,
-        page = null,
-        remoteUrl = remoteUrl,
-        referer = null,
-        workno = null,
-        fileKey = null,
-    )
-
     private suspend fun removeGenerated(row: QueuedTrack) {
         val jobs = relatedDone(row)
         jobs.map { it.fingerprint }.filter { it.isNotBlank() }.distinct().forEach { fingerprint ->
@@ -167,14 +160,26 @@ class SubtitleSource(
         val trackId = row.trackId?.takeIf { it > 0L }
         if (trackId != null) {
             db.whisper().deleteDoneForTrack(trackId)
-            db.translations().deleteForTrack(trackId)
+            db.translations().deleteInactiveForTrack(trackId)
         }
         row.remoteUrl?.takeIf { it.isNotBlank() }?.let {
             db.whisper().deleteDoneForUrl(it)
-            db.translations().deleteForUrl(it)
+            db.translations().deleteInactiveForUrl(it)
         }
         row.localUri?.takeIf { it.isNotBlank() }?.let { db.whisper().deleteDoneForPath(it) }
         storedAudioPath(row)?.let { db.whisper().deleteDoneForPath(it) }
+        // 孤儿条目的翻译覆盖按旧 track/url 命名；按找回的身份补删文件和记录。
+        for (identity in recoveredOverlayIdentities(row, jobs)) {
+            overlayFile(identity).delete()
+            identity.trackId?.let {
+                db.whisper().deleteDoneForTrack(it)
+                db.translations().deleteInactiveForTrack(it)
+            }
+            identity.remoteUrl?.let {
+                db.whisper().deleteDoneForUrl(it)
+                db.translations().deleteInactiveForUrl(it)
+            }
+        }
     }
 
     private suspend fun relatedDone(row: QueuedTrack): List<WhisperJobEntity> {
@@ -207,17 +212,9 @@ class SubtitleSource(
         }
     }
 
-    private fun overlayFile(row: QueuedTrack): File {
-        val raw = when {
-            row.trackId != null && row.trackId > 0L -> "track:${row.trackId}"
-            !row.remoteUrl.isNullOrBlank() -> "url:${row.remoteUrl}"
-            !row.localUri.isNullOrBlank() -> "path:${row.localUri}"
-            else -> "queue:${row.queueItemId}"
-        }
-        val digest = MessageDigest.getInstance("SHA-256").digest(raw.toByteArray())
-        val key = digest.take(8).joinToString("") { "%02x".format(it) }
-        return File(File(context.filesDir, "subtitles"), "extra-$key.json")
-    }
+    private fun overlayFile(row: QueuedTrack): File =
+        File(File(context.filesDir, "subtitles"),
+            overlayFileName(row.trackId, row.remoteUrl, row.localUri, row.queueItemId)!!)
 
     private suspend fun storedAudioPath(row: QueuedTrack): String? {
         val track = row.trackId?.let { db.tracks().getById(it) }
@@ -362,6 +359,55 @@ class SubtitleSource(
     private companion object {
         const val MAX_BYTES = 512 * 1024
     }
+}
+
+/** 下载管理等只有路径/曲目身份的入口，用同一构造方式合成队列行。 */
+internal fun storedQueueRow(trackId: Long?, localPath: String?, remoteUrl: String?) = QueuedTrack(
+    queueItemId = -1,
+    position = 0,
+    trackId = trackId?.takeIf { it > 0L },
+    source = TrackSource.LOCAL,
+    title = "",
+    artist = null,
+    durationMs = 0,
+    coverUri = null,
+    localUri = localPath,
+    bvid = null,
+    cid = null,
+    page = null,
+    remoteUrl = remoteUrl,
+    referer = null,
+    workno = null,
+    fileKey = null,
+)
+
+/**
+ * 曲目已移除的孤儿条目没有 trackId/remoteUrl，翻译覆盖却仍按旧 track/url 身份命名。
+ * 借按路径（或地址）匹配的听写任务找回身份，询问和删除都不漏掉这些覆盖文件与记录。
+ */
+internal fun recoveredOverlayIdentities(row: QueuedTrack, jobs: List<WhisperJobEntity>): List<QueuedTrack> {
+    val known = overlayFileName(row.trackId, row.remoteUrl, row.localUri, row.queueItemId)
+    return jobs.mapNotNull { job ->
+        val trackId = job.trackId?.takeIf { it > 0L }
+        val url = job.awaitRemoteUrl?.takeIf { it.isNotBlank() }
+        if (trackId == null && url == null) return@mapNotNull null
+        val name = overlayFileName(trackId, url, null, null)
+        if (name == null || name == known) null else storedQueueRow(trackId, null, url)
+    }.distinctBy { overlayFileName(it.trackId, it.remoteUrl, it.localUri, it.queueItemId) }
+}
+
+/** 翻译覆盖文件名；身份优先级与队列行一致，按翻译任务匹配时 localUri 传 null。 */
+internal fun overlayFileName(trackId: Long?, remoteUrl: String?, localUri: String?, queueItemId: Long?): String? {
+    val raw = when {
+        trackId != null && trackId > 0L -> "track:$trackId"
+        !remoteUrl.isNullOrBlank() -> "url:$remoteUrl"
+        !localUri.isNullOrBlank() -> "path:$localUri"
+        queueItemId != null -> "queue:$queueItemId"
+        else -> return null
+    }
+    val digest = MessageDigest.getInstance("SHA-256").digest(raw.toByteArray())
+    val key = digest.take(8).joinToString("") { "%02x".format(it) }
+    return "extra-$key.json"
 }
 
 /**

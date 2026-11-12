@@ -26,7 +26,8 @@ internal fun TrackEntity.localRemoval(filesDir: File): LocalRemoval? {
         return LocalRemoval.DOWNLOAD.takeIf { owned && file.isFile }
     }
     val userFile = path.startsWith("content:", ignoreCase = true) || path.startsWith("file:", ignoreCase = true)
-    return LocalRemoval.ASSOCIATION.takeIf { userFile && source != TrackSource.BILIBILI }
+    // 所有来源一致：B 站关联也只取消关联，保留用户文件和视频字幕缓存。
+    return LocalRemoval.ASSOCIATION.takeIf { userFile }
 }
 
 /** 删 App 下载的文件；关联得到的曲目（本地文件是用户自己的）只取消关联，不动磁盘上的文件。 */

@@ -56,9 +56,14 @@ class FilePreviewViewModel(app: Application) : AndroidViewModel(app) {
         var folder = folders[file.folderId]
         val visited = mutableSetOf<Long>()
         while (folder != null && folder.asmrSourceId.isNullOrBlank() && visited.add(folder.id)) folder = folders[folder.parentId]
+        // RJ 号是字符串标识：祖先目录没有来源编号时，按作品编号找回字符串 workno，保留前导零，不从整数重建。
+        val workno = if (authed) folder?.asmrSourceId
+            ?: file.asmrWorkId.takeIf { it > 0 }?.let { id ->
+                folders.values.firstOrNull { it.asmrWorkId == id && !it.asmrSourceId.isNullOrBlank() }?.asmrSourceId
+            } else null
         return RemotePreview(file.name, file.remoteUrl, file.kind,
             if (authed) DlsiteClient.PLAY_REFERER else AsmrClient.REFERER, authed,
-            workno = if (authed) folder?.asmrSourceId ?: "RJ${file.asmrWorkId}" else null, fileKey = key)
+            workno = workno, fileKey = key)
     }
 
     suspend fun text(url: String): String = try {

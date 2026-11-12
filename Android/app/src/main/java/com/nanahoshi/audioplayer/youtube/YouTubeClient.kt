@@ -152,10 +152,13 @@ class YouTubeClient(
     suspend fun resolveAudio(id: String): YouTubeAudio {
         if (!videoIdPattern.matches(id)) throw YouTubeException("视频编号不正确")
         var lastStatus = ""
+        var parsedResponse = false
         var message = "这个视频没有可用的独立音轨"
         val saved = cookie().orEmpty()
         for (authenticated in listOf(false, true)) {
-            if (authenticated && (saved.isBlank() || lastStatus !in setOf("LOGIN_REQUIRED", "UNPLAYABLE", "AGE_CHECK_REQUIRED"))) break
+            // 没解析到任何响应（网络失败等）或确定需要登录的状态才带登录重试；
+            // 解析成功但缺 status 也是确定响应，不再重试，避免把 Cookie 发给无效请求。
+            if (authenticated && (saved.isBlank() || (parsedResponse && lastStatus !in setOf("LOGIN_REQUIRED", "UNPLAYABLE", "AGE_CHECK_REQUIRED")))) break
             for (spec in clients) {
                 currentCoroutineContext().ensureActive()
                 try {
@@ -167,6 +170,7 @@ class YouTubeClient(
                         }
                     }
                     val root = json(request(apiRequest("player", payload, config, spec, if (authenticated) saved else "")))
+                    parsedResponse = true
                     lastStatus = root.child("playabilityStatus").text("status")
                     message = when (lastStatus) {
                         "LOGIN_REQUIRED", "AGE_CHECK_REQUIRED" -> "这个视频需要登录或验证，请在「我的」更新 YouTube Cookie"
@@ -204,7 +208,7 @@ class YouTubeClient(
                     ))
                 } catch (cancelled: CancellationException) { throw cancelled }
                 catch (error: YouTubeException) { message = error.message ?: "YouTube 读取失败" }
-                catch (_: Exception) { lastStatus = ""; message = "连不上 YouTube" }
+                catch (_: Exception) { message = "连不上 YouTube" }
             }
         }
         throw YouTubeException(message)

@@ -266,9 +266,8 @@ class OnlineSearchViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var searchRevision by mutableStateOf(0L)
         private set
-    private var page = 1
-    private var asmrHasMore = true
-    private var dlsiteHasMore = true
+    private val asmrPaging = SourcePaging()
+    private val dlsitePaging = SourcePaging()
     private var job: Job? = null
 
     init {
@@ -318,8 +317,9 @@ class OnlineSearchViewModel(app: Application) : AndroidViewModel(app) {
 
     fun loadMore() {
         if (loading) return
-        val more = if (usePopular()) asmrHasMore else asmrHasMore || dlsiteHasMore
-        if (!more) return
+        val more = if (usePopular()) asmrPaging.hasMore else asmrPaging.hasMore || dlsitePaging.hasMore
+        // 有错误时即使两来源都读完也允许重试（例如合并阶段的异常），成功后错误自动清除。
+        if (!more && error == null) return
         load(reset = false)
     }
 
@@ -336,7 +336,6 @@ class OnlineSearchViewModel(app: Application) : AndroidViewModel(app) {
         job?.cancel()
         if (reset) {
             searchRevision++
-            page = 1
             works = emptyList()
         }
         val revision = searchRevision
@@ -344,29 +343,30 @@ class OnlineSearchViewModel(app: Application) : AndroidViewModel(app) {
             loading = true
             if (reset) {
                 error = null
-                asmrHasMore = true
-                dlsiteHasMore = true
+                asmrPaging.reset()
+                dlsitePaging.reset()
             }
-            val nextPage = if (reset) 1 else page + 1
+            val asmrNext = asmrPaging.next()
+            val dlsiteNext = dlsitePaging.next()
             val popular = usePopular()
             try {
                 val (asmrResult, dlsiteResult) = coroutineScope {
                     val asmrCall = async {
-                        if (!asmrHasMore && !reset) {
+                        if (!asmrPaging.hasMore && !reset) {
                             null
                         } else {
                             catchPage {
                                 if (popular) {
-                                    graph.asmr.popular(nextPage, subtitleOnly)
+                                    graph.asmr.popular(asmrNext, subtitleOnly)
                                 } else {
                                     val chosen = sort ?: OnlineSort.SALES
-                                    graph.asmr.search(keyword(), chosen.order, chosen.direction, nextPage, subtitleOnly)
+                                    graph.asmr.search(keyword(), chosen.order, chosen.direction, asmrNext, subtitleOnly)
                                 }
                             }
                         }
                     }
                     val dlsiteCall = async {
-                        if (popular || (!dlsiteHasMore && !reset)) {
+                        if (popular || (!dlsitePaging.hasMore && !reset)) {
                             null
                         } else {
                             val chosen = sort ?: OnlineSort.SALES
@@ -377,7 +377,7 @@ class OnlineSearchViewModel(app: Application) : AndroidViewModel(app) {
                                     genreIds = pieces.mapNotNull { if (it.kind == PieceKind.TAG) it.genreId else null },
                                     allAges = allAges,
                                     order = dlsiteOrder(chosen),
-                                    page = nextPage,
+                                    page = dlsiteNext,
                                 )
                             }
                         }
@@ -387,16 +387,6 @@ class OnlineSearchViewModel(app: Application) : AndroidViewModel(app) {
                 if (revision != searchRevision) return@launch
                 val asmrPage = asmrResult?.getOrNull()
                 val dlsitePage = dlsiteResult?.getOrNull()
-                if (asmrPage != null) {
-                    asmrHasMore = asmrPage.works.size >= 20 && (asmrPage.page * 20) < asmrPage.total
-                } else if (asmrResult != null) {
-                    asmrHasMore = false
-                }
-                if (dlsitePage != null) {
-                    dlsiteHasMore = dlsitePage.fetched >= 20 && (nextPage * 20) < dlsitePage.total
-                } else if (dlsiteResult != null) {
-                    dlsiteHasMore = false
-                }
                 val merged = linkedMapOf<String, OnlineHit>()
                 if (!reset) works.forEach { merged[dedupeKey(it.sourceId)] = it }
                 asmrPage?.works?.forEach { item ->
@@ -417,7 +407,14 @@ class OnlineSearchViewModel(app: Application) : AndroidViewModel(app) {
                 val listed = markListed(merged.values.toList())
                 if (revision != searchRevision) return@launch
                 works = listed
-                page = nextPage
+                // 页码只在整页合并提交后前进：抓取或合并任一阶段失败都保留页码和 hasMore，
+                // 重试仍读这一页，不会永久跳过。
+                if (asmrPage != null) {
+                    asmrPaging.succeed(asmrNext, pageHasMore(asmrPage.works.size, asmrPage.page, asmrPage.total))
+                }
+                if (dlsitePage != null) {
+                    dlsitePaging.succeed(dlsiteNext, pageHasMore(dlsitePage.fetched, dlsiteNext, dlsitePage.total))
+                }
                 error = listOfNotNull(
                     asmrResult?.exceptionOrNull()?.let { sourceError("asmr.one", it) },
                     dlsiteResult?.exceptionOrNull()?.let { sourceError("DLsite", it) },
@@ -461,6 +458,30 @@ class OnlineSearchViewModel(app: Application) : AndroidViewModel(app) {
         return if (digits.isNotEmpty() && canonical.all { it.isDigit() }) "RJ$digits" else canonical
     }
 }
+
+/** 每个来源独立记页：只在本来源成功时前进；失败保留页码和 hasMore，重试仍读失败的那一页。 */
+internal class SourcePaging {
+    var lastPage = 0
+        private set
+    var hasMore = true
+        private set
+
+    fun next(): Int = lastPage + 1
+
+    fun succeed(page: Int, hasMore: Boolean) {
+        lastPage = page
+        this.hasMore = hasMore
+    }
+
+    fun reset() {
+        lastPage = 0
+        hasMore = true
+    }
+}
+
+/** 每页 20 条；读满一页且后面还有内容才继续。 */
+internal fun pageHasMore(fetched: Int, page: Int, total: Int): Boolean =
+    fetched >= 20 && page * 20 < total
 
 enum class WorkFileSource {
     PLAY,
@@ -1123,7 +1144,7 @@ private fun WorkSearchScreen(
         snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
             .distinctUntilChanged()
             .collect { index ->
-                if (index >= works.lastIndex - 2) viewModel.loadMore()
+                if (viewModel.error == null && index >= works.lastIndex - 2) viewModel.loadMore()
             }
     }
     CollapsingTop(
@@ -1175,7 +1196,7 @@ private fun WorkSearchScreen(
             works.isEmpty() && viewModel.loading -> SkeletonWorkList(modifier = topInset)
             works.isEmpty() -> Box(topInset.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
                 if (viewModel.error != null) {
-                    ErrorState(viewModel.error!!, viewModel::reload)
+                    ErrorState(viewModel.error!!, viewModel::loadMore)
                 } else {
                     EmptyState(
                         title = "没有找到作品",
@@ -1186,7 +1207,7 @@ private fun WorkSearchScreen(
             }
             else -> LazyColumn(state = listState, modifier = topInset.fillMaxSize()) {
                 if (viewModel.error != null && !viewModel.loading) {
-                    item(key = "error") { ErrorState(viewModel.error!!, viewModel::reload) }
+                    item(key = "error") { ErrorState(viewModel.error!!, viewModel::loadMore) }
                 }
                 items(works, key = { it.sourceId }) { item ->
                     OnlineResultCard(item) {

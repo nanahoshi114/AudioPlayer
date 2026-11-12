@@ -1,5 +1,8 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.data.db.DownloadStatus
+import com.nanahoshi.audioplayer.data.db.TranslationJobEntity
+import com.nanahoshi.audioplayer.playback.overlayFileName
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -77,7 +80,7 @@ class StoredFilesTest {
             cue.writeText("{}")
             File(root, "extra-1.json").writeText("{}")
             val job = ListedJob(2L, "abc", null, null, null, "track.mp3")
-            val files = generatedCueFiles(root)
+            val files = cueFiles(root, overlay = false)
             assertEquals(listOf(cue.name), files.map { it.name })
             val first = remainingGeneratedItems(files, emptySet(), listOf(job)) { file, matched ->
                 StoredItem(
@@ -133,6 +136,87 @@ class StoredFilesTest {
             assertEquals(File(root, "bilibili/BV1xx411c7m2/9.m4s").path, file?.path)
             assertNull(biliAudioFile(root, "../BV1xx411c7m2", 9))
             assertNull(biliAudioFile(root, "BV1xx411c7m2", 0))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun overlayMatchesLatestJobPerKey() {
+        val root = createTempDirectory(prefix = "stored-overlay").toFile()
+        try {
+            val file = File(root, overlayFileName(4L, null, null, null)!!)
+            file.writeText("{}")
+            val older = TranslationJobEntity(1L, "旧标题", 4L, null, null, DownloadStatus.FAILED, "已中止")
+            val newer = TranslationJobEntity(2L, "song.mp3", 4L, null, 7L, DownloadStatus.DONE, null)
+            val items = remainingOverlayItems(listOf(file), emptySet(), listOf(older, newer)) { f, job ->
+                StoredItem(
+                    path = f.absolutePath,
+                    name = generatedSubtitleName(job?.title ?: f.name),
+                    kind = StoredKind.GENERATED,
+                    workTitle = null,
+                    workCode = null,
+                    sourceId = null,
+                    trackId = job?.trackId,
+                    remoteUrl = job?.remoteUrl,
+                    audioPath = null,
+                    queueItemId = job?.queueItemId,
+                )
+            }
+            assertEquals(listOf("song.json"), items.map { it.name })
+            assertEquals(4L, items.single().trackId)
+            assertEquals(7L, items.single().queueItemId)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun orphanOverlayIsStillListed() {
+        val root = createTempDirectory(prefix = "stored-orphan").toFile()
+        try {
+            val file = File(root, "extra-0000000000000000.json")
+            file.writeText("{}")
+            val seenJobs = mutableListOf<TranslationJobEntity?>()
+            val items = remainingOverlayItems(listOf(file), emptySet(), emptyList()) { f, job ->
+                seenJobs += job
+                StoredItem(f.absolutePath, generatedSubtitleName(job?.title ?: f.name),
+                    StoredKind.GENERATED, null, null, null, null, null, null)
+            }
+            assertEquals(listOf<TranslationJobEntity?>(null), seenJobs)
+            assertEquals(listOf("extra-0000000000000000.json"), items.map { it.name })
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun overlayPassSkipsSeenPathsAndDirectories() {
+        val root = createTempDirectory(prefix = "stored-overlay-skip").toFile()
+        try {
+            val file = File(root, "extra-1.json")
+            file.writeText("{}")
+            File(root, "extra-dir.json").mkdirs()
+            val files = cueFiles(root, overlay = true)
+            assertEquals(listOf("extra-1.json"), files.map { it.name })
+            val items = remainingOverlayItems(files, setOf(canonicalPath(file.path)), emptyList()) { f, _ ->
+                StoredItem(f.absolutePath, f.name, StoredKind.GENERATED, null, null, null, null, null, null)
+            }
+            assertTrue(items.isEmpty())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun cueFilesSelectsOnlyExtraJson() {
+        val root = createTempDirectory(prefix = "stored-overlay-files").toFile()
+        try {
+            File(root, "abc.json").writeText("{}")
+            File(root, "extra-1.json").writeText("{}")
+            File(root, "extra-2.JSON").writeText("{}")
+            File(root, "notes.txt").writeText("x")
+            assertEquals(setOf("extra-1.json", "extra-2.JSON"), cueFiles(root, overlay = true).map { it.name }.toSet())
         } finally {
             root.deleteRecursively()
         }

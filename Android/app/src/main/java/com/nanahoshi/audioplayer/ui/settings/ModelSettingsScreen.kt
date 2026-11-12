@@ -48,16 +48,19 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nanahoshi.audioplayer.data.SENSE_VOICE_MODEL
 import com.nanahoshi.audioplayer.data.SenseVoiceModelState
 import com.nanahoshi.audioplayer.data.TranslatePlatform
 import com.nanahoshi.audioplayer.data.WHISPER_MODEL_QWEN
 import com.nanahoshi.audioplayer.data.WHISPER_MODEL_QWEN3
+import com.nanahoshi.audioplayer.data.hasActiveSenseVoiceJob
 import com.nanahoshi.audioplayer.data.isCloudWhisperModel
 import com.nanahoshi.audioplayer.data.isOnDeviceWhisperModel
 import com.nanahoshi.audioplayer.data.whisperModelLabel
 import com.nanahoshi.audioplayer.graph
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -291,7 +294,15 @@ class ModelSettingsViewModel(app: Application) : AndroidViewModel(app) {
 
     fun cancelSenseVoiceDownload() = graph.senseVoice.cancelDownload()
 
-    fun deleteSenseVoice() = graph.senseVoice.deleteModel()
+    fun deleteSenseVoice() {
+        viewModelScope.launch {
+            if (hasActiveSenseVoiceJob(graph.db.whisper().active())) {
+                graph.messages.value = "有听写任务正在使用本机模型，请先中止后再删除"
+            } else {
+                graph.senseVoice.deleteModel()
+            }
+        }
+    }
 
     fun clearWhisper() {
         graph.credentials.clearWhisper(whisperModel)

@@ -176,7 +176,8 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             .associate { it.folderId!! to it.artist.orEmpty() }
     }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5000), emptyMap())
 
-    val busy = MutableStateFlow(false)
+    private val busyCounter = BusyCounter()
+    val busy get() = busyCounter.busy
     val selectedTrackIds = MutableStateFlow<Set<Long>>(emptySet())
     val selectedFolderIds = MutableStateFlow<Set<Long>>(emptySet())
     private val metaRequested = mutableSetOf<Long>()
@@ -250,7 +251,6 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         currentFolderId.value = null
         clearSelection()
         clearWorkSource()
-        busy.value = false
     }
 
     private fun updateWorkLocation(location: WorkFolderLocation) {
@@ -306,7 +306,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             workSources.value = false
         }
         openJob = viewModelScope.launch {
-            if (work) busy.value = true
+            if (work) busyCounter.begin()
             try {
                 graph.library.ensureWorkMeta(folder.id)
                 if (work && graph.library.ensureWorkFiles(folder.id) == WorkFill.EMPTY) {
@@ -320,7 +320,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             } catch (failure: Exception) {
                 graph.messages.value = failure.message ?: "没有找到这个作品的文件"
             } finally {
-                if (generation == openGeneration) busy.value = false
+                if (work) busyCounter.end()
             }
         }
     }
@@ -334,9 +334,8 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         openJob?.cancel()
         sourceCheckJob?.cancel()
         openGeneration += 1
-        val generation = openGeneration
         openJob = viewModelScope.launch {
-            busy.value = true
+            busyCounter.begin()
             try {
                 val fill = graph.library.ensureWorkSource(root.id, source)
                 if (fill == WorkFill.EMPTY) {
@@ -355,7 +354,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
                     failure.message ?: "没有找到这个作品的文件"
                 }
             } finally {
-                if (generation == openGeneration) busy.value = false
+                busyCounter.end()
             }
         }
     }
@@ -811,7 +810,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun launch(block: suspend () -> Unit) {
         viewModelScope.launch {
-            busy.value = true
+            busyCounter.begin()
             try {
                 block()
             } catch (error: BilibiliException) {
@@ -821,9 +820,25 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             } catch (error: Exception) {
                 graph.messages.value = error.message ?: "操作失败"
             } finally {
-                busy.value = false
+                busyCounter.end()
             }
         }
+    }
+}
+
+/** 多个后台操作共用 busy；全部结束才复位，避免互相覆盖。只在主线程调用。 */
+internal class BusyCounter {
+    val busy = MutableStateFlow(false)
+    private var count = 0
+
+    fun begin() {
+        count += 1
+        busy.value = true
+    }
+
+    fun end() {
+        count -= 1
+        if (count == 0) busy.value = false
     }
 }
 

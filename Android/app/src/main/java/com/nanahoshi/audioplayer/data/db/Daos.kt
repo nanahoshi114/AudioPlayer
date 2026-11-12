@@ -324,6 +324,9 @@ interface WhisperDao {
     @Query("SELECT * FROM whisper_jobs WHERE awaitRemoteUrl = :url AND status IN ('QUEUED', 'RUNNING') LIMIT 1")
     suspend fun activeForUrl(url: String): WhisperJobEntity?
 
+    @Query("SELECT * FROM whisper_jobs WHERE status IN ('QUEUED', 'RUNNING')")
+    suspend fun active(): List<WhisperJobEntity>
+
     @Query("SELECT localPath FROM whisper_jobs WHERE status IN ('QUEUED', 'RUNNING') AND localPath IS NOT NULL")
     suspend fun activeLocalPaths(): List<String>
 
@@ -491,6 +494,13 @@ interface TranslationDao {
     @Query("SELECT * FROM translation_jobs WHERE id = :id")
     suspend fun get(id: Long): TranslationJobEntity?
 
+    @Query("SELECT * FROM translation_jobs")
+    suspend fun all(): List<TranslationJobEntity>
+
+    /** 覆盖文件只可能由完成或仍在执行的任务写出；失败历史不参与命名，避免整表加载。 */
+    @Query("SELECT * FROM translation_jobs WHERE status <> 'FAILED'")
+    suspend fun overlayCandidates(): List<TranslationJobEntity>
+
     @Insert
     suspend fun insert(job: TranslationJobEntity): Long
 
@@ -512,14 +522,15 @@ interface TranslationDao {
     @Query("UPDATE translation_jobs SET status = 'FAILED', error = :error WHERE id = :id")
     suspend fun fail(id: Long, error: String)
 
-    @Query("DELETE FROM translation_jobs WHERE trackId = :trackId")
-    suspend fun deleteForTrack(trackId: Long)
+    /** 只删终态记录；进行中的翻译保留，与听写侧「保留进行中的听写」一致。 */
+    @Query("DELETE FROM translation_jobs WHERE status IN ('DONE', 'FAILED') AND trackId = :trackId")
+    suspend fun deleteInactiveForTrack(trackId: Long)
 
-    @Query("DELETE FROM translation_jobs WHERE remoteUrl = :url")
-    suspend fun deleteForUrl(url: String)
+    @Query("DELETE FROM translation_jobs WHERE status IN ('DONE', 'FAILED') AND remoteUrl = :url")
+    suspend fun deleteInactiveForUrl(url: String)
 
-    @Query("DELETE FROM translation_jobs WHERE queueItemId = :queueItemId")
-    suspend fun deleteForQueue(queueItemId: Long)
+    @Query("DELETE FROM translation_jobs WHERE status IN ('DONE', 'FAILED') AND queueItemId = :queueItemId")
+    suspend fun deleteInactiveForQueue(queueItemId: Long)
 }
 
 @Dao

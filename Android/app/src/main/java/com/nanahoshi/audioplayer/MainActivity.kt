@@ -531,6 +531,7 @@ private fun PlayerApp(clipboardImport: ClipboardImportViewModel) {
                         com.nanahoshi.audioplayer.bilibili.BiliCollection.serializer(), entry.arguments?.getString("ref").orEmpty())
                 }.getOrNull()
                 if (ref != null) com.nanahoshi.audioplayer.ui.bilibili.BiliCollectionScreen(initial = ref, onBack = { navController.popBackStack() })
+                else com.nanahoshi.audioplayer.ui.bilibili.BiliCollectionRouteError(onBack = { navController.popBackStack() })
             }
             composable(Routes.Playlists) {
                 PlaylistListScreen(onOpen = { id -> navController.navigate(Routes.playlist(id)) })

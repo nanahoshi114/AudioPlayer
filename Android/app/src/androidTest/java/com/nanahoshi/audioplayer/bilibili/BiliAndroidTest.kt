@@ -160,7 +160,7 @@ class BiliAndroidTest {
             library(db).replaceRemoteQueue(listOf(remote))
             val row=db.queue().snapshot().single();assertNull(row.trackId)
             assertEquals(part.bvid,row.workno);assertEquals("42",row.fileKey)
-            val item=row.toMediaItem()
+            val item=row.toMediaItem(context)
             assertEquals("bilibili",item.localConfiguration!!.uri.scheme)
             assertEquals(part.bvid,item.localConfiguration!!.uri.getQueryParameter("bvid"))
             assertEquals("42",item.localConfiguration!!.uri.getQueryParameter("cid"))

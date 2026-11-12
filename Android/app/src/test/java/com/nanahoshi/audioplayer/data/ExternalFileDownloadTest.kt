@@ -92,4 +92,14 @@ class ExternalFileDownloadTest {
         val failure = runCatching { copyExternalBytes(ByteArrayInputStream(byteArrayOf(1)), ByteArrayOutputStream(), 10) { _, _ -> } }
         assertTrue(failure.isFailure)
     }
+
+    @Test fun missingWorkAuthorizationFailsWithSpecificMessageBeforeAnyRequest() = runBlocking {
+        var calls = 0
+        val client = OkHttpClient.Builder().addInterceptor { chain -> calls++; response(chain) }.build()
+        val downloader = ExternalFileDownloader(client) { _, _ -> error("must not sign") }
+        val failure = runCatching { downloader.download(preview(true).copy(workno = null), temp.newFile()) { _, _ -> } }.exceptionOrNull()
+        assertTrue(failure is ExternalFileException)
+        assertEquals("请重新打开作品以获取文件授权", failure?.message)
+        assertEquals(0, calls)
+    }
 }

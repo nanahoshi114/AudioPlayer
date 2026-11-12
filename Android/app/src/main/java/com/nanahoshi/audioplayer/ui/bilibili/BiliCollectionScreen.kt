@@ -9,6 +9,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -19,6 +20,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nanahoshi.audioplayer.bilibili.BiliCollection
 import com.nanahoshi.audioplayer.ui.CoverImage
 import com.nanahoshi.audioplayer.ui.components.AppTopBar
+import com.nanahoshi.audioplayer.ui.components.EmptyState
 import com.nanahoshi.audioplayer.ui.formatDuration
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
@@ -127,10 +129,7 @@ fun BiliCollectionScreen(
         }
     }
     model.pending?.let { prepared ->
-        AlertDialog(onDismissRequest = model::cancelPreparation, title = { Text("部分视频读取失败") },
-            text = { LazyColumn { items(prepared.failed) { Text(it, Modifier.padding(vertical = 4.dp)) } } },
-            confirmButton = { TextButton(onClick = model::continuePending, enabled = prepared.details.isNotEmpty()) { Text("继续处理其余 ${prepared.details.size} 个视频") } },
-            dismissButton = { Row { TextButton(onClick = model::retryPending) { Text("重试") }; TextButton(onClick = model::cancelPreparation) { Text("取消") } } })
+        CollectionFailureDialog(prepared, model::continuePending, model::retryPending, model::cancelPreparation)
     }
     if (model.singleParts.isNotEmpty()) AlertDialog(onDismissRequest = model::dismissParts, title = { Text("选择分 P") },
         text = { LazyColumn { items(model.singleParts, key = { it.cid }) { part -> TextButton(onClick = { model.playPart(part) }) { Text("P${part.page} · ${part.title}") } } } },
@@ -151,6 +150,39 @@ fun BiliCollectionScreen(
         text = { Text("仅移除在线列表收藏和本地目录缓存；已加入音频库的曲目、下载文件及当前队列会保留。") },
         confirmButton = { TextButton(onClick = { removing = false; model.unbookmark() }) { Text("取消收藏") } },
         dismissButton = { TextButton(onClick = { removing = false }) { Text("保留收藏") } })
+}
+
+/** 路由参数解码失败时的兜底页：保留顶栏与返回，不再白屏。 */
+@Composable
+internal fun BiliCollectionRouteError(onBack: () -> Unit) {
+    Column(Modifier.fillMaxSize()) {
+        AppTopBar("B 站合集", onBack = onBack)
+        EmptyState(
+            title = "无法打开这个合集",
+            message = "链接参数无效，请返回后重试",
+            icon = Icons.Outlined.ErrorOutline,
+            actionLabel = "返回",
+            onAction = onBack,
+        )
+    }
+}
+
+@Composable
+internal fun CollectionFailureDialog(
+    prepared: CollectionPreparation,
+    onContinue: () -> Unit,
+    onRetry: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    AlertDialog(onDismissRequest = onCancel,
+        title = { Text(if (prepared.details.isEmpty()) "视频读取失败" else "部分视频读取失败") },
+        text = { LazyColumn { items(prepared.failed) { Text(it, Modifier.padding(vertical = 4.dp)) } } },
+        confirmButton = {
+            if (prepared.details.isNotEmpty()) {
+                TextButton(onClick = onContinue) { Text("继续处理其余 ${prepared.details.size} 个视频") }
+            }
+        },
+        dismissButton = { Row { TextButton(onClick = onRetry) { Text("重试") }; TextButton(onClick = onCancel) { Text("取消") } } })
 }
 
 @Composable

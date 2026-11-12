@@ -87,7 +87,7 @@ internal class BiliLibraryStore(
         val uri = db.tracks().findByBvid(part.bvid, part.cid)?.localUri ?: return false
         return runCatching {
             when {
-                uri.startsWith("content:") -> context.contentResolver.openAssetFileDescriptor(Uri.parse(uri), "r")?.use { true } == true
+                uri.startsWith("content:") -> LocalAudio.contentUriReadable(context, Uri.parse(uri))
                 else -> File(if (uri.startsWith("file:")) Uri.parse(uri).path.orEmpty() else uri).let { it.isFile && it.length() > 0 }
             }
         }.getOrDefault(false)

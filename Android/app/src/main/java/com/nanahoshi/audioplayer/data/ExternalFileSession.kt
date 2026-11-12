@@ -97,8 +97,8 @@ internal class ExternalFileDownloader(
         for (attempt in 0 until if (preview.authed) 2 else 1) {
             currentCoroutineContext().ensureActive()
             val signed = if (preview.authed) {
-                val work = preview.workno ?: error("请重新打开作品以获取文件授权")
-                val key = preview.fileKey ?: error("请重新打开作品以获取文件授权")
+                val work = preview.workno ?: throw ExternalFileException("请重新打开作品以获取文件授权")
+                val key = preview.fileKey ?: throw ExternalFileException("请重新打开作品以获取文件授权")
                 sign(work, key)
             } else null
             var url = (signed?.url ?: preview.url.toHttps()).toHttpUrl()

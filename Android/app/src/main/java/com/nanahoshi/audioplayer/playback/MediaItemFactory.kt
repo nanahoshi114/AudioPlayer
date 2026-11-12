@@ -1,27 +1,39 @@
 package com.nanahoshi.audioplayer.playback
 
+import android.content.Context
 import android.net.Uri
 import android.os.Bundle
 import androidx.core.net.toUri
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.MimeTypes
+import com.nanahoshi.audioplayer.data.LocalAudio
 import com.nanahoshi.audioplayer.data.TrackSource
 import com.nanahoshi.audioplayer.data.db.QueuedTrack
 import com.nanahoshi.audioplayer.data.toHttps
 import com.nanahoshi.audioplayer.data.db.TrackEntity
 import com.nanahoshi.audioplayer.dlsite.RemotePlayable
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 
-fun TrackEntity.toPlayableItem(queueItemId: Long): MediaItem {
-    val cached = if (source == TrackSource.BILIBILI) localUri?.let { local ->
-        when {
-            local.startsWith("/") && File(local).let { it.isFile && it.length() > 0 } -> Uri.fromFile(File(local))
-            local.startsWith("content:") -> local.toUri()
-            local.startsWith("file:") && File(local.toUri().path.orEmpty()).isFile -> local.toUri()
-            else -> null
+/** 阶段一：唯一的 binder 探测（content: 可读性），须在 queueMutex 外执行；/ 与 file: 为磁盘 stat。 */
+suspend fun TrackEntity.biliLocalCache(context: Context): Uri? = withContext(Dispatchers.IO) {
+    if (source != TrackSource.BILIBILI) return@withContext null
+    val local = localUri ?: return@withContext null
+    when {
+        local.startsWith("/") -> File(local).takeIf { it.isFile && it.length() > 0 }?.let(Uri::fromFile)
+        // 失效的 content: 关联不能直接交给播放器，否则失去在线回退；校验与 hasLocalPart 一致。
+        local.startsWith("content:") -> local.toUri().takeIf { uri -> LocalAudio.contentUriReadable(context, uri) }
+        local.startsWith("file:") -> local.toUri().takeIf { uri ->
+            File(uri.path.orEmpty()).let { it.isFile && it.length() > 0 }
         }
-    } else null
+        else -> null
+    }
+}
+
+/** 阶段二：纯组装，无 Context、无 IPC；cached 来自 biliLocalCache，须原样带入 MediaItem。 */
+fun TrackEntity.toPlayableItem(queueItemId: Long, cached: Uri?): MediaItem {
     val uri = when (source) {
         // 始终保留视频身份，数据源打开时决定读本地还是在线；删缓存后队列也能恢复在线。
         TrackSource.YOUTUBE -> Uri.Builder().scheme("youtube").authority("audio").appendQueryParameter("videoId", youtubeVideoId).build()
@@ -46,10 +58,16 @@ fun TrackEntity.toPlayableItem(queueItemId: Long): MediaItem {
         .build()
 }
 
+suspend fun TrackEntity.toPlayableItem(queueItemId: Long, context: Context): MediaItem =
+    toPlayableItem(queueItemId, biliLocalCache(context))
+
 const val EXTRA_TRACK_ID = "trackId"
 
-fun QueuedTrack.toMediaItem(): MediaItem {
-    if (trackId != null && remoteUrl.isNullOrBlank()) return toTrack().toPlayableItem(queueItemId)
+suspend fun QueuedTrack.biliLocalCache(context: Context): Uri? =
+    if (trackId != null && remoteUrl.isNullOrBlank()) toTrack().biliLocalCache(context) else null
+
+fun QueuedTrack.toMediaItem(cached: Uri?): MediaItem {
+    if (trackId != null && remoteUrl.isNullOrBlank()) return toTrack().toPlayableItem(queueItemId, cached)
     val url = remoteUrl.orEmpty()
     if (url.startsWith("/") && File(url).isFile) {
         return localFileItem(queueItemId, title, artist, coverUri, url)
@@ -66,6 +84,8 @@ fun QueuedTrack.toMediaItem(): MediaItem {
         fileKey = fileKey,
     ).toMediaItem(queueItemId)
 }
+
+suspend fun QueuedTrack.toMediaItem(context: Context): MediaItem = toMediaItem(biliLocalCache(context))
 
 fun RemotePlayable.toMediaItem(queueItemId: Long): MediaItem {
     if (remoteUrl.startsWith("/") && File(remoteUrl).isFile) {

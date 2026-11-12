@@ -7,8 +7,10 @@ import com.nanahoshi.audioplayer.data.db.*
 import com.nanahoshi.audioplayer.dlsite.RemotePlayable
 import com.nanahoshi.audioplayer.playback.QueuePlayable
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.builtins.ListSerializer
 import kotlin.coroutines.coroutineContext
 
@@ -95,17 +97,17 @@ class BiliCollectionRepository(
         }
     }
 
-    private suspend fun stored(part: BiliPart): String? {
+    private suspend fun stored(part: BiliPart): String? = withContext(Dispatchers.IO) {
         val track = db.tracks().findByBvid(part.bvid, part.cid)
         val uri = track?.localUri
         if (!uri.isNullOrBlank()) {
             val readable = runCatching {
-                if (uri.startsWith("content:")) context.contentResolver.openAssetFileDescriptor(android.net.Uri.parse(uri), "r")?.use { true } == true
+                if (uri.startsWith("content:")) LocalAudio.contentUriReadable(context, android.net.Uri.parse(uri))
                 else java.io.File(if (uri.startsWith("file:")) android.net.Uri.parse(uri).path.orEmpty() else uri).let { it.isFile && it.length() > 0 }
             }.getOrDefault(false)
-            if (readable) return uri
+            if (readable) return@withContext uri
         }
-        return readyBiliAudio(context.filesDir, part.bvid, part.cid)?.absolutePath
+        readyBiliAudio(context.filesDir, part.bvid, part.cid)?.absolutePath
     }
 
     suspend fun playable(part: BiliPart): QueuePlayable {

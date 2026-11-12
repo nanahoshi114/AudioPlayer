@@ -10,6 +10,11 @@ import java.io.File
 object LocalAudio {
     val extensions = setOf("mp3", "flac", "m4a", "wav", "aac", "ogg", "opus", "wma", "alac")
 
+    /** content: 关联是否仍可读取；失效或无权限时返回 false，供播放回退和下载判断共用。 */
+    fun contentUriReadable(context: Context, uri: Uri): Boolean =
+        runCatching { context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { true } == true }
+            .getOrDefault(false)
+
     fun displayName(context: Context, uri: Uri): String {
         context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
             ?.use { cursor ->

@@ -96,7 +96,6 @@ import com.nanahoshi.audioplayer.ui.components.SourceBadge
 import com.nanahoshi.audioplayer.ui.theme.LocalReduceMotion
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nanahoshi.audioplayer.asmr.WorkFacts

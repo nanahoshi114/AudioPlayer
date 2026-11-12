@@ -6,6 +6,7 @@ import com.nanahoshi.audioplayer.data.TrackSource
 import com.nanahoshi.audioplayer.data.db.QueuedTrack
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
@@ -24,19 +25,32 @@ internal class PlayingBiliCollection(
     load: suspend (String) -> BiliCollection?,
 ) {
     private val current = selection.distinctUntilChanged()
-        .stateIn(scope, SharingStarted.Eagerly, PlayingBiliVideo(null, -1, 0))
-    val link: StateFlow<PlayingBiliCollectionLink?> = combine(current, cache.values) { video, values ->
-        video.bvid?.let { bvid -> values[bvid]?.let { PlayingBiliCollectionLink(bvid, it) } }
-    }.stateIn(scope, SharingStarted.Eagerly, null)
+        .stateIn(scope, SharingStarted.WhileSubscribed(5_000), PlayingBiliVideo(null, -1, 0))
+    private val linkState = MutableStateFlow<PlayingBiliCollectionLink?>(null)
+    val link: StateFlow<PlayingBiliCollectionLink?> = linkState.asStateFlow()
 
     init {
         scope.launch {
-            current.collectLatest { video ->
-                val bvid = video.bvid ?: return@collectLatest
-                if (!cache.values.value.containsKey(bvid)) {
-                    try { cache.resolve(bvid, load) }
-                    catch (cancelled: CancellationException) { throw cancelled }
-                    catch (_: Exception) { /* 附加信息不可用时不影响音频、队列或字幕。 */ }
+            // 只有播放页订阅 link 时才发布并补查；Activity 级实例无人订阅，不发请求。
+            // subscriptionCount 只在 MutableStateFlow 上公开，故内部持有 linkState。
+            linkState.subscriptionCount.map { it > 0 }.distinctUntilChanged().collectLatest { active ->
+                if (!active) return@collectLatest
+                // coroutineScope 把 combine 收集器绑成本次订阅的子协程，随订阅结束一起取消；
+                // 直接 launch 会逃逸到外层 scope，每次进出播放页泄漏一个常驻收集器，并让 current 永远保持订阅。
+                coroutineScope {
+                    launch {
+                        combine(current, cache.values) { video, values ->
+                            video.bvid?.let { bvid -> values[bvid]?.let { PlayingBiliCollectionLink(bvid, it) } }
+                        }.collect { linkState.value = it }
+                    }
+                    current.collectLatest { video ->
+                        val bvid = video.bvid ?: return@collectLatest
+                        if (!cache.values.value.containsKey(bvid)) {
+                            try { cache.resolve(bvid, load) }
+                            catch (cancelled: CancellationException) { throw cancelled }
+                            catch (_: Exception) { /* 附加信息不可用时不影响音频、队列或字幕。 */ }
+                        }
+                    }
                 }
             }
         }

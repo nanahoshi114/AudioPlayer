@@ -2,12 +2,15 @@ package com.nanahoshi.audioplayer.playback
 
 import android.content.ComponentName
 import android.content.Context
+import android.net.Uri
 import android.os.SystemClock
 import androidx.core.content.ContextCompat
+import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.nanahoshi.audioplayer.data.LibraryRepository
+import com.nanahoshi.audioplayer.data.db.QueuedTrack
 import com.nanahoshi.audioplayer.data.db.TrackEntity
 import com.nanahoshi.audioplayer.dlsite.RemotePlayable
 import kotlinx.coroutines.CompletableDeferred
@@ -40,6 +43,7 @@ class PlayerClient(
     private val library: LibraryRepository,
     private val onRemovalRejected: (String) -> Unit = {},
 ) {
+    private val appContext = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val ready = CompletableDeferred<MediaController>()
     private val queueMutex = Mutex()
@@ -108,22 +112,26 @@ class PlayerClient(
     }
 
     fun playTrack(track: TrackEntity) = scope.launch {
+        val probed = probeTracks(listOf(track))
+        var fallbackId: Long? = null
         queueMutex.withLock {
             val existing = library.firstQueueItemId(track.id)
             if (existing != null) {
-                playQueueItemLocked(existing)
+                if (!tryPlayFromPlayer(existing)) fallbackId = existing
             } else if (track.id > 0L) {
-                appendLocked(listOf(track), startPlaying = true)
+                appendLocked(probed, startPlaying = true)
             }
         }
+        fallbackId?.let { playQueueItemFallback(it) }
     }
 
     fun playQueueItem(queueItemId: Long) = scope.launch {
-        queueMutex.withLock { playQueueItemLocked(queueItemId) }
+        val found = queueMutex.withLock { tryPlayFromPlayer(queueItemId) }
+        if (!found) playQueueItemFallback(queueItemId)
     }
 
-    /** 播放器与库不一致时按库快照重建，避免点了队列项没有任何反应。 */
-    private suspend fun playQueueItemLocked(queueItemId: Long) {
+    /** 播放器优先尝试；调用方持有 queueMutex。 */
+    private suspend fun tryPlayFromPlayer(queueItemId: Long): Boolean {
         var found = false
         withController {
             val index = indexOfQueueItem(queueItemId)
@@ -133,39 +141,36 @@ class PlayerClient(
                 found = true
             }
         }
-        if (found) return
-        val rows = library.queueSnapshot()
-        val index = rows.indexOfFirst { it.queueItemId == queueItemId }
-        if (index < 0) return
-        val items = rows.map { it.toMediaItem() }
-        withController {
-            setMediaItems(items, index, 0)
-            prepare()
-            play()
-        }
+        return found
     }
 
     fun playTracks(tracks: List<TrackEntity>) = scope.launch {
         if (tracks.isEmpty()) return@launch
+        val probed = probeTracks(tracks)
+        var fallbackId: Long? = null
         queueMutex.withLock {
             val first = tracks.first()
             val existing = library.firstQueueItemId(first.id)
             if (existing == null) {
-                appendLocked(listOf(first), startPlaying = true)
+                appendLocked(probed.take(1), startPlaying = true)
             } else {
-                playQueueItemLocked(existing)
+                if (!tryPlayFromPlayer(existing)) fallbackId = existing
             }
-            val missing = tracks.drop(1).filter { library.firstQueueItemId(it.id) == null }
+            // missing 在 first 处理之后判定，保持原有去重行为。
+            val missing = probed.drop(1).filter { library.firstQueueItemId(it.first.id) == null }
             if (missing.isNotEmpty()) appendLocked(missing, startPlaying = false)
         }
+        fallbackId?.let { playQueueItemFallback(it) }
     }
 
     fun append(tracks: List<TrackEntity>) = scope.launch {
-        queueMutex.withLock { appendLocked(tracks, startPlaying = false) }
+        val probed = probeTracks(tracks)
+        queueMutex.withLock { appendLocked(probed, startPlaying = false) }
     }
 
     fun playNext(tracks: List<TrackEntity>) = scope.launch {
         if (tracks.isEmpty()) return@launch
+        val probed = probeTracks(tracks)
         queueMutex.withLock {
             val anchor = if (_state.value.hasMedia && _state.value.queueItemId > 0) {
                 _state.value.queueItemId
@@ -173,7 +178,7 @@ class PlayerClient(
                 null
             }
             val (index, ids) = library.insertQueueAfter(anchor, tracks.map { it.id })
-            val items = ids.zip(tracks).map { (queueId, track) -> track.toPlayableItem(queueId) }
+            val items = assemble(ids, probed)
             withController {
                 val wasEmpty = mediaItemCount == 0
                 addMediaItems(index.coerceAtMost(mediaItemCount), items)
@@ -192,12 +197,15 @@ class PlayerClient(
 
     private fun enqueueItems(items: List<QueuePlayable>, replace: Boolean) = scope.launch {
         if (items.isEmpty()) return@launch
+        val caches = withContext(Dispatchers.IO) { items.map { it.biliLocalCache(appContext) } }
         var committed = false
         try {
             queueMutex.withLock {
                 val ids = library.writeMixedQueue(items, replace)
                 committed = true
-                val media = ids.zip(items).map { (id, item) -> item.mediaItem(id) }
+                val media = ids.zip(items.zip(caches)).map { (id, itemAndCache) ->
+                    itemAndCache.first.mediaItem(id, itemAndCache.second)
+                }
                 withController {
                     if (replace) {
                         setMediaItems(media, 0, 0)
@@ -214,17 +222,13 @@ class PlayerClient(
         catch (_: Exception) {
             // 库已提交但播放器没跟上：按库里的队列重建，避免队列页和播放器长期不一致。
             val recovered = if (!committed) false else try {
-                queueMutex.withLock {
-                    if (replace) {
-                        val rows = library.queueSnapshot()
-                        val media = rows.map { it.toMediaItem() }
-                        withController {
-                            setMediaItems(media, 0, 0)
-                            if (media.isNotEmpty()) { prepare(); play() }
-                        }
-                    } else {
-                        rebuildPlayerFromQueue()
+                if (replace) {
+                    withRevalidatedQueue { media, _ ->
+                        setMediaItems(media, 0, 0)
+                        if (media.isNotEmpty()) { prepare(); play() }
                     }
+                } else {
+                    rebuildPlayerFromQueue()
                 }
                 true
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
@@ -239,7 +243,7 @@ class PlayerClient(
     fun replaceAndPlayRemote(items: List<RemotePlayable>, startIndex: Int = 0) = scope.launch {
         queueMutex.withLock {
             val ids = library.replaceRemoteQueue(items)
-            val media = ids.zip(items).map { (queueId, item) -> item.toMediaItem(queueId) }
+            val media = withContext(Dispatchers.IO) { ids.zip(items).map { (queueId, item) -> item.toMediaItem(queueId) } }
             val index = if (media.isEmpty()) 0 else startIndex.coerceIn(0, media.lastIndex)
             withController {
                 if (media.isEmpty()) {
@@ -255,9 +259,10 @@ class PlayerClient(
     }
 
     fun replaceAndPlay(tracks: List<TrackEntity>, startIndex: Int = 0) = scope.launch {
+        val probed = probeTracks(tracks)
         queueMutex.withLock {
             val ids = library.replaceQueue(tracks.map { it.id })
-            val items = ids.zip(tracks).map { (queueId, track) -> track.toPlayableItem(queueId) }
+            val items = assemble(ids, probed)
             val index = if (items.isEmpty()) 0 else startIndex.coerceIn(0, items.lastIndex)
             withController {
                 if (items.isEmpty()) {
@@ -298,11 +303,12 @@ class PlayerClient(
 
     fun deleteTrack(trackId: Long) = scope.launch {
         try {
-            queueMutex.withLock {
+            val affected = queueMutex.withLock {
                 val affected = library.queueSnapshot().any { it.trackId == trackId }
                 library.deleteTrack(trackId)
-                if (affected) rebuildPlayerFromQueue()
+                affected
             }
+            if (affected) rebuildPlayerFromQueue()
         } catch (error: com.nanahoshi.audioplayer.data.LibraryRemovalRejected) {
             onRemovalRejected(error.message.orEmpty())
         }
@@ -311,35 +317,71 @@ class PlayerClient(
     fun removeFromLibrary(trackIds: List<Long>, folderIds: List<Long>) = scope.launch {
         if (trackIds.isEmpty() && folderIds.isEmpty()) return@launch
         try {
-            queueMutex.withLock {
+            val affected = queueMutex.withLock {
                 val doomed = library.affectedTrackIds(trackIds, folderIds)
                 val affected = library.queueSnapshot().any { it.trackId in doomed }
                 library.deleteItems(trackIds, folderIds)
-                if (affected) rebuildPlayerFromQueue()
+                affected
             }
+            if (affected) rebuildPlayerFromQueue()
         } catch (error: com.nanahoshi.audioplayer.data.LibraryRemovalRejected) {
             onRemovalRejected(error.message.orEmpty())
         }
     }
 
 
-    private suspend fun rebuildPlayerFromQueue() {
+    /** 锁外探测（唯一 binder IPC）；pair 保持曲目↔缓存对齐，供子集切片。 */
+    private suspend fun probeTracks(tracks: List<TrackEntity>): List<Pair<TrackEntity, Uri?>> =
+        withContext(Dispatchers.IO) { tracks.map { it to it.biliLocalCache(appContext) } }
+
+    /** 锁内纯组装，无 IPC。 */
+    private fun assemble(ids: List<Long>, probed: List<Pair<TrackEntity, Uri?>>): List<MediaItem> =
+        ids.zip(probed).map { (id, pair) -> pair.first.toPlayableItem(id, pair.second) }
+
+    /** 锁外快照+探测，锁内重读比对（全字段相等，连 localUri 更新与改序也捕获）后应用。 */
+    private suspend fun withRevalidatedQueue(apply: MediaController.(List<MediaItem>, List<QueuedTrack>) -> Unit) {
         val rows = library.queueSnapshot()
-        val items = rows.map { it.toMediaItem() }
-        withController {
-            val currentId = currentMediaItem?.mediaId
-            val position = currentPosition
-            val index = rows.indexOfFirst { it.queueItemId.toString() == currentId }
-            val keep = index >= 0
-            setMediaItems(items, if (keep) index else 0, if (keep) position else 0L)
-            if (items.isNotEmpty()) prepare() else pause()
+        val caches = withContext(Dispatchers.IO) { rows.map { it.biliLocalCache(appContext) } }
+        queueMutex.withLock {
+            val fresh = library.queueSnapshot()
+            val items = if (fresh == rows) {
+                fresh.zip(caches).map { (row, cached) -> row.toMediaItem(cached) }
+            } else {
+                withContext(Dispatchers.IO) { fresh.map { it.toMediaItem(appContext) } }
+            }
+            withController { apply(items, fresh) }
         }
     }
 
-    private suspend fun appendLocked(tracks: List<TrackEntity>, startPlaying: Boolean) {
-        if (tracks.isEmpty()) return
-        val ids = library.appendQueue(tracks.map { it.id })
-        val items = ids.zip(tracks).map { (queueId, track) -> track.toPlayableItem(queueId) }
+    private suspend fun rebuildPlayerFromQueue() = withRevalidatedQueue { items, rows ->
+        val currentId = currentMediaItem?.mediaId
+        val position = currentPosition
+        val index = rows.indexOfFirst { it.queueItemId.toString() == currentId }
+        val keep = index >= 0
+        setMediaItems(items, if (keep) index else 0, if (keep) position else 0L)
+        if (items.isNotEmpty()) prepare() else pause()
+    }
+
+    /** 播放器与库不一致时按库快照重建，避免点了队列项没有任何反应。 */
+    private suspend fun playQueueItemFallback(queueItemId: Long) = withRevalidatedQueue { items, rows ->
+        val playerIndex = indexOfQueueItem(queueItemId)
+        if (playerIndex >= 0) {
+            seekTo(playerIndex, 0)
+            play()
+        } else {
+            val index = rows.indexOfFirst { it.queueItemId == queueItemId }
+            if (index >= 0) {
+                setMediaItems(items, index, 0)
+                prepare()
+                play()
+            }
+        }
+    }
+
+    private suspend fun appendLocked(probed: List<Pair<TrackEntity, Uri?>>, startPlaying: Boolean) {
+        if (probed.isEmpty()) return
+        val ids = library.appendQueue(probed.map { it.first.id })
+        val items = assemble(ids, probed)
         withController {
             val wasEmpty = mediaItemCount == 0
             val startIndex = mediaItemCount
@@ -358,6 +400,9 @@ class PlayerClient(
         val controller = ready.await()
         withContext(Dispatchers.Main.immediate) { controller.block() }
     }
+
+    /** 服务恢复与队列操作共用同一把锁：恢复应用不会覆盖抢先发生的用户队列操作。 */
+    internal suspend fun <T> withQueueLock(block: suspend () -> T): T = queueMutex.withLock { block() }
 
     private fun MediaController.indexOfQueueItem(queueItemId: Long): Int {
         val key = queueItemId.toString()

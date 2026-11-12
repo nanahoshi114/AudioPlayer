@@ -39,7 +39,7 @@ class WhisperClient(
         ticket: InflightCalls.Ticket,
         credentialModel: String? = null,
     ): List<WhisperCue> {
-        val model = qwen3AsrModelId(listedModelIds(base, ticket, credentialModel)) ?: QWEN3_ASR_MODEL
+        val model = resolveQwen3Model(listedModelIds(base, ticket, credentialModel))
         val body = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart("file", uploadName(file), file.asRequestBody(AUDIO.toMediaType()))

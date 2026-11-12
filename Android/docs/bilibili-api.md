@@ -20,7 +20,7 @@
 
 ## 请求与分页
 
-请求复用已有 B 站登录、匿名 buvid／ticket 和 WBI 签名，不增加登录方式或外部搜索服务。搜索解析使用 Kotlin 序列化，不依赖 Android 的 `org.json`。标题去除搜索高亮 HTML 标签，封面统一为 HTTPS，时长转为毫秒。
+请求复用已有 B 站登录、匿名 buvid／ticket 和 WBI 签名，不增加登录方式或外部搜索服务；过期 ticket 不随请求发送，请求前会尽力补取。搜索解析使用 Kotlin 序列化，不依赖 Android 的 `org.json`。标题去除搜索高亮 HTML 标签，封面统一为 HTTPS，时长转为毫秒。
 
 - `GET https://api.bilibili.com/x/web-interface/wbi/search/type`：`search_type=video` 或 `bili_user`、`keyword`、`page`、`page_size=20`。视频排序为 `BiliVideoOrder`：`totalrank`（默认）、`click`、`pubdate`、`dm`、`stow`、`scores`；时长为 `BiliVideoDuration`：`duration=0`（默认全部）、`1`（10 分钟以下）、`2`（10–30 分钟）、`3`（30–60 分钟）、`4`（60 分钟以上），边界由 B 站判断。用户搜索固定 `order=0`，不传视频时长。两个新增参数都有默认值，原调用保持兼容。
 - `GET https://api.bilibili.com/x/space/wbi/arc/search`：`mid`、`pn`、`ps=30`、`order=pubdate`，从 `data.list.vlist` 读取投稿，按 `data.page.count` 判断后续页。
@@ -37,7 +37,7 @@
 
 扫码登录后 Cookie 与 refresh token 存入加密偏好，约每 20 小时通过 `x/passport-login/web/cookie/info` 判断是否需要续期；需要时依次请求 `correspond/1/`、`cookie/refresh` 与 `confirm/refresh`，保存新会话后确认旧 token 作废。确认失败只记日志，会话已保存不算续期失败。
 
-续期任一步失败（缺少 csrf、解析不出 refreshCsrf、服务端拒绝、拿不到新 csrf）都不标记「已检查」，改为记录失败时间。失败后 10 分钟内不再尝试，避免离线或凭证失效时每次 B 站请求都打网络；读取 `cookie/info` 异常同样进入这段冷却。冷却结束或距上次成功检查超过 20 小时后再次尝试。「我的」页在可续期且处于失败状态时显示「自动续期失败，请重新登录」；续期成功、粘贴新凭证、重新扫码或退出登录都会清除失败标记。日志只输出响应码与异常类名，不记录 Cookie、token 或接口正文。
+续期任一步失败（缺少 csrf、解析不出 refreshCsrf、服务端拒绝、拿不到新 csrf）都不标记「已检查」，改为记录失败时间。失败后 10 分钟内不再尝试，避免离线或凭证失效时每次 B 站请求都打网络；读取 `cookie/info` 异常同样进入这段冷却。冷却结束或距上次成功检查超过 20 小时后再次尝试。「我的」页在可续期且处于失败状态时显示「自动续期失败，请重新登录」；续期成功、粘贴新凭证、重新扫码或退出登录都会清除失败标记；重新扫码或保存新凭证还会重置检查时间，尽快重新判断续期需求。日志只输出响应码与异常类名，不记录 Cookie、token 或接口正文。
 
 ## 视频和分 P 操作
 

@@ -22,7 +22,7 @@
 
 完全在手机上运行的离线听写，不需要地址和口令，也不会把音频发到任何服务器。
 
-- **模型下载**：第一次使用前，在「设置 → 听写和翻译」选 `SenseVoiceSmall` 后点「下载模型」。模型从 GitHub Releases（`k2-fsa/sherpa-onnx`）直接下载到手机，压缩包约 160MB，解压后占用约 230MB，保存在 `filesDir/sense-voice/`。下载时显示进度，可以取消；失败可以重试。设置里也可以删除模型释放空间。
+- **模型下载**：第一次使用前，在「设置 → 听写和翻译」选 `SenseVoiceSmall` 后点「下载模型」。模型从 GitHub Releases（`k2-fsa/sherpa-onnx`）直接下载到手机，压缩包约 160MB，解压后占用约 230MB，保存在 `filesDir/sense-voice/`。下载时显示进度，可以取消；失败可以重试。设置里也可以删除模型释放空间；有排队或进行中的听写任务使用本机模型时不能删除，会提示先中止任务。
 - **运行方式**：用 sherpa-onnx 在本机 CPU 上推理（vendored 的 `com.k2fsa.sherpa.onnx` Kotlin API 和 `arm64-v8a` 动态库，只带 arm64）。
 - **长音频分段**：SenseVoice 单段上限约 30 秒，模型不会自己切开。App 用 Silero VAD（`silero_vad.onnx`，随 APK 打包在 assets 里）按静音把音频切成不超过 28 秒的语音段，逐段识别，再按每段 token 时间戳加回整首音轨的时间轴。
 - **识别语言**：日语。

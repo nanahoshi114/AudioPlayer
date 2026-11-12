@@ -20,16 +20,22 @@ import java.util.UUID
 @RunWith(AndroidJUnit4::class)
 class LocalRemovalAndroidTest {
     @Test
-    fun unlinksUserFilesAndOnlyDeletesSubtitlesWhenRequestedForDownloads() = runBlocking {
+    fun unlinksUserFilesAndOnlyDeletesSubtitlesWhenRequestedForDownloads(): Unit = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
         val directory = File(context.filesDir, "local-removal-test/${UUID.randomUUID()}").apply { mkdirs() }
         val cues = mutableListOf<File>()
         try {
             val subtitles = SubtitleSource(context, db, BilibiliClient(CredentialStore(context)), AsmrClient())
-            suspend fun fixture(name: String, path: String): Pair<TrackEntity, File> {
-                val track = TrackEntity(source = TrackSource.ASMR, title = name, artist = null,
-                    durationMs = 1000, coverUri = null, localUri = path, bvid = null, cid = null,
+            suspend fun fixture(
+                name: String,
+                path: String,
+                source: TrackSource = TrackSource.ASMR,
+                bvid: String? = null,
+                cid: Long? = null,
+            ): Pair<TrackEntity, File> {
+                val track = TrackEntity(source = source, title = name, artist = null,
+                    durationMs = 1000, coverUri = null, localUri = path, bvid = bvid, cid = cid,
                     page = null, addedAt = 0)
                 val saved = track.copy(id = db.tracks().insert(track))
                 val fingerprint = UUID.randomUUID().toString().replace("-", "")
@@ -74,6 +80,17 @@ class LocalRemovalAndroidTest {
             assertFalse(deleteAudio.exists())
             assertFalse(deleteCue.exists())
             assertNull(db.whisper().latestDoneForTrack(deleteTrack.id))
+
+            // B 站关联与 ASMR/DLSITE 一致：只取消关联，用户文件、字幕、听写和视频字幕缓存都保留。
+            val (biliLink, biliLinkCue) = fixture("bili link", "content://fixture/bili", TrackSource.BILIBILI, "BV1link00001", 1L)
+            val biliCache = File(context.filesDir, "bilibili/BV1link00001/1.json").apply { parentFile?.mkdirs(); writeText("[]") }
+            assertEquals(DeleteResult(0, 1), deleteLocalCopies(db, context.filesDir, subtitles, listOf(biliLink), true))
+            assertNull(db.tracks().getById(biliLink.id)?.localUri)
+            assertTrue(biliLinkCue.isFile)
+            assertNotNull(db.whisper().latestDoneForTrack(biliLink.id))
+            assertTrue(biliCache.isFile)
+            biliCache.delete()
+            biliCache.parentFile?.delete()
         } finally {
             db.close()
             cues.forEach { it.delete() }

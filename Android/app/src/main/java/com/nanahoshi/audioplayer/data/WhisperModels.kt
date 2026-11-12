@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.data.db.DownloadStatus
+import com.nanahoshi.audioplayer.data.db.WhisperJobEntity
 import java.net.URI
 
 internal const val WHISPER_MODEL_QWEN = "qwen-audio-3.1-asr"
@@ -33,6 +35,13 @@ internal fun isCloudWhisperModel(model: String?): Boolean = model == WHISPER_MOD
 
 /** 完全在本机运行的听写模型：没有地址和口令，模型文件下载到手机里。 */
 internal fun isOnDeviceWhisperModel(model: String?): Boolean = model == SENSE_VOICE_MODEL
+
+/** 与运行时分发一致：只有模型明确解析为 SenseVoice 的排队/进行中任务才阻止删除本机模型；空模型任务不会落到 SenseVoice。 */
+internal fun hasActiveSenseVoiceJob(jobs: List<WhisperJobEntity>): Boolean =
+    jobs.any {
+        (it.status == DownloadStatus.QUEUED || it.status == DownloadStatus.RUNNING) &&
+            knownWhisperModel(it.model) == SENSE_VOICE_MODEL
+    }
 
 internal fun whisperModelsMatch(stored: String?, requested: String): Boolean =
     knownWhisperModel(stored) == requested
@@ -69,9 +78,13 @@ internal fun whisperTranscriptionBase(base: String): String {
     return if (trimmed.endsWith("/v1")) trimmed else "$trimmed/v1"
 }
 
-internal fun qwen3AsrModelId(ids: List<String>): String? {
+/** 优先名称含 qwen3-asr 的模型；单模型自定义名沿用；多模型无匹配时宁可失败也不猜，避免把音频上传给非 ASR 模型。 */
+internal fun resolveQwen3Model(ids: List<String>): String {
     val cleaned = ids.map { it.trim() }.filter { it.isNotEmpty() }
-    return cleaned.firstOrNull { it.contains("qwen3-asr", ignoreCase = true) } ?: cleaned.firstOrNull()
+    return cleaned.firstOrNull { it.contains("qwen3-asr", ignoreCase = true) }
+        ?: cleaned.singleOrNull()
+        ?: if (cleaned.isEmpty()) QWEN3_ASR_MODEL
+        else throw WhisperException("听写服务返回了多个模型，但没有名称包含 qwen3-asr 的模型，请检查服务配置")
 }
 
 internal fun qwen3TranscriptText(raw: String): String {

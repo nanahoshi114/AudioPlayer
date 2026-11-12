@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.data.db.DownloadStatus
+import com.nanahoshi.audioplayer.data.db.WhisperJobEntity
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -39,10 +41,29 @@ class WhisperModelTest {
     }
 
     @Test
+    fun onlyActiveSenseVoiceJobsBlockModelDeletion() {
+        fun job(status: DownloadStatus, model: String?) = WhisperJobEntity(
+            title = "t", fingerprint = "f", trackId = null, localPath = null, remoteJobId = null,
+            status = status, progress = 0f, error = null, awaitRemoteUrl = null, model = model)
+        assertFalse(hasActiveSenseVoiceJob(emptyList()))
+        assertTrue(hasActiveSenseVoiceJob(listOf(job(DownloadStatus.QUEUED, SENSE_VOICE_MODEL))))
+        assertTrue(hasActiveSenseVoiceJob(listOf(job(DownloadStatus.RUNNING, SENSE_VOICE_MODEL))))
+        assertFalse(hasActiveSenseVoiceJob(listOf(job(DownloadStatus.DONE, SENSE_VOICE_MODEL))))
+        assertFalse(hasActiveSenseVoiceJob(listOf(job(DownloadStatus.FAILED, SENSE_VOICE_MODEL))))
+        assertFalse(hasActiveSenseVoiceJob(listOf(job(DownloadStatus.QUEUED, null))))
+        assertFalse(hasActiveSenseVoiceJob(listOf(job(DownloadStatus.RUNNING, null))))
+        assertFalse(hasActiveSenseVoiceJob(listOf(job(DownloadStatus.RUNNING, WHISPER_MODEL_QWEN))))
+        assertFalse(hasActiveSenseVoiceJob(listOf(job(DownloadStatus.RUNNING, WHISPER_MODEL_QWEN3))))
+        assertFalse(hasActiveSenseVoiceJob(listOf(job(DownloadStatus.RUNNING, "whisper-1"))))
+        assertTrue(hasActiveSenseVoiceJob(listOf(
+            job(DownloadStatus.DONE, SENSE_VOICE_MODEL), job(DownloadStatus.QUEUED, SENSE_VOICE_MODEL))))
+    }
+
+    @Test
     fun qwen3UsesTheLoadedModelNameAndTimedText() {
-        assertEquals("Qwen/Qwen3-ASR-0.6B", qwen3AsrModelId(listOf("other", "Qwen/Qwen3-ASR-0.6B")))
-        assertEquals("local-model", qwen3AsrModelId(listOf("local-model")))
-        assertNull(qwen3AsrModelId(emptyList()))
+        assertEquals("Qwen/Qwen3-ASR-0.6B", resolveQwen3Model(listOf("other", "Qwen/Qwen3-ASR-0.6B")))
+        assertEquals("local-model", resolveQwen3Model(listOf("local-model")))
+        assertEquals(QWEN3_ASR_MODEL, resolveQwen3Model(emptyList()))
         assertEquals("こんにちは", qwen3TranscriptText("language Japanese<asr_text>こんにちは"))
         assertEquals(listOf(WhisperCue(0L, 12_000L, "こんにちは。")), cueFromWholeTranscript("こんにちは。", 12_000L))
         assertEquals(
@@ -58,6 +79,21 @@ class WhisperModelTest {
                 ),
             ),
         )
+    }
+
+    @Test(expected = WhisperException::class)
+    fun qwen3MultipleModelsWithoutMatchFailBeforeUpload() {
+        resolveQwen3Model(listOf("whisper-1", "sense-voice"))
+    }
+
+    @Test
+    fun qwen3ModelMatchIgnoresCase() {
+        assertEquals("QWEN3-ASR-Flash", resolveQwen3Model(listOf("other", "QWEN3-ASR-Flash")))
+    }
+
+    @Test
+    fun qwen3TrimsBlankIdsAndKeepsSingleCustomName() {
+        assertEquals("local-model", resolveQwen3Model(listOf("   ", " local-model ")))
     }
 
     @Test(expected = WhisperException::class)

@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.playback
 
+import android.content.Context
+import android.net.Uri
 import com.nanahoshi.audioplayer.data.db.QueueItemEntity
 import com.nanahoshi.audioplayer.data.db.TrackEntity
 import com.nanahoshi.audioplayer.dlsite.RemotePlayable
@@ -19,7 +21,14 @@ internal fun QueuePlayable.queueRow(position: Int): QueueItemEntity = when (this
         referer = item.referer, workno = item.workno, fileKey = item.fileKey)
 }
 
-internal fun QueuePlayable.mediaItem(id: Long) = when (this) {
-    is QueuePlayable.Saved -> track.toPlayableItem(id)
+internal suspend fun QueuePlayable.biliLocalCache(context: Context): Uri? = when (this) {
+    is QueuePlayable.Saved -> track.biliLocalCache(context)
+    is QueuePlayable.Remote -> null
+}
+
+internal fun QueuePlayable.mediaItem(id: Long, cached: Uri?) = when (this) {
+    is QueuePlayable.Saved -> track.toPlayableItem(id, cached)
     is QueuePlayable.Remote -> item.toMediaItem(id)
 }
+
+internal suspend fun QueuePlayable.mediaItem(id: Long, context: Context) = mediaItem(id, biliLocalCache(context))

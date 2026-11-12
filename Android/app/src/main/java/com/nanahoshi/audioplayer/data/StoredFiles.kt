@@ -5,8 +5,10 @@ import android.net.Uri
 import com.nanahoshi.audioplayer.data.db.AppDatabase
 import com.nanahoshi.audioplayer.data.db.FolderEntity
 import com.nanahoshi.audioplayer.data.db.TrackEntity
+import com.nanahoshi.audioplayer.data.db.TranslationJobEntity
 import com.nanahoshi.audioplayer.dlsite.DlsiteClient
 import com.nanahoshi.audioplayer.playback.SubtitleSource
+import com.nanahoshi.audioplayer.playback.overlayFileName
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -27,6 +29,8 @@ data class StoredItem(
     val trackId: Long?,
     val remoteUrl: String?,
     val audioPath: String?,
+    val queueItemId: Long? = null,
+    val translationOverlay: Boolean = false,
     val bytes: Long = 0,
 )
 
@@ -195,32 +199,54 @@ class StoredCatalog(
             }
         }
         val seen = built.map { canonicalPath(it.path) }.toSet()
-        val trackIds = jobs.mapNotNull { it.trackId }.filter { it > 0L }.distinct()
+        val overlayFiles = cueFiles(File(filesDir, "subtitles"), overlay = true)
+        // 没有覆盖文件时不读翻译任务表；有也只取可能写出覆盖的状态，失败历史不参与命名。
+        val translationJobs = if (overlayFiles.isEmpty()) emptyList() else db.translations().overlayCandidates()
+        val trackIds = (jobs.mapNotNull { it.trackId } + translationJobs.mapNotNull { it.trackId }).filter { it > 0L }.distinct()
         val tracksById = if (trackIds.isEmpty()) emptyMap() else db.tracks().getByIds(trackIds).associateBy { it.id }
-        val extra = remainingGeneratedItems(generatedCueFiles(File(filesDir, "subtitles")), seen, jobs) { file, job ->
-            val track = job?.trackId?.let { tracksById[it] }
+        fun subtitleItem(
+            file: File,
+            trackId: Long?,
+            title: String?,
+            remoteUrl: String?,
+            audioPath: String? = null,
+            queueItemId: Long? = null,
+            translationOverlay: Boolean = false,
+        ): StoredItem {
+            val track = trackId?.let { tracksById[it] }
             val folder = track?.let { workFolder(it.folderId, byId) }
             val code = realCode(folder?.asmrSourceId)
-            val titled = job?.title?.takeIf { it.isNotBlank() }
             val audioName = when {
                 track != null -> audioDisplayName(track)
-                titled != null -> titled
+                !title.isNullOrBlank() -> title
                 else -> file.name
             }
-            StoredItem(
+            return StoredItem(
                 path = file.absolutePath,
                 name = generatedSubtitleName(audioName),
                 kind = StoredKind.GENERATED,
                 workTitle = folder?.name?.takeIf { it.isNotBlank() },
                 workCode = code,
                 sourceId = code,
-                trackId = track?.id ?: job?.trackId,
-                remoteUrl = job?.remoteUrl ?: track?.remoteUrl,
-                audioPath = job?.localPath ?: track?.localUri,
+                trackId = track?.id ?: trackId,
+                remoteUrl = remoteUrl ?: track?.remoteUrl,
+                audioPath = audioPath ?: track?.localUri,
+                queueItemId = queueItemId,
+                translationOverlay = translationOverlay,
                 bytes = file.length(),
             )
         }
-        storedSort(built + extra)
+        val extra = remainingGeneratedItems(cueFiles(File(filesDir, "subtitles"), overlay = false), seen, jobs) { file, job ->
+            subtitleItem(file, job?.trackId, job?.title, job?.remoteUrl, job?.localPath)
+        }
+        val overlays = remainingOverlayItems(
+            overlayFiles,
+            seen + extra.map { canonicalPath(it.path) },
+            translationJobs,
+        ) { file, job ->
+            subtitleItem(file, job?.trackId, job?.title, job?.remoteUrl, queueItemId = job?.queueItemId, translationOverlay = true)
+        }
+        storedSort(built + extra + overlays)
     }
 
     /** 选中项里带有生成字幕的音频数量；删除前据此决定要不要询问是否一并删除字幕。 */
@@ -241,8 +267,14 @@ class StoredCatalog(
         if (!owned(file)) return
         when (item.kind) {
             StoredKind.GENERATED -> {
-                subtitles.discardStored(item.trackId, item.audioPath, item.remoteUrl)
-                if (file.isFile) file.delete()
+                if (item.translationOverlay) {
+                    // 翻译覆盖：先删文件，成功才清翻译记录，听写不动。
+                    if (file.isFile && !file.delete()) return
+                    subtitles.discardTranslationRecords(item.trackId, item.remoteUrl, item.queueItemId)
+                } else {
+                    subtitles.discardStored(item.trackId, item.audioPath, item.remoteUrl)
+                    if (file.isFile) file.delete()
+                }
             }
             StoredKind.SUBTITLE -> {
                 if (file.isFile && file.delete()) subtitles.invalidate()
@@ -492,11 +524,12 @@ internal fun filesTouch(path: String?, file: File): Boolean {
     return left == right
 }
 
-internal fun generatedCueFiles(dir: File): List<File> =
+/** 生成字幕与翻译覆盖共用同一筛选，仅按 extra- 前缀分区，避免两份过滤条件漂移。 */
+internal fun cueFiles(dir: File, overlay: Boolean): List<File> =
     dir.listFiles().orEmpty().filter { file ->
         file.isFile &&
             file.extension.equals("json", ignoreCase = true) &&
-            !file.name.startsWith("extra-")
+            file.name.startsWith("extra-") == overlay
     }
 
 internal fun subtitleFilesIn(root: File): List<File> {
@@ -663,6 +696,28 @@ internal fun remainingGeneratedItems(
             jobs.filter { cueKey(it.fingerprint) == key }.maxByOrNull { it.id }
         }
         items += itemFor(file, job)
+    }
+    return items
+}
+
+internal fun remainingOverlayItems(
+    files: List<File>,
+    already: Set<String>,
+    jobs: List<TranslationJobEntity>,
+    itemFor: (File, TranslationJobEntity?) -> StoredItem,
+): List<StoredItem> {
+    val byName = HashMap<String, TranslationJobEntity>()
+    for (job in jobs) {
+        val name = overlayFileName(job.trackId, job.remoteUrl, null, job.queueItemId) ?: continue
+        val current = byName[name]
+        if (current == null || job.id > current.id) byName[name] = job
+    }
+    val seen = already.toMutableSet()
+    val items = mutableListOf<StoredItem>()
+    for (file in files) {
+        if (!file.isFile) continue
+        if (!seen.add(canonicalPath(file.path))) continue
+        items += itemFor(file, byName[file.name])
     }
     return items
 }

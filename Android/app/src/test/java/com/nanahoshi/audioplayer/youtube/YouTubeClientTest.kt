@@ -113,6 +113,69 @@ class YouTubeClientTest {
         client.resolveAudio(id)
         assertEquals(listOf(false, false, false, true), calls)
     }
+    @Test fun cookieRetrySurvivesLaterClientCrash() = runBlocking {
+        val calls = mutableListOf<Boolean>()
+        val client = YouTubeClient({ "SAPISID=fixture" }, solver) { request ->
+            if (request.method == "GET") homepage else {
+                val auth = request.header("Cookie") != null; calls += auth
+                when {
+                    auth -> playable()
+                    calls.size == 1 -> """{"playabilityStatus":{"status":"LOGIN_REQUIRED"}}"""
+                    else -> throw RuntimeException("fixture crash")
+                }
+            }
+        }
+        client.resolveAudio(id)
+        assertEquals(listOf(false, false, false, true), calls)
+    }
+    @Test fun networkFailureWithoutAnyResponseStillRetriesWithCookie() = runBlocking {
+        for (failure in listOf(java.io.IOException("fixture offline"), YouTubeException("连不上 YouTube"))) {
+            val calls = mutableListOf<Boolean>()
+            val client = YouTubeClient({ "SAPISID=fixture" }, solver) { request ->
+                if (request.method == "GET") homepage else {
+                    val auth = request.header("Cookie") != null; calls += auth
+                    if (auth) playable() else throw failure
+                }
+            }
+            client.resolveAudio(id)
+            assertEquals(listOf(false, false, false, true), calls)
+        }
+    }
+    @Test fun withoutSavedCookieNetworkFailureDoesNotRetry() = runBlocking {
+        var posts = 0
+        val client = YouTubeClient({ null }, solver) { request ->
+            if (request.method == "GET") homepage else {
+                posts++; assertNull(request.header("Cookie")); throw java.io.IOException("fixture offline")
+            }
+        }
+        try { client.resolveAudio(id); fail() }
+        catch (error: YouTubeException) { assertEquals("连不上 YouTube", error.message) }
+        assertEquals(3, posts)
+    }
+    @Test fun okWithoutAudioTracksDoesNotRetryWithCookie() = runBlocking {
+        val calls = mutableListOf<Boolean>()
+        val client = YouTubeClient({ "SAPISID=fixture" }, solver) { request ->
+            if (request.method == "GET") homepage else {
+                calls += request.header("Cookie") != null
+                """{"playabilityStatus":{"status":"OK"},"videoDetails":{"videoId":"$id"}}"""
+            }
+        }
+        try { client.resolveAudio(id); fail() }
+        catch (error: YouTubeException) { assertEquals("这个视频没有可用的独立音轨", error.message) }
+        assertEquals(listOf(false, false, false), calls)
+    }
+    @Test fun parsedResponseWithoutStatusDoesNotRetryWithCookie() = runBlocking {
+        val calls = mutableListOf<Boolean>()
+        val client = YouTubeClient({ "SAPISID=fixture" }, solver) { request ->
+            if (request.method == "GET") homepage else {
+                calls += request.header("Cookie") != null
+                """{"videoDetails":{"videoId":"$id"}}"""
+            }
+        }
+        try { client.resolveAudio(id); fail() }
+        catch (error: YouTubeException) { assertEquals("这个视频没有可用的独立音轨", error.message) }
+        assertEquals(listOf(false, false, false), calls)
+    }
     @Test fun searchDeduplicatesAndStopsWhenNoNewItems() = runBlocking {
         var count = 0
         val client = YouTubeClient({ null }, solver) { request ->
