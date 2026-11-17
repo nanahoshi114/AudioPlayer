@@ -1,5 +1,9 @@
 package com.nanahoshi.audioplayer.data
 
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import okhttp3.Call
 
 class InflightCalls {
@@ -54,5 +58,30 @@ class InflightCalls {
             current
         }
         doomed?.cancel()
+    }
+
+    /** 阻塞的 HTTP 请求也要响应任务取消，且不能取消同一任务重试时换发的请求。 */
+    suspend fun <T> cancelWithCoroutine(ticket: Ticket, block: suspend () -> T): T = coroutineScope {
+        val watcher = launch(start = CoroutineStart.UNDISPATCHED) {
+            try {
+                awaitCancellation()
+            } finally {
+                val call = synchronized(slots) {
+                    val slot = slots[ticket.key]?.takeIf { it.token == ticket.token }
+                    slot?.call.also {
+                        if (slot != null) {
+                            slot.token += 1
+                            slot.call = null
+                        }
+                    }
+                }
+                call?.cancel()
+            }
+        }
+        try {
+            block()
+        } finally {
+            watcher.cancel()
+        }
     }
 }

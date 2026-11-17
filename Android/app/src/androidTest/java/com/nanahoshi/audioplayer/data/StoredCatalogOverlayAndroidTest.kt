@@ -10,12 +10,22 @@ import com.nanahoshi.audioplayer.bilibili.BilibiliClient
 import com.nanahoshi.audioplayer.data.db.AppDatabase
 import com.nanahoshi.audioplayer.data.db.DownloadStatus
 import com.nanahoshi.audioplayer.data.db.QueuedTrack
+import com.nanahoshi.audioplayer.data.db.SubtitlePublicationEntity
 import com.nanahoshi.audioplayer.data.db.TrackEntity
+import com.nanahoshi.audioplayer.data.db.TranslateMark
 import com.nanahoshi.audioplayer.data.db.TranslationJobEntity
 import com.nanahoshi.audioplayer.data.db.WhisperJobEntity
+import com.nanahoshi.audioplayer.playback.LoadedSubtitles
 import com.nanahoshi.audioplayer.playback.SubtitleCue
+import com.nanahoshi.audioplayer.playback.SubtitleOrigin
 import com.nanahoshi.audioplayer.playback.SubtitleSource
+import com.nanahoshi.audioplayer.playback.encodeGeneratedCues
 import com.nanahoshi.audioplayer.playback.overlayFileName
+import com.nanahoshi.audioplayer.playback.parseGeneratedSubtitles
+import com.nanahoshi.audioplayer.playback.subtitleSourceFingerprint
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -96,6 +106,139 @@ class StoredCatalogOverlayAndroidTest {
         title = "song", artist = null, durationMs = 1000, coverUri = null, localUri = null,
         bvid = null, cid = null, page = null, remoteUrl = null, referer = null, workno = null, fileKey = null,
     )
+
+    @Test fun revisedTranslationPublishesFromOneSourceAndKeepsItAvailable() = runBlocking {
+        val root = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+            "subtitle-revision-${UUID.randomUUID()}").apply { mkdirs() }
+        val context = testContext(root)
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        try {
+            val audio = File(root, "song.mp3").apply { writeText("audio") }
+            val srt = File(root, "song.srt").apply {
+                writeText("1\n00:00:00,000 --> 00:00:00,800\nはい\n\n2\n00:00:00,900 --> 00:00:01,800\nそうです\n")
+            }
+            val trackId = db.tracks().insert(TrackEntity(
+                source = TrackSource.LOCAL, title = "song", artist = null, durationMs = 1800,
+                coverUri = null, localUri = audio.absolutePath, bvid = null, cid = null, page = null, addedAt = 0,
+            ))
+            val row = queueRow(trackId).copy(source = TrackSource.LOCAL, localUri = audio.absolutePath)
+            val subtitles = SubtitleSource(context, db, BilibiliClient(CredentialStore(context)), AsmrClient())
+            val source = subtitles.load(row)
+            assertEquals(listOf("はい", "そうです"), source.cues.map { it.text })
+            val revised = listOf(SubtitleCue(0, 1800, "はい、そうです。", "嗯，是的。", sourceCount = 2))
+            val jobId = db.translations().insert(TranslationJobEntity(
+                title = "song", trackId = trackId, remoteUrl = null, queueItemId = row.queueItemId,
+                status = DownloadStatus.RUNNING, error = null,
+            ))
+            val subtitleDir = File(root, "subtitles").apply { mkdirs() }
+            val overlay = File(subtitleDir, overlayFileName(trackId, null, null, null)!!)
+
+            // 目标被目录占用时，文件替换失败，任务仍可重新提交。
+            assertTrue(overlay.mkdir())
+            assertFalse(subtitles.saveTranslations(row, revised, source, jobId))
+            assertEquals(DownloadStatus.FAILED, db.translations().get(jobId)?.status)
+            assertEquals(source, subtitles.load(row))
+            assertTrue(overlay.delete())
+            db.translations().markRunning(jobId, "song")
+
+            assertTrue(subtitles.saveTranslations(row, revised, source, jobId))
+            assertEquals(DownloadStatus.DONE, db.translations().get(jobId)?.status)
+            assertEquals(revised, subtitles.load(row).cues)
+            assertEquals(source.cues, subtitles.load(row).sourceCues)
+
+            val oldOverlay = overlay.readText()
+            srt.writeText(srt.readText().replace("はい", "いいえ"))
+            assertEquals("いいえ", subtitles.load(row).cues.first().text)
+            assertFalse(subtitles.saveTranslations(row, revised, source))
+            assertEquals(oldOverlay, overlay.readText())
+
+            // 听写字幕使用同一个手动翻译保存入口，校对结果单独保留。
+            val origin = SubtitleOrigin(PARAKEET_MODEL, null)
+            val generated = File(subtitleDir, "abc.json").apply { writeText(encodeGeneratedCues(source.cues, origin)) }
+            db.whisper().insert(WhisperJobEntity(
+                title = "song", fingerprint = "abc", trackId = trackId, localPath = audio.absolutePath,
+                remoteJobId = null, status = DownloadStatus.DONE, progress = 1f, error = null, awaitRemoteUrl = null,
+                model = PARAKEET_MODEL,
+            ))
+            val generatedSource = subtitles.load(row)
+            assertTrue(generatedSource.generated)
+            assertFalse(subtitles.saveTranslations(row, revised, generatedSource, jobId))
+            assertEquals(generatedSource, subtitles.load(row))
+            assertTrue(subtitles.saveTranslations(row, revised, generatedSource))
+            assertEquals(revised, subtitles.load(row).cues)
+            assertEquals(source.cues, parseGeneratedSubtitles(generated.readText())?.cues)
+            assertEquals(origin, parseGeneratedSubtitles(generated.readText())?.origin)
+        } finally {
+            db.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test fun standaloneTranslationAndPolishRegisterBeforeServiceRuns() = runBlocking {
+        val root = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+            "subtitle-registration-${UUID.randomUUID()}").apply { mkdirs() }
+        val context = testContext(root)
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        try {
+            val credentials = CredentialStore(context)
+            val subtitles = SubtitleSource(context, db, BilibiliClient(credentials), AsmrClient())
+            val starts = kotlinx.coroutines.channels.Channel<Long>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+            val requests = SubtitleTaskRequests { starts.trySend(it).isSuccess }
+            val recovery = kotlinx.coroutines.Job().apply { complete() }
+            val translate = TranslateCenter(context, db, credentials, subtitles, requests, recovery)
+            val row = queueRow(77L)
+            val source = com.nanahoshi.audioplayer.playback.LoadedSubtitles(
+                cues = listOf(SubtitleCue(0, 1000, "こんにちは")), generatedEmpty = false, generated = true,
+                generatedFingerprint = "abc",
+            )
+
+            kotlinx.coroutines.withTimeout(5_000) {
+                for (task in listOf(SubtitleTask.TRANSLATE, SubtitleTask.POLISH)) {
+                    val result = async { translate.submit(task, row, source) }
+                    val requestId = starts.receive()
+                    val job = db.translations().observe().first { rows ->
+                        rows.any { it.operation == task && it.status == DownloadStatus.QUEUED }
+                    }.first { it.operation == task }
+                    assertEquals("abc", job.generatedFingerprint)
+                    assertEquals(task.name, job.kind)
+                    checkNotNull(requests.take(requestId)).cancel(SubtitleTaskStopped(SUBTITLE_INTERRUPTED))
+                    assertTrue(runCatching { result.await() }.exceptionOrNull() is SubtitleTaskStopped)
+                    db.translations().observe().first { rows -> rows.any { it.id == job.id && it.status == DownloadStatus.FAILED } }
+                }
+            }
+        } finally {
+            db.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test fun recoveringPublicationFinishesTaskWithThePublishedTranslation() = runBlocking {
+        val root = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+            "subtitle-publication-${UUID.randomUUID()}").apply { mkdirs() }
+        val context = testContext(root)
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        try {
+            val subtitles = SubtitleSource(context, db, BilibiliClient(CredentialStore(context)), AsmrClient())
+            val job = db.translations().insert(TranslationJobEntity(
+                title = "song", trackId = null, remoteUrl = null, queueItemId = 1L,
+                status = DownloadStatus.RUNNING, error = null, kind = SubtitleTask.POLISH.name,
+                generatedFingerprint = "abc",
+            ))
+            val payload = encodeGeneratedCues(listOf(SubtitleCue(0, 1000, "はい", "是的")))
+            db.translations().stagePublication(
+                com.nanahoshi.audioplayer.data.db.SubtitlePublicationEntity("abc.json", payload, null, job, 10L),
+            )
+            assertEquals(0, db.translations().failIfActive(job, "已中止"))
+            subtitles.recoverPublications()
+            subtitles.recoverPublications()
+            assertEquals(payload, File(root, "subtitles/abc.json").readText())
+            assertEquals(DownloadStatus.DONE, db.translations().get(job)?.status)
+            assertTrue(db.translations().pendingPublications().isEmpty())
+        } finally {
+            db.close()
+            root.deleteRecursively()
+        }
+    }
 
     @Test fun runningTranslationSurvivesOverlayDeleteAndCompletes() = runBlocking {
         val root = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
@@ -211,6 +354,145 @@ class StoredCatalogOverlayAndroidTest {
             subtitles.discard(queueRow(trackId = null, queueItemId = 42L))
             assertFalse(overlay.exists())
             assertEquals(DownloadStatus.RUNNING, db.translations().latestForQueue(42L)?.status)
+        } finally {
+            db.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test fun recoverySurvivesBadPublicationAndInterruptedFailuresKeepStagedTasks() = runBlocking {
+        val root = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+            "subtitle-recovery-bad-${UUID.randomUUID()}").apply { mkdirs() }
+        val context = testContext(root)
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        try {
+            val subtitles = SubtitleSource(context, db, BilibiliClient(CredentialStore(context)), AsmrClient())
+            val badJob = db.translations().insert(TranslationJobEntity(
+                title = "bad", trackId = null, remoteUrl = null, queueItemId = 1L,
+                status = DownloadStatus.RUNNING, error = null))
+            val goodJob = db.translations().insert(TranslationJobEntity(
+                title = "good", trackId = null, remoteUrl = null, queueItemId = 2L,
+                status = DownloadStatus.RUNNING, error = null))
+            val whisperJob = db.whisper().insert(WhisperJobEntity(
+                title = "w", fingerprint = "wfp", trackId = null, localPath = null, remoteJobId = null,
+                status = DownloadStatus.DONE, progress = 1f, error = null, awaitRemoteUrl = null,
+                translateStatus = TranslateMark.RUNNING))
+            val payload = encodeGeneratedCues(listOf(SubtitleCue(0, 1000, "はい", "是的")))
+            db.translations().stagePublication(SubtitlePublicationEntity("../evil.json", payload, null, badJob, 10L))
+            db.translations().stagePublication(SubtitlePublicationEntity("good.json", payload, null, goodJob, 10L))
+            db.translations().stagePublication(SubtitlePublicationEntity("w.json", payload, whisperJob, null, 10L))
+            // 已 staged 发布的任务不被中断登记误标失败，交由恢复补完。
+            db.translations().failInterrupted("已中止")
+            db.whisper().failInterruptedTranslations("已中止")
+            assertEquals(DownloadStatus.RUNNING, db.translations().get(badJob)?.status)
+            assertEquals(DownloadStatus.RUNNING, db.translations().get(goodJob)?.status)
+            assertEquals(TranslateMark.RUNNING, db.whisper().get(whisperJob)?.translateStatus)
+            // 坏文件名不抛异常、不阻塞其余发布；对应任务标失败，记录清空。
+            subtitles.recoverPublications()
+            assertEquals(DownloadStatus.FAILED, db.translations().get(badJob)?.status)
+            assertEquals(DownloadStatus.DONE, db.translations().get(goodJob)?.status)
+            assertEquals(TranslateMark.DONE, db.whisper().get(whisperJob)?.translateStatus)
+            assertEquals(payload, File(root, "subtitles/good.json").readText())
+            assertFalse(File(root, "evil.json").exists())
+            assertTrue(db.translations().pendingPublications().isEmpty())
+        } finally {
+            db.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test fun saveKeepsTranslationWhenTheSourceCannotBeReloaded() = runBlocking {
+        val root = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+            "subtitle-missing-source-${UUID.randomUUID()}").apply { mkdirs() }
+        val context = testContext(root)
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        try {
+            val audio = File(root, "song.mp3").apply { writeText("audio") }
+            val originalSrt = "1\n00:00:00,000 --> 00:00:00,800\nはい\n\n2\n00:00:00,900 --> 00:00:01,800\nそうです\n"
+            val srt = File(root, "song.srt").apply { writeText(originalSrt) }
+            val trackId = db.tracks().insert(TrackEntity(
+                source = TrackSource.LOCAL, title = "song", artist = null, durationMs = 1800,
+                coverUri = null, localUri = audio.absolutePath, bvid = null, cid = null, page = null, addedAt = 0,
+            ))
+            val row = queueRow(trackId).copy(source = TrackSource.LOCAL, localUri = audio.absolutePath)
+            val subtitles = SubtitleSource(context, db, BilibiliClient(CredentialStore(context)), AsmrClient())
+            val source = subtitles.load(row)
+            val revised = listOf(SubtitleCue(0, 1800, "はい、そうです。", "嗯，是的。", sourceCount = 2))
+            // 核对读不到源（模拟网络抖动/源暂时缺失）：不丢弃已完成的翻译。
+            assertTrue(srt.delete())
+            assertTrue(subtitles.saveTranslations(row, revised, source))
+            val overlay = File(File(root, "subtitles"), overlayFileName(trackId, null, null, null)!!)
+            assertEquals(subtitleSourceFingerprint(source.sourceCues), parseGeneratedSubtitles(overlay.readText())?.sourceFingerprint)
+            // 源恢复且一致 → 译文套用；源变化 → 不套用。
+            srt.writeText(originalSrt)
+            assertEquals(revised, subtitles.load(row).cues)
+            srt.writeText(originalSrt.replace("はい", "いいえ"))
+            assertEquals(listOf("いいえ", "そうです"), subtitles.load(row).cues.map { it.text })
+        } finally {
+            db.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test fun submitKeepsTheVisibleNonGeneratedSourceDespiteAStaleWhisperRecord() = runBlocking {
+        val root = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+            "subtitle-stale-fingerprint-${UUID.randomUUID()}").apply { mkdirs() }
+        val context = testContext(root)
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        try {
+            val credentials = CredentialStore(context)
+            val subtitles = SubtitleSource(context, db, BilibiliClient(credentials), AsmrClient())
+            val starts = kotlinx.coroutines.channels.Channel<Long>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+            val requests = SubtitleTaskRequests { starts.trySend(it).isSuccess }
+            val recovery = kotlinx.coroutines.Job().apply { complete() }
+            val translate = TranslateCenter(context, db, credentials, subtitles, requests, recovery)
+            // DONE 听写记录存在但生成文件缺失：翻译目标应以用户当前看到的非生成字幕为准。
+            db.whisper().insert(WhisperJobEntity(
+                title = "song", fingerprint = "stale", trackId = 77L, localPath = null, remoteJobId = null,
+                status = DownloadStatus.DONE, progress = 1f, error = null, awaitRemoteUrl = null))
+            val row = queueRow(77L)
+            val visible = LoadedSubtitles(
+                cues = listOf(SubtitleCue(0, 1000, "こんにちは")), generatedEmpty = false, generated = false,
+            )
+            kotlinx.coroutines.withTimeout(5_000) {
+                val result = async { translate.submit(SubtitleTask.TRANSLATE, row, visible) }
+                val requestId = starts.receive()
+                val job = db.translations().observe().first { rows -> rows.any { it.status == DownloadStatus.QUEUED } }.first()
+                assertNull(job.generatedFingerprint)
+                checkNotNull(requests.take(requestId)).cancel(SubtitleTaskStopped(SUBTITLE_INTERRUPTED))
+                assertTrue(runCatching { result.await() }.exceptionOrNull() is SubtitleTaskStopped)
+                db.translations().observe().first { rows -> rows.any { it.id == job.id && it.status == DownloadStatus.FAILED } }
+            }
+        } finally {
+            db.close()
+            root.deleteRecursively()
+        }
+        // JUnit4 要求测试方法返回 void：表达式体不能把 withTimeout 的查询结果暴露为返回值。
+        Unit
+    }
+
+    @Test fun deletingStoredBiliAudioRemovesBiliNamedOverlayAndTerminalHistory() = runBlocking {
+        val root = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+            "stored-bili-overlay-${UUID.randomUUID()}").apply { mkdirs() }
+        val context = testContext(root)
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        try {
+            val audio = File(root, "bilibili/BV1234567890/42.m4s").apply { parentFile?.mkdirs(); writeText("audio") }
+            val subtitlesDir = File(root, "subtitles").apply { mkdirs() }
+            val overlay = File(subtitlesDir, overlayFileName(null, null, null, null, "BV1234567890", 42L)!!).apply { writeText("[]") }
+            val doneJob = db.translations().insert(TranslationJobEntity(
+                title = "bili", trackId = null, remoteUrl = "https://www.bilibili.com/video/BV1234567890",
+                queueItemId = null, status = DownloadStatus.DONE, error = null, bvid = "BV1234567890", cid = 42L))
+            val runningJob = db.translations().insert(TranslationJobEntity(
+                title = "bili", trackId = null, remoteUrl = "https://www.bilibili.com/video/BV1234567890",
+                queueItemId = null, status = DownloadStatus.RUNNING, error = null, bvid = "BV1234567890", cid = 42L))
+            val subtitles = SubtitleSource(context, db, BilibiliClient(CredentialStore(context)), AsmrClient())
+
+            assertTrue(subtitles.hasGenerated(null, audio.absolutePath, null))
+            subtitles.discardStored(null, audio.absolutePath, null)
+            assertFalse(overlay.exists())
+            assertNull(db.translations().get(doneJob))
+            assertEquals(DownloadStatus.RUNNING, db.translations().get(runningJob)?.status)
         } finally {
             db.close()
             root.deleteRecursively()

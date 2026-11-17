@@ -268,9 +268,7 @@ class StoredCatalog(
         when (item.kind) {
             StoredKind.GENERATED -> {
                 if (item.translationOverlay) {
-                    // 翻译覆盖：先删文件，成功才清翻译记录，听写不动。
-                    if (file.isFile && !file.delete()) return
-                    subtitles.discardTranslationRecords(item.trackId, item.remoteUrl, item.queueItemId)
+                    subtitles.discardTranslationOverlay(file)
                 } else {
                     subtitles.discardStored(item.trackId, item.audioPath, item.remoteUrl)
                     if (file.isFile) file.delete()
@@ -708,7 +706,7 @@ internal fun remainingOverlayItems(
 ): List<StoredItem> {
     val byName = HashMap<String, TranslationJobEntity>()
     for (job in jobs) {
-        val name = overlayFileName(job.trackId, job.remoteUrl, null, job.queueItemId) ?: continue
+        val name = overlayFileName(job.trackId, job.remoteUrl, job.localUri, job.queueItemId, job.bvid, job.cid) ?: continue
         val current = byName[name]
         if (current == null || job.id > current.id) byName[name] = job
     }

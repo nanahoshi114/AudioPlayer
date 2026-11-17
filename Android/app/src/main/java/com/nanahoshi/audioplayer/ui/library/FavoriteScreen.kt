@@ -14,7 +14,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.Text
 import com.nanahoshi.audioplayer.ui.components.AppTopBar
@@ -48,7 +47,6 @@ class FavoriteViewModel(app: Application) : AndroidViewModel(app) {
     val selected = MutableStateFlow<Set<String>>(emptySet())
     val loading = MutableStateFlow(false)
     val importing = MutableStateFlow(false)
-    val caching = MutableStateFlow(false)
     val hasMore = MutableStateFlow(false)
     private var nextPage = 1
     private var paging = false
@@ -158,39 +156,8 @@ class FavoriteViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun cacheSelected() {
-        val bvids = selected.value.toList()
-        if (bvids.isEmpty()) {
-            graph.messages.value = "请至少选择一个视频"
-            return
-        }
-        viewModelScope.launch {
-            caching.value = true
-            var queued = 0
-            var failed = 0
-            try {
-                for (bvid in bvids) {
-                    try {
-                        val parts = graph.library.lookupBvid(bvid)
-                        queued += graph.downloads.enqueueBili(parts)
-                    } catch (cancelled: CancellationException) {
-                        throw cancelled
-                    } catch (_: Exception) {
-                        failed += 1
-                    }
-                }
-                graph.messages.value = favoriteDownloadNotice(queued, failed)
-            } finally {
-                caching.value = false
-            }
-        }
-    }
-}
 
-internal fun favoriteDownloadNotice(queued: Int, failedVideos: Int): String = buildList {
-    if (queued > 0) add("已加入 $queued 个下载任务")
-    if (failedVideos > 0) add("$failedVideos 个视频处理失败")
-}.joinToString("，").ifEmpty { "已在本地或正在下载" }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -201,7 +168,6 @@ fun FavoriteScreen(onBack: () -> Unit, folderId: Long? = null, viewModel: Favori
     val selected by viewModel.selected.collectAsStateWithLifecycle()
     val loading by viewModel.loading.collectAsStateWithLifecycle()
     val importing by viewModel.importing.collectAsStateWithLifecycle()
-    val caching by viewModel.caching.collectAsStateWithLifecycle()
     val hasMore by viewModel.hasMore.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
     val folder = opened
@@ -253,18 +219,13 @@ fun FavoriteScreen(onBack: () -> Unit, folderId: Long? = null, viewModel: Favori
                 }
             }
         }
-        if (loading || importing || caching) {
+        if (loading || importing) {
             CircularProgressIndicator(Modifier.padding(16.dp).align(Alignment.CenterHorizontally))
         }
         if (folder != null) {
-            FilledTonalButton(
-                onClick = { viewModel.cacheSelected() },
-                enabled = !importing && !caching && selected.isNotEmpty(),
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-            ) { Text("下载音轨") }
             Button(
                 onClick = { viewModel.importSelected(folderId, onBack) },
-                enabled = !importing && !caching && selected.isNotEmpty(),
+                enabled = !importing && selected.isNotEmpty(),
                 modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
             ) { Text("加入音频库") }
         }

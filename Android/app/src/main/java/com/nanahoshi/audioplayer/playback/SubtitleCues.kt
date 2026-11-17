@@ -1,17 +1,22 @@
 package com.nanahoshi.audioplayer.playback
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.double
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
+import java.io.IOException
+import java.security.MessageDigest
 
 data class SubtitleCue(
     val startMs: Long,
     val endMs: Long,
     val text: String,
     val translation: String? = null,
+    val sourceCount: Int = 1,
 )
 
 fun SubtitleCue.line(chinese: Boolean): String {
@@ -33,56 +38,142 @@ fun List<SubtitleCue>.indexAt(positionMs: Long): Int =
 
 fun parseGeneratedCues(raw: String): List<SubtitleCue> = parseGeneratedCuesOrNull(raw).orEmpty()
 
+data class SubtitleOrigin(val model: String, val endpoint: String?)
+
+internal data class GeneratedSubtitles(
+    val cues: List<SubtitleCue>,
+    val origin: SubtitleOrigin?,
+    val revisedCues: List<SubtitleCue>? = null,
+    val sourceFingerprint: String? = null,
+) {
+    val displayCues: List<SubtitleCue> get() = revisedCues ?: cues
+}
+
 /** 解析失败返回 null，用来区分「文件损坏」和「解析成功但没有句子」。 */
-fun parseGeneratedCuesOrNull(raw: String): List<SubtitleCue>? {
+fun parseGeneratedCuesOrNull(raw: String): List<SubtitleCue>? = parseGeneratedSubtitles(raw)?.displayCues
+
+internal fun parseGeneratedSubtitles(raw: String): GeneratedSubtitles? {
     val text = raw.trim().removePrefix("\uFEFF")
     if (text.isEmpty() || !text.startsWith("{")) return null
-    val array = try {
-        Json.parseToJsonElement(text).jsonObject["cues"]?.jsonArray
+    return try {
+        val document = Json.parseToJsonElement(text).jsonObject
+        val array = document["cues"]?.jsonArray ?: return null
+        val origin = if ("origin" in document) {
+            val fields = document["origin"] as? JsonObject ?: return null
+            val model = fields["model"]?.jsonPrimitive?.takeIf { it.isString }?.content ?: return null
+            val endpoint = when (val value = fields["endpoint"]) {
+                JsonNull -> null
+                else -> value?.jsonPrimitive?.takeIf { it.isString }?.content ?: return null
+            }
+            SubtitleOrigin(model, endpoint)
+        } else {
+            null
+        }
+        val original = array.mapNotNull { (it as? JsonObject)?.toGeneratedCue() }.sortedBy { it.startMs }
+        val revised = runCatching {
+            document["revisedCues"]?.jsonArray?.map { (it as? JsonObject)?.toGeneratedCue() }
+                ?.takeIf { it.all { cue -> cue != null } && it.any { cue -> !cue?.translation.isNullOrBlank() } }
+                ?.filterNotNull()?.sortedBy { it.startMs }
+        }.getOrNull()
+        val sourceFingerprint = if ("sourceFingerprint" in document) {
+            val value = document["sourceFingerprint"]?.jsonPrimitive
+            value?.takeIf { it.isString && it.content.matches(Regex("[0-9a-f]{64}")) }?.content ?: return null
+        } else {
+            null
+        }
+        GeneratedSubtitles(original, origin, revised, sourceFingerprint)
     } catch (_: Exception) {
         null
-    } ?: return null
-    return array.mapNotNull { element ->
-        val item = try {
-            element.jsonObject
-        } catch (_: Exception) {
-            return@mapNotNull null
-        }
-        val line = item["text"]?.jsonPrimitive?.content?.trim().orEmpty()
-        if (line.isEmpty()) return@mapNotNull null
-        val start = item["startMs"]?.jsonPrimitive?.content?.toLongOrNull() ?: return@mapNotNull null
-        val end = item["endMs"]?.jsonPrimitive?.content?.toLongOrNull() ?: return@mapNotNull null
-        if (end <= start) return@mapNotNull null
-        val translation = item["translation"]?.jsonPrimitive?.content?.trim()?.takeIf { it.isNotEmpty() }
-        SubtitleCue(start, end, line, translation)
-    }.sortedBy { it.startMs }
+    }
+}
+
+private fun JsonObject.toGeneratedCue(): SubtitleCue? {
+    val line = get("text")?.jsonPrimitive?.content?.trim().orEmpty()
+    if (line.isEmpty()) return null
+    val start = get("startMs")?.jsonPrimitive?.content?.toLongOrNull() ?: return null
+    val end = get("endMs")?.jsonPrimitive?.content?.toLongOrNull() ?: return null
+    if (end <= start) return null
+    val translation = get("translation")?.jsonPrimitive?.content?.trim()?.takeIf { it.isNotEmpty() }
+    val sourceCount = get("sourceCount")?.jsonPrimitive?.content?.toIntOrNull()?.takeIf { it > 1 } ?: 1
+    return SubtitleCue(start, end, line, translation, sourceCount)
 }
 
 /** 先写同目录临时文件再替换，避免中断留下半个 JSON。 */
-internal fun File.writeTextAtomically(text: String) {
+internal fun File.writeTextAtomically(text: String) = withStagedSubtitle(text) { replace -> replace() }
+
+internal inline fun <T> File.withStagedSubtitle(text: String, commit: (() -> Unit) -> T): T {
     parentFile?.mkdirs()
-    val temp = File(parentFile, "$name.tmp")
-    temp.writeText(text)
-    if (!temp.renameTo(this)) {
-        writeText(text)
+    val temp = File.createTempFile(".subtitle-", ".tmp", parentFile)
+    return try {
+        temp.writeText(text)
+        commit {
+            if (!temp.renameTo(this)) throw IOException("无法保存字幕文件")
+        }
+    } finally {
         temp.delete()
     }
 }
 
-fun encodeGeneratedCues(cues: List<SubtitleCue>): String = buildString {
-    append("{\"cues\":[")
+fun encodeGeneratedCues(cues: List<SubtitleCue>): String = encodeGeneratedCues(cues, null)
+
+internal fun encodeGeneratedCues(
+    cues: List<SubtitleCue>,
+    origin: SubtitleOrigin?,
+    revisedCues: List<SubtitleCue>? = null,
+    sourceFingerprint: String? = null,
+): String = buildString {
+    append('{')
+    if (origin != null) {
+        append("\"origin\":{\"model\":").append(jsonEscape(origin.model))
+        append(",\"endpoint\":").append(origin.endpoint?.let(::jsonEscape) ?: "null")
+        append("},")
+    }
+    if (sourceFingerprint != null) append("\"sourceFingerprint\":").append(jsonEscape(sourceFingerprint)).append(',')
+    append("\"cues\":")
+    appendCueArray(cues)
+    if (revisedCues != null) {
+        append(",\"revisedCues\":")
+        appendCueArray(revisedCues)
+    }
+    append('}')
+}
+
+private fun StringBuilder.appendCueArray(cues: List<SubtitleCue>) {
+    append('[')
     cues.forEachIndexed { index, cue ->
         if (index > 0) append(',')
         append("{\"startMs\":").append(cue.startMs)
         append(",\"endMs\":").append(cue.endMs)
         append(",\"text\":").append(jsonEscape(cue.text))
+        if (cue.sourceCount > 1) append(",\"sourceCount\":").append(cue.sourceCount)
         val translation = cue.translation?.trim()?.takeIf { it.isNotEmpty() }
         if (translation != null) {
             append(",\"translation\":").append(jsonEscape(translation))
         }
         append('}')
     }
-    append("]}")
+    append(']')
+}
+
+internal fun subtitleSourceFingerprint(cues: List<SubtitleCue>): String =
+    MessageDigest.getInstance("SHA-256")
+        .digest(encodeGeneratedCues(cues.map { it.copy(translation = null) }).toByteArray(Charsets.UTF_8))
+        .joinToString("") { "%02x".format(it) }
+
+internal fun applySubtitleOverlay(source: List<SubtitleCue>, overlay: GeneratedSubtitles): List<SubtitleCue> {
+    if (source.isEmpty() || source.hasTranslation()) return source
+    overlay.sourceFingerprint?.let { fingerprint ->
+        return if (fingerprint == subtitleSourceFingerprint(source) && overlay.cues.hasTranslation()) {
+            overlay.cues
+        } else {
+            source
+        }
+    }
+    val byStart = overlay.cues.associateBy { it.startMs }
+    return source.map { cue ->
+        val extra = byStart[cue.startMs]?.translation
+        if (extra.isNullOrBlank()) cue else cue.copy(translation = extra)
+    }
 }
 
 private fun jsonEscape(value: String): String = buildString {
@@ -93,7 +184,7 @@ private fun jsonEscape(value: String): String = buildString {
             '"' -> append("\\\"")
             '\n' -> append("\\n")
             '\r' -> append("\\r")
-            else -> append(ch)
+            else -> if (ch < ' ') append("\\u").append(ch.code.toString(16).padStart(4, '0')) else append(ch)
         }
     }
     append('"')

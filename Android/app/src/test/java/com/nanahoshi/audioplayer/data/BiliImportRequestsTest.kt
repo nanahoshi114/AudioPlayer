@@ -59,6 +59,16 @@ class BiliImportRequestsTest {
         assertNull(requests.prompt.value)
     }
 
+    @Test fun singlePartAlreadyGroupedKeepsItsModeWithoutPrompt() = runBlocking {
+        val requests = BiliImportRequests({ BiliImportMode.GROUPED })
+        val result = async(start = CoroutineStart.UNDISPATCHED) { requests.choose(listOf(details(listOf(first)))) }
+        assertNull(requests.prompt.value)
+        val saved = result.await()!!.single()
+        assertEquals(BiliImportMode.GROUPED, saved.mode)
+        assertEquals(listOf(first), saved.parts)
+        assertFalse(saved.conversionConfirmed)
+    }
+
     @Test fun busyPromptRejectsSecondRequestWithoutQueueing() = runBlocking {
         var busyCount = 0
         val requests = BiliImportRequests({ null }, { busyCount++ })
@@ -103,10 +113,4 @@ class BiliImportRequestsTest {
         assertNull(requests.prompt.value)
     }
 
-    @Test fun legacyMetadataAndBatchMetadataBothRetainBvCidIdentity() {
-        assertEquals(first, decodeBiliDownloadImport(first.importMetadata(), first.bvid, first.cid).part)
-        val raw = biliLibraryJson.encodeToString(BiliDownloadImport.serializer(), BiliDownloadImport(first, "batch"))
-        assertEquals("batch", decodeBiliDownloadImport(raw, first.bvid, first.cid).batchId)
-        assertTrue(runCatching { decodeBiliDownloadImport(raw, first.bvid, 99) }.isFailure)
-    }
 }

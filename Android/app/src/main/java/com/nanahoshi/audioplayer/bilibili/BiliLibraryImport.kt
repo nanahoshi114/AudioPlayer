@@ -13,19 +13,7 @@ data class BiliImportRequest(
     val conversionConfirmed: Boolean = false,
 )
 
-@Serializable
-internal data class BiliDownloadImport(val part: BiliPart, val batchId: String? = null)
-
 internal val biliLibraryJson = Json { ignoreUnknownKeys = true }
-
-internal fun decodeBiliDownloadImport(raw: String, bvid: String, cid: Long): BiliDownloadImport {
-    val envelope = runCatching { biliLibraryJson.decodeFromString(BiliDownloadImport.serializer(), raw) }.getOrNull()
-        ?: BiliDownloadImport(biliImportPart(raw, bvid, cid))
-    check(envelope.part.bvid == bvid && envelope.part.cid == cid && cid > 0 && envelope.part.page > 0 && envelope.part.durationMs >= 0) {
-        "下载入库信息不匹配，请重新导入"
-    }
-    return envelope
-}
 
 internal fun BiliImportRequest.checked(): BiliImportRequest {
     require(Regex("BV[0-9A-Za-z]{10}").matches(video.bvid) && parts.isNotEmpty()) { "没有可导入的分 P" }

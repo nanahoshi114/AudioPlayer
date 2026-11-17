@@ -4,6 +4,16 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SubtitleLanguageTest {
+    @Test
+    fun japaneseCorrectionUsesExplicitLanguageAndDetectsUnlabeledJapanese() {
+        assertTrue(usesJapaneseCorrection(cues("音声作品"), "ja-JP"))
+        assertTrue(usesJapaneseCorrection(cues("今日はいい天気"), "ai_ja"))
+        assertTrue(usesJapaneseCorrection(cues("もう起きてる？")))
+        assertFalse(usesJapaneseCorrection(cues("これは日文"), "en"))
+        assertFalse(usesJapaneseCorrection(cues("繁體中文字幕"), "zh-TW"))
+        assertFalse(usesJapaneseCorrection(cues("A short English subtitle.")))
+    }
+
     private val simplified = "这是我们为你准备的简体中文字幕，希望你听完以后能够轻松地入睡。"
     private fun cues(text: String, translation: String? = null) = listOf(SubtitleCue(0, 1000, text, translation))
 
@@ -34,6 +44,17 @@ class SubtitleLanguageTest {
             simplified + "好夢", simplified + "ありがとう", simplified + "hello", simplified + "안녕",
         )) assertTrue(text, canGenerateTranslation(cues(text)))
         assertFalse(canGenerateTranslation(emptyList()))
+    }
+
+    @Test fun unlabeledChineseTextDoesNotUseJapaneseCorrection() {
+        // 繁体（命中繁体专用字表）与短简体（命中简体专用字表）都判为中文，不走日文校对。
+        assertFalse(usesJapaneseCorrection(cues("這是我們為你準備的繁體中文字幕，希望你聽完以後能夠輕鬆地入睡。")))
+        assertFalse(usesJapaneseCorrection(cues("我们说")))
+        // 已知取舍：字表与日文新字体重叠，零假名纯汉字日文含这些字时降级为通用翻译。
+        assertFalse(usesJapaneseCorrection(cues("音声作品")))
+        // 纯共用汉字无专用字命中维持日文判定；假名信号仍然优先于汉字证据。
+        assertTrue(usesJapaneseCorrection(cues("山水日月天地人生".repeat(4))))
+        assertTrue(usesJapaneseCorrection(cues("这是一个人ありがとう")))
     }
 
     @Test fun translationsNeverCauseJapaneseOriginalToBeClassifiedAsChinese() {

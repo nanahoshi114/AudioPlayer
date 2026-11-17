@@ -15,18 +15,25 @@ import com.nanahoshi.audioplayer.data.biliSubtitleLanguage
 import com.nanahoshi.audioplayer.data.writeBiliSubtitle
 import com.nanahoshi.audioplayer.data.db.DownloadStatus
 import com.nanahoshi.audioplayer.data.db.QueuedTrack
+import com.nanahoshi.audioplayer.data.db.SubtitlePublicationEntity
+import com.nanahoshi.audioplayer.data.db.TranslateMark
 import com.nanahoshi.audioplayer.data.db.TrackEntity
 import com.nanahoshi.audioplayer.data.db.WhisperJobEntity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.InputStream
 import java.nio.charset.Charset
 import java.security.MessageDigest
+import kotlin.coroutines.coroutineContext
 
 data class LoadedSubtitles(
     val cues: List<SubtitleCue>,
@@ -34,6 +41,9 @@ data class LoadedSubtitles(
     val generated: Boolean,
     val notice: String? = null,
     val language: String? = null,
+    val origin: SubtitleOrigin? = null,
+    val sourceCues: List<SubtitleCue> = cues,
+    val generatedFingerprint: String? = null,
 ) {
     val canTranslate: Boolean = canGenerateTranslation(cues, language)
 }
@@ -53,12 +63,12 @@ class SubtitleSource(
 ) {
     private val _revision = MutableStateFlow(0L)
     internal val revision = _revision.asStateFlow()
+    internal val generatedWriteLock = Mutex()
 
     suspend fun load(row: QueuedTrack): LoadedSubtitles = withContext(Dispatchers.IO) {
         try {
             when (val state = generatedState(row)) {
-                is GeneratedState.Ready ->
-                    return@withContext LoadedSubtitles(state.cues, state.cues.isEmpty(), true)
+                is GeneratedState.Ready -> return@withContext loadedGenerated(state.fingerprint, state.document)
                 GeneratedState.Corrupt -> return@withContext LoadedSubtitles(
                     emptyList(), false, false, "生成的字幕文件损坏，可在「更多」里删除后重新生成",
                 )
@@ -68,7 +78,10 @@ class SubtitleSource(
                 ?: bilibiliRowTrack(row)
                 ?: return@withContext LoadedSubtitles(emptyList(), false, false)
             val trackSubtitles = cuesFor(track)
-            LoadedSubtitles(withOverlay(row, trackSubtitles.cues), false, false, trackSubtitles.notice, trackSubtitles.language)
+            LoadedSubtitles(
+                withOverlay(row, trackSubtitles.cues), false, false, trackSubtitles.notice, trackSubtitles.language,
+                sourceCues = trackSubtitles.cues,
+            )
         } catch (error: CancellationException) {
             throw error
         } catch (_: Exception) {
@@ -77,25 +90,36 @@ class SubtitleSource(
     }
 
     suspend fun discard(row: QueuedTrack) = withContext(Dispatchers.IO) {
-        removeGenerated(row)
+        generatedWriteLock.withLock { removeGenerated(row) }
         db.translations().deleteInactiveForQueue(row.queueItemId)
         invalidate()
     }
 
     suspend fun discardStored(trackId: Long?, localPath: String?, remoteUrl: String?) = withContext(Dispatchers.IO) {
+        generatedWriteLock.withLock { discardStoredLocked(trackId, localPath, remoteUrl) }
+    }
+
+    internal suspend fun discardStoredLocked(trackId: Long?, localPath: String?, remoteUrl: String?) {
         removeGenerated(storedQueueRow(trackId, localPath, remoteUrl))
         invalidate()
     }
 
-    /** 只清理翻译覆盖对应的已完成/失败记录，进行中的翻译保留；文件由下载管理负责删除，听写记录不动。 */
-    suspend fun discardTranslationRecords(trackId: Long?, remoteUrl: String?, queueItemId: Long?) = withContext(Dispatchers.IO) {
-        db.withTransaction {
-            trackId?.takeIf { it > 0L }?.let { db.translations().deleteInactiveForTrack(it) }
-            remoteUrl?.takeIf { it.isNotBlank() }?.let { db.translations().deleteInactiveForUrl(it) }
-            queueItemId?.let { db.translations().deleteInactiveForQueue(it) }
+    /** 与翻译发布串行删除覆盖文件及其终态记录，保留进行中的翻译和听写。 */
+    suspend fun discardTranslationOverlay(file: File) =
+        withContext(Dispatchers.IO) {
+            generatedWriteLock.withLock {
+                if (file.isFile && !file.delete()) return@withLock
+                db.withTransaction {
+                    val candidates = db.translations().all().filter {
+                        it.generatedFingerprint == null && overlayFileName(
+                            it.trackId, it.remoteUrl, it.localUri, it.queueItemId, it.bvid, it.cid,
+                        ) == file.name
+                    }
+                    candidates.forEach { db.translations().deleteInactive(it.id) }
+                }
+                invalidate()
+            }
         }
-        invalidate()
-    }
 
     internal fun invalidate() {
         _revision.update { it + 1 }
@@ -105,7 +129,10 @@ class SubtitleSource(
     suspend fun hasGenerated(trackId: Long?, localPath: String?, remoteUrl: String?): Boolean = withContext(Dispatchers.IO) {
         val row = storedQueueRow(trackId, localPath, remoteUrl)
         val identities = listOf(row) + recoveredOverlayIdentities(row, relatedDone(row))
-        identities.any { overlayFile(it).isFile } || generatedState(row) != GeneratedState.Missing
+        val biliOverlay = biliIdentityFromPath(row.localUri)?.let { (bvid, cid) ->
+            overlayFileName(null, null, null, null, bvid, cid)?.let { File(File(context.filesDir, "subtitles"), it) }
+        }
+        identities.any { overlayFile(it).isFile } || biliOverlay?.isFile == true || generatedState(row) != GeneratedState.Missing
     }
 
     suspend fun cuesFor(track: TrackEntity): TrackSubtitles = withContext(Dispatchers.IO) {
@@ -123,15 +150,146 @@ class SubtitleSource(
         }
     }
 
-    suspend fun saveTranslations(row: QueuedTrack, cues: List<SubtitleCue>) = withContext(Dispatchers.IO) {
-        val job = findGeneratedJob(row)
-        if (job != null) {
-            val file = generatedFile(job.fingerprint)
-            if (file.name == ".json") return@withContext
-            file.writeTextAtomically(encodeGeneratedCues(cues))
-            db.whisper().markTranslated(job.id, System.currentTimeMillis())
-        } else {
-            overlayFile(row).writeTextAtomically(encodeGeneratedCues(cues))
+    internal fun loadGenerated(fingerprint: String): LoadedSubtitles? =
+        generatedFile(fingerprint).takeIf { it.isFile }?.let { file ->
+            parseGeneratedSubtitles(file.readText())?.let { loadedGenerated(fingerprint, it) }
+        }
+
+    private fun loadedGenerated(fingerprint: String, document: GeneratedSubtitles) =
+        LoadedSubtitles(
+            document.displayCues, document.cues.isEmpty(), true, origin = document.origin,
+            sourceCues = document.cues, generatedFingerprint = fingerprint,
+        )
+
+    internal suspend fun generatedFingerprint(row: QueuedTrack): String? = findGeneratedJob(row)?.fingerprint
+
+    suspend fun saveTranslations(
+        row: QueuedTrack,
+        cues: List<SubtitleCue>,
+        expected: LoadedSubtitles? = null,
+        translationJobId: Long? = null,
+        generatedFingerprint: String? = null,
+    ): Boolean = withContext(Dispatchers.IO) {
+        // 非生成路径：核对移到写锁外，避免联网重读阻塞取消/删除，也避免网络抖动丢弃已完成的翻译。
+        // 只有读到非空源且内容指纹变化才拒绝；核对读到空结果（加载失败或源真空）时放行——
+        // overlay 内嵌源指纹，显示侧仅在精确匹配时套用，不会错误覆盖已变化的源。
+        if (expected != null && !expected.generated && generatedFingerprint == null) {
+            val verified = load(row)
+            if (verified.sourceCues.isNotEmpty() &&
+                subtitleSourceFingerprint(verified.sourceCues) != subtitleSourceFingerprint(expected.sourceCues)
+            ) return@withContext false
+        }
+        generatedWriteLock.withLock {
+            val currentJob = findGeneratedJob(row)
+            if (generatedFingerprint != null && currentJob != null && currentJob.fingerprint != generatedFingerprint) {
+                return@withLock false
+            }
+            val fingerprint = generatedFingerprint ?: currentJob?.fingerprint
+            val file = fingerprint?.let(::generatedFile)
+            val document = file?.takeIf { it.isFile }?.let { parseGeneratedSubtitles(it.readText()) }
+            if (generatedFingerprint != null && document == null) return@withLock false
+            if (document != null) {
+                // 生成路径：本地文件比较，保留严格守卫。
+                val current = loadedGenerated(checkNotNull(fingerprint), document)
+                if (expected != null && current != expected) return@withLock false
+            } else if (expected != null && expected.generated) {
+                // 生成字幕在保存前被删除：拒绝，不降级写 overlay。
+                return@withLock false
+            }
+            coroutineContext.ensureActive()
+            val target = if (document != null) checkNotNull(file) else overlayFile(row)
+            val payload = if (document != null) {
+                encodeGeneratedCues(document.cues, document.origin, revisedCues = cues)
+            } else {
+                encodeGeneratedCues(cues, null, sourceFingerprint = expected?.sourceCues?.let(::subtitleSourceFingerprint))
+            }
+            val whisperJobId = if (document != null) {
+                currentJob?.takeIf { it.fingerprint == fingerprint }?.id
+                    ?: fingerprint?.let { db.whisper().forFingerprint(it).lastOrNull { job -> job.status == DownloadStatus.DONE }?.id }
+            } else null
+            if (translationJobId == null) {
+                withContext(NonCancellable) {
+                    target.writeTextAtomically(payload)
+                    whisperJobId?.let { db.whisper().markTranslated(it, System.currentTimeMillis()) }
+                }
+                true
+            } else publishTranslation(target, payload, whisperJobId, translationJobId)
+        }
+    }
+
+    /** 调用者持有 generatedWriteLock。写入发布记录后，中断由启动恢复接手。 */
+    internal suspend fun publishTranslation(
+        target: File,
+        payload: String,
+        whisperJobId: Long?,
+        translationJobId: Long?,
+    ): Boolean {
+        coroutineContext.ensureActive()
+        return withContext(NonCancellable) {
+            val now = System.currentTimeMillis()
+            val publication = SubtitlePublicationEntity(target.name, payload, whisperJobId, translationJobId, now)
+            val staged = db.withTransaction {
+                if (translationJobId != null) {
+                    if (db.translations().get(translationJobId)?.status != DownloadStatus.RUNNING) return@withTransaction false
+                } else if (whisperJobId != null && db.whisper().get(whisperJobId)?.translateStatus != TranslateMark.RUNNING) {
+                    return@withTransaction false
+                }
+                db.translations().stagePublication(publication)
+                true
+            }
+            if (!staged) return@withContext false
+            val published = finishPublication(publication)
+            if (published) invalidate()
+            published
+        }
+    }
+
+    internal suspend fun recoverPublications() = generatedWriteLock.withLock {
+        for (publication in db.translations().pendingPublications()) {
+            try {
+                finishPublication(publication)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // 单条恢复失败不阻塞其余发布补完，记录留待下次启动。
+            }
+        }
+    }
+
+    private suspend fun finishPublication(publication: SubtitlePublicationEntity): Boolean {
+        val target = File(File(context.filesDir, "subtitles"), publication.filename)
+        var written = false
+        // 非法文件名（如目录穿越）与写入失败同走失败分支，不抛出中断恢复。
+        if (target.name == publication.filename) {
+            try {
+                target.writeTextAtomically(publication.payload)
+                written = true
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // 含非 IO 异常（如 SecurityException）：清发布记录并标失败，可重试。
+            }
+        }
+        if (!written) {
+            db.withTransaction {
+                db.translations().clearPublication(publication.filename)
+                publication.translationJobId?.let { db.translations().failIfActive(it, "无法保存译文，请重试") }
+                    ?: publication.whisperJobId?.let { db.whisper().markTranslateFailed(it, "无法保存译文，请重试") }
+            }
+            return false
+        }
+        return try {
+            db.withTransaction {
+                publication.translationJobId?.let { db.translations().finishIfActive(it) }
+                publication.whisperJobId?.let { db.whisper().markTranslated(it, publication.translatedAt) }
+                db.translations().clearPublication(publication.filename)
+            }
+            true
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // 文件已写成但 DB 提交失败：保留发布记录，下次启动幂等重写再提交。
+            false
         }
     }
 
@@ -139,12 +297,12 @@ class SubtitleSource(
         val job = findGeneratedJob(row) ?: return GeneratedState.Missing
         val file = generatedFile(job.fingerprint)
         if (file.name == ".json" || !file.isFile) return GeneratedState.Missing
-        val cues = parseGeneratedCuesOrNull(file.readText()) ?: return GeneratedState.Corrupt
-        return GeneratedState.Ready(cues)
+        val document = parseGeneratedSubtitles(file.readText()) ?: return GeneratedState.Corrupt
+        return GeneratedState.Ready(document, job.fingerprint)
     }
 
     private sealed interface GeneratedState {
-        data class Ready(val cues: List<SubtitleCue>) : GeneratedState
+        data class Ready(val document: GeneratedSubtitles, val fingerprint: String) : GeneratedState
         data object Corrupt : GeneratedState
         data object Missing : GeneratedState
     }
@@ -155,8 +313,10 @@ class SubtitleSource(
             val file = generatedFile(fingerprint)
             if (file.name != ".json") file.delete()
             db.whisper().deleteDoneForFingerprint(fingerprint)
+            db.translations().deleteInactiveForFingerprint(fingerprint)
         }
         overlayFile(row).delete()
+        overlayFile(row, useBiliIdentity = false).delete()
         val trackId = row.trackId?.takeIf { it > 0L }
         if (trackId != null) {
             db.whisper().deleteDoneForTrack(trackId)
@@ -167,7 +327,8 @@ class SubtitleSource(
             db.translations().deleteInactiveForUrl(it)
         }
         row.localUri?.takeIf { it.isNotBlank() }?.let { db.whisper().deleteDoneForPath(it) }
-        storedAudioPath(row)?.let { db.whisper().deleteDoneForPath(it) }
+        val storedPath = storedAudioPath(row)
+        storedPath?.let { db.whisper().deleteDoneForPath(it) }
         // 孤儿条目的翻译覆盖按旧 track/url 命名；按找回的身份补删文件和记录。
         for (identity in recoveredOverlayIdentities(row, jobs)) {
             overlayFile(identity).delete()
@@ -180,12 +341,33 @@ class SubtitleSource(
                 db.translations().deleteInactiveForUrl(it)
             }
         }
+        // 未入库 B 站音频的翻译覆盖按 bili 身份命名；storedQueueRow 不带 bvid/cid，从存储路径还原后补删。
+        val bili = biliIdentityFromPath(row.localUri) ?: biliIdentityFromPath(storedPath)
+        if (bili != null) {
+            val (bvid, cid) = bili
+            overlayFileName(null, null, null, null, bvid, cid)?.let {
+                File(File(context.filesDir, "subtitles"), it).delete()
+            }
+            db.translations().deleteInactiveForBili(bvid, cid)
+        }
+    }
+
+    /** B 站音轨恒存于 filesDir/bilibili/{bvid}/{cid}.m4s（AGENTS §6.1），从路径确定性还原身份。 */
+    private fun biliIdentityFromPath(path: String?): Pair<String, Long>? {
+        if (path.isNullOrBlank() || !path.startsWith("/")) return null
+        val file = File(path)
+        val dir = file.parentFile ?: return null
+        if (dir.parentFile != File(context.filesDir, "bilibili")) return null
+        val bvid = dir.name.takeIf { BVID_ROW.matches(it) } ?: return null
+        val cid = file.nameWithoutExtension.toLongOrNull()?.takeIf { it > 0L } ?: return null
+        return bvid to cid
     }
 
     private suspend fun relatedDone(row: QueuedTrack): List<WhisperJobEntity> {
         val found = mutableListOf<WhisperJobEntity>()
         row.trackId?.takeIf { it > 0L }?.let { found += db.whisper().doneForTrack(it) }
-        row.remoteUrl?.takeIf { it.isNotBlank() }?.let { found += db.whisper().doneForUrl(it) }
+        row.remoteUrl?.takeIf { it.isNotBlank() && (row.source != TrackSource.BILIBILI || it.startsWith("/")) }
+            ?.let { found += db.whisper().doneForUrl(it) }
         storedAudioPath(row)?.let { found += db.whisper().doneForPath(it) }
         return found.distinctBy { it.id }
     }
@@ -193,7 +375,8 @@ class SubtitleSource(
     private suspend fun findGeneratedJob(row: QueuedTrack): WhisperJobEntity? {
         val jobs = buildList {
             row.trackId?.let { db.whisper().latestDoneForTrack(it) }?.let(::add)
-            row.remoteUrl?.takeIf { it.isNotBlank() }?.let { db.whisper().latestDoneForUrl(it) }?.let(::add)
+            row.remoteUrl?.takeIf { it.isNotBlank() && (row.source != TrackSource.BILIBILI || it.startsWith("/")) }
+                ?.let { db.whisper().latestDoneForUrl(it) }?.let(::add)
             storedAudioPath(row)?.let { db.whisper().latestDoneForPath(it) }?.let(::add)
         }
         return jobs.maxByOrNull { it.id }
@@ -201,24 +384,26 @@ class SubtitleSource(
 
     private fun withOverlay(row: QueuedTrack, cues: List<SubtitleCue>): List<SubtitleCue> {
         if (cues.isEmpty() || cues.hasTranslation()) return cues
-        val file = overlayFile(row)
+        val file = overlayFile(row).takeIf { it.isFile }
+            ?: overlayFile(row, useBiliIdentity = false)
         if (!file.isFile) return cues
-        val overlay = parseGeneratedCues(file.readText())
-        if (overlay.isEmpty()) return cues
-        val byStart = overlay.associateBy { it.startMs }
-        return cues.map { cue ->
-            val extra = byStart[cue.startMs]?.translation
-            if (extra.isNullOrBlank()) cue else cue.copy(translation = extra)
-        }
+        val overlay = runCatching { parseGeneratedSubtitles(file.readText()) }.getOrNull() ?: return cues
+        return applySubtitleOverlay(cues, overlay)
     }
 
-    private fun overlayFile(row: QueuedTrack): File =
-        File(File(context.filesDir, "subtitles"),
-            overlayFileName(row.trackId, row.remoteUrl, row.localUri, row.queueItemId)!!)
+    private fun overlayFile(row: QueuedTrack, useBiliIdentity: Boolean = true): File {
+        val bili = if (useBiliIdentity) bilibiliRowTrack(row) else null
+        return File(File(context.filesDir, "subtitles"),
+            overlayFileName(row.trackId, row.remoteUrl, row.localUri, row.queueItemId, bili?.bvid, bili?.cid)!!)
+    }
 
     private suspend fun storedAudioPath(row: QueuedTrack): String? {
         val track = row.trackId?.let { db.tracks().getById(it) }
-        listOf(track?.localUri, row.localUri).firstOrNull { isFile(it) }?.let { return it }
+        val bili = bilibiliRowTrack(row)
+        if (bili != null) {
+            com.nanahoshi.audioplayer.data.readyBiliAudio(context.filesDir, bili.bvid, bili.cid)?.let { return it.absolutePath }
+        }
+        listOf(track?.localUri, row.localUri, row.remoteUrl).firstOrNull { isFile(it) }?.let { return it }
         val url = row.remoteUrl
         if (!url.isNullOrBlank()) {
             val done = db.downloads().latestForUrl(url)
@@ -397,8 +582,11 @@ internal fun recoveredOverlayIdentities(row: QueuedTrack, jobs: List<WhisperJobE
 }
 
 /** 翻译覆盖文件名；身份优先级与队列行一致，按翻译任务匹配时 localUri 传 null。 */
-internal fun overlayFileName(trackId: Long?, remoteUrl: String?, localUri: String?, queueItemId: Long?): String? {
+internal fun overlayFileName(
+    trackId: Long?, remoteUrl: String?, localUri: String?, queueItemId: Long?, bvid: String? = null, cid: Long? = null,
+): String? {
     val raw = when {
+        bvid != null && cid != null && (trackId == null || trackId <= 0L) -> "bili:$bvid:$cid"
         trackId != null && trackId > 0L -> "track:$trackId"
         !remoteUrl.isNullOrBlank() -> "url:$remoteUrl"
         !localUri.isNullOrBlank() -> "path:$localUri"

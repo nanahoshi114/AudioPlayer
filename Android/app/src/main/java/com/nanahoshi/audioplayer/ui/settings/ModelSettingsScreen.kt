@@ -41,6 +41,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -51,11 +52,14 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nanahoshi.audioplayer.data.SENSE_VOICE_MODEL
-import com.nanahoshi.audioplayer.data.SenseVoiceModelState
+import com.nanahoshi.audioplayer.data.ModelDownloadSource
+import com.nanahoshi.audioplayer.data.OfflineModelDownloadService
+import com.nanahoshi.audioplayer.data.OfflineWhisperModel
+import com.nanahoshi.audioplayer.data.OfflineWhisperModelState
+import com.nanahoshi.audioplayer.data.PARAKEET_MODEL
 import com.nanahoshi.audioplayer.data.TranslatePlatform
 import com.nanahoshi.audioplayer.data.WHISPER_MODEL_QWEN
 import com.nanahoshi.audioplayer.data.WHISPER_MODEL_QWEN3
-import com.nanahoshi.audioplayer.data.hasActiveSenseVoiceJob
 import com.nanahoshi.audioplayer.data.isCloudWhisperModel
 import com.nanahoshi.audioplayer.data.isOnDeviceWhisperModel
 import com.nanahoshi.audioplayer.data.whisperModelLabel
@@ -93,13 +97,16 @@ fun ModelSettingsScreen(
                     model = viewModel.whisperModel,
                     onModel = viewModel::selectWhisperModel,
                 )
-                if (isOnDeviceWhisperModel(viewModel.whisperModel)) {
-                    val senseVoiceState by viewModel.senseVoice.state.collectAsState()
-                    SenseVoiceModelPanel(
-                        state = senseVoiceState,
-                        onDownload = viewModel::downloadSenseVoice,
-                        onCancel = viewModel::cancelSenseVoiceDownload,
-                        onDelete = viewModel::deleteSenseVoice,
+                val offlineModel = OfflineWhisperModel.fromId(viewModel.whisperModel)
+                if (offlineModel != null) {
+                    val manager = viewModel.offlineModel(offlineModel)
+                    val state by manager.state.collectAsState()
+                    OfflineModelPanel(
+                        model = offlineModel,
+                        state = state,
+                        onDownload = { viewModel.downloadOfflineModel(offlineModel, it) },
+                        onCancel = manager::cancelDownload,
+                        onDelete = { viewModel.deleteOfflineModel(offlineModel) },
                     )
                     Button(
                         onClick = viewModel::saveWhisper,
@@ -206,6 +213,21 @@ fun ModelSettingsScreen(
                         onCheckedChange = viewModel::setAutoPolish,
                     )
                 }
+                Row(
+                    Modifier.fillMaxWidth().padding(top = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("翻译调优", modifier = Modifier.weight(1f))
+                    Switch(
+                        checked = viewModel.translateAutoCorrect,
+                        onCheckedChange = viewModel::setAutoCorrect,
+                    )
+                }
+                Text(
+                    "打开后，日文合并超出条数、时长或字数限制时，会让模型修正一次再交付；关闭则直接交付。每批最多两次请求。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 FlowRow(
                     Modifier.fillMaxWidth().padding(top = 8.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -235,7 +257,7 @@ private fun SaveStatus(modified: Boolean, configured: Boolean) {
 
 class ModelSettingsViewModel(app: Application) : AndroidViewModel(app) {
     private val graph = app.graph()
-    val senseVoice = graph.senseVoice
+    internal fun offlineModel(model: OfflineWhisperModel) = graph.offlineWhisperModels.getValue(model)
     var whisperModel by mutableStateOf(graph.credentials.resolvedWhisperModel())
     var whisperBase by mutableStateOf(graph.credentials.whisperBaseUrl(whisperModel).orEmpty())
     var whisperToken by mutableStateOf(graph.credentials.whisperToken(whisperModel).orEmpty())
@@ -251,6 +273,8 @@ class ModelSettingsViewModel(app: Application) : AndroidViewModel(app) {
     var translateEffort by mutableStateOf(graph.credentials.translateEffort(translatePlatform))
         private set
     var translateAutoPolish by mutableStateOf(graph.credentials.translateAutoPolish())
+        private set
+    var translateAutoCorrect by mutableStateOf(graph.credentials.translateAutoCorrect())
         private set
 
     private var whisperBaseline by mutableStateOf(currentWhisperInput())
@@ -268,7 +292,7 @@ class ModelSettingsViewModel(app: Application) : AndroidViewModel(app) {
         if (isOnDeviceWhisperModel(id)) {
             whisperBase = ""
             whisperToken = ""
-            whisperSaved = graph.senseVoice.isReady()
+            whisperSaved = graph.whisper.missingOfflineModel(id) == null
         } else {
             whisperBase = graph.credentials.whisperBaseUrl(id).orEmpty()
             whisperToken = graph.credentials.whisperToken(id).orEmpty()
@@ -283,24 +307,28 @@ class ModelSettingsViewModel(app: Application) : AndroidViewModel(app) {
         whisperToken = graph.credentials.whisperToken(whisperModel).orEmpty()
         whisperModel = graph.credentials.resolvedWhisperModel()
         whisperSaved = if (isOnDeviceWhisperModel(whisperModel)) {
-            graph.senseVoice.isReady()
+            graph.whisper.missingOfflineModel(whisperModel) == null
         } else {
             graph.credentials.hasWhisper(whisperModel)
         }
         whisperBaseline = currentWhisperInput()
     }
 
-    fun downloadSenseVoice() = graph.senseVoice.download()
-
-    fun cancelSenseVoiceDownload() = graph.senseVoice.cancelDownload()
-
-    fun deleteSenseVoice() {
+    internal fun deleteOfflineModel(model: OfflineWhisperModel) {
         viewModelScope.launch {
-            if (hasActiveSenseVoiceJob(graph.db.whisper().active())) {
-                graph.messages.value = "有听写任务正在使用本机模型，请先中止后再删除"
-            } else {
-                graph.senseVoice.deleteModel()
+            try {
+                if (!graph.whisper.deleteOfflineModel(model)) {
+                    graph.messages.value = "${whisperModelLabel(model.id)} 正在使用，请先中止对应任务，等当前片段结束后再删除"
+                }
+            } catch (error: com.nanahoshi.audioplayer.data.WhisperException) {
+                graph.messages.value = error.message
             }
+        }
+    }
+
+    internal fun downloadOfflineModel(model: OfflineWhisperModel, source: ModelDownloadSource) {
+        if (!OfflineModelDownloadService.start(getApplication(), model, source)) {
+            graph.messages.value = "无法启动后台模型下载，请回到设置页重试"
         }
     }
 
@@ -352,6 +380,11 @@ class ModelSettingsViewModel(app: Application) : AndroidViewModel(app) {
         graph.credentials.saveTranslateAutoPolish(enabled)
         translateAutoPolish = graph.credentials.translateAutoPolish()
     }
+
+    fun setAutoCorrect(enabled: Boolean) {
+        graph.credentials.saveTranslateAutoCorrect(enabled)
+        translateAutoCorrect = graph.credentials.translateAutoCorrect()
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -379,6 +412,7 @@ private fun WhisperModelField(model: String, onModel: (String) -> Unit) {
                 WHISPER_MODEL_QWEN,
                 WHISPER_MODEL_QWEN3,
                 SENSE_VOICE_MODEL,
+                PARAKEET_MODEL,
             ).forEach { id ->
                 DropdownMenuItem(
                     text = { Text(whisperModelLabel(id)) },
@@ -436,24 +470,36 @@ private fun whisperAddressHint(model: String): (@Composable () -> Unit)? = when 
 }
 
 @Composable
-private fun SenseVoiceModelPanel(
-    state: SenseVoiceModelState,
-    onDownload: () -> Unit,
+private fun OfflineModelPanel(
+    model: OfflineWhisperModel,
+    state: OfflineWhisperModelState,
+    onDownload: (ModelDownloadSource) -> Unit,
     onCancel: () -> Unit,
     onDelete: () -> Unit,
 ) {
+    var sourceDialog by rememberSaveable(model.id) { mutableStateOf(false) }
+    if (sourceDialog) {
+        ModelDownloadDialog(
+            model = model,
+            onDismiss = { sourceDialog = false },
+            onDownload = {
+                sourceDialog = false
+                onDownload(it)
+            },
+        )
+    }
     when (state) {
-        SenseVoiceModelState.NotDownloaded -> Column {
+        OfflineWhisperModelState.NotDownloaded -> Column {
             Text(
-                "模型未下载。下载约 160MB，占用约 230MB，从 GitHub 下载到手机后完全离线运行。",
+                "模型未下载。安装占用约 ${model.installedMiB} MiB，安装后可离线听写。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Button(onClick = onDownload, modifier = Modifier.padding(top = 8.dp)) {
+            Button(onClick = { sourceDialog = true }, modifier = Modifier.padding(top = 8.dp)) {
                 Text("下载模型")
             }
         }
-        is SenseVoiceModelState.Downloading -> Column {
+        is OfflineWhisperModelState.Downloading -> Column {
             val fraction = if (state.bytesTotal > 0L) {
                 (state.bytesDone.toFloat() / state.bytesTotal).coerceIn(0f, 1f)
             } else {
@@ -464,7 +510,7 @@ private fun SenseVoiceModelPanel(
                 modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
             )
             Text(
-                "${(fraction * 100).toInt()}%　${state.bytesDone / 1024 / 1024}MB / ${state.bytesTotal / 1024 / 1024}MB",
+                "${state.source.label}　${(fraction * 100).toInt()}%　${state.bytesDone / 1024 / 1024} / ${state.bytesTotal / 1024 / 1024} MiB",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 4.dp),
@@ -473,8 +519,8 @@ private fun SenseVoiceModelPanel(
                 Text("取消下载")
             }
         }
-        SenseVoiceModelState.Ready -> {
-            var confirmDelete by remember { mutableStateOf(false) }
+        OfflineWhisperModelState.Ready -> {
+            var confirmDelete by rememberSaveable(model.id) { mutableStateOf(false) }
             Row(
                 Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -490,24 +536,62 @@ private fun SenseVoiceModelPanel(
             if (confirmDelete) {
                 ConfirmActionDialog(
                     title = "删除本机模型",
-                    message = "删除后需要重新下载约 160MB 的模型，才能继续离线听写。",
+                    message = "删除 ${whisperModelLabel(model.id)} 后，需要重新下载才能用它离线听写。",
                     confirmLabel = "删除",
                     onConfirm = { confirmDelete = false; onDelete() },
                     onDismiss = { confirmDelete = false },
                 )
             }
         }
-        is SenseVoiceModelState.Failed -> Column {
+        is OfflineWhisperModelState.Failed -> Column {
             Text(
                 "下载失败：${state.message}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.error,
             )
-            Button(onClick = onDownload, modifier = Modifier.padding(top = 8.dp)) {
+            Button(onClick = { sourceDialog = true }, modifier = Modifier.padding(top = 8.dp)) {
                 Text("重试")
             }
         }
     }
+}
+
+@Composable
+private fun ModelDownloadDialog(
+    model: OfflineWhisperModel,
+    onDismiss: () -> Unit,
+    onDownload: (ModelDownloadSource) -> Unit,
+) {
+    var source by rememberSaveable(model.id) { mutableStateOf(ModelDownloadSource.GitHub) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("选择模型下载来源") },
+        text = {
+            Column {
+                ModelDownloadSource.entries.forEach { option ->
+                    Row(
+                        Modifier.fillMaxWidth().selectable(
+                            selected = source == option,
+                            onClick = { source = option },
+                            role = Role.RadioButton,
+                        ).padding(vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = source == option, onClick = null)
+                        Column(Modifier.padding(start = 12.dp)) {
+                            Text(option.label)
+                            Text(
+                                "下载约 ${model.downloadMiB(option)} MiB · 安装约 ${model.installedMiB} MiB",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onDownload(source) }) { Text("下载") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
 }
 
 @Composable
@@ -527,7 +611,7 @@ private fun WhisperHelpDialog(onDismiss: () -> Unit) {
                     modifier = Modifier.padding(top = 8.dp),
                 )
                 Text(
-                    "SenseVoiceSmall：完全在本机运行，不填地址和口令，先点「下载模型」（约 160MB），下载后可离线使用。",
+                    "SenseVoiceSmall 和 Parakeet 0.6B 日语（CTC）：从 GitHub 或 Hugging Face 下载模型后，可在本机离线听写。",
                     modifier = Modifier.padding(top = 8.dp),
                 )
                 Text(

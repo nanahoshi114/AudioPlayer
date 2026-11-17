@@ -23,6 +23,7 @@ fun BiliImportDialog(requests: BiliImportRequests) {
         text = {
             LazyColumn(Modifier.heightIn(max = 460.dp)) {
                 prompt.options.forEachIndexed { index, option ->
+                    if (option.details.parts.size < 2) return@forEachIndexed
                     item(key = "video-$index") {
                         Text(option.details.video.title, style = MaterialTheme.typography.titleSmall,
                             modifier = Modifier.padding(vertical = 8.dp))
@@ -30,7 +31,7 @@ fun BiliImportDialog(requests: BiliImportRequests) {
                             if (option.converts) Text(if (option.mode == BiliImportMode.GROUPED)
                                 "会把这个视频已有的分 P 合并为一个视频项；下载、字幕和播放列表关联不变。"
                             else "原分 P 会保留为独立项并放回原目录；勾选只影响本次新增内容。")
-                        } else if (option.details.parts.size > 1 || option.existing == BiliImportMode.GROUPED) {
+                        } else {
                             SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                                 SegmentedButton(selected = option.mode == BiliImportMode.SPLIT,
                                     onClick = { requests.edit(prompt.id, index) { it.copy(mode = BiliImportMode.SPLIT) } },
@@ -42,7 +43,7 @@ fun BiliImportDialog(requests: BiliImportRequests) {
                             if (option.mode == BiliImportMode.GROUPED) Text("全部 ${option.details.parts.size} 个分 P 合并为一个视频项", Modifier.padding(top = 8.dp))
                         }
                     }
-                    if (!prompt.confirming && option.mode == BiliImportMode.SPLIT && option.details.parts.size > 1) {
+                    if (!prompt.confirming && option.mode == BiliImportMode.SPLIT) {
                         item(key = "select-$index") {
                             val all = option.details.parts.map { it.cid }.toSet()
                             TextButton(onClick = { requests.edit(prompt.id, index) {

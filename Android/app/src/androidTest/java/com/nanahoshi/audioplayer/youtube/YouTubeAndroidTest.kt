@@ -53,7 +53,7 @@ class YouTubeAndroidTest {
             old.execSQL("INSERT INTO whisper_jobs(title,fingerprint,trackId,status,progress,model) VALUES('old','fixture',1,'DONE',1,'SenseVoiceSmall')")
             old.version = 12
         }
-        val migrated = Room.databaseBuilder(context, AppDatabase::class.java, name).addMigrations(AppDatabase.MIGRATION_12_13, AppDatabase.MIGRATION_13_14, AppDatabase.MIGRATION_14_15, AppDatabase.MIGRATION_15_16, AppDatabase.MIGRATION_16_17).build()
+        val migrated = Room.databaseBuilder(context, AppDatabase::class.java, name).addMigrations(AppDatabase.MIGRATION_12_13, AppDatabase.MIGRATION_13_14, AppDatabase.MIGRATION_14_15, AppDatabase.MIGRATION_15_16, AppDatabase.MIGRATION_16_17, AppDatabase.MIGRATION_17_18, AppDatabase.MIGRATION_18_19).build()
         val fresh = Room.databaseBuilder(context, AppDatabase::class.java, freshName).build()
         try {
             assertEquals(4, migrated.tracks().inFolder(1).size)
@@ -61,7 +61,7 @@ class YouTubeAndroidTest {
             assertEquals(1, migrated.queue().snapshot().size)
             assertEquals(1234L, migrated.queue().playbackState()!!.positionMs)
             assertEquals("fixture", migrated.whisper().done().single().fingerprint)
-            assertEquals(17, migrated.openHelper.writableDatabase.version)
+            assertEquals(19, migrated.openHelper.writableDatabase.version)
             fun structure(db: AppDatabase): List<String> {
                 val result = mutableListOf<String>()
                 val database = db.openHelper.writableDatabase
@@ -99,21 +99,23 @@ class YouTubeAndroidTest {
                 com.nanahoshi.audioplayer.dlsite.DlsiteClient(credentials))
             val video = YouTubeVideo("jNQXAC9IVRw", "fixture")
             val saved = library.saveYouTube(video)
-            val jobId = db.downloads().insert(DownloadEntity(trackId = 0, title = video.title, bytesDone = 0, bytesTotal = 0,
+            val jobId = db.downloads().insert(DownloadEntity(trackId = saved.id, title = video.title, bytesDone = 0, bytesTotal = 0,
                 status = DownloadStatus.RUNNING, error = null, source = "YOUTUBE", workKey = video.id))
-            val finished = library.saveYouTube(video, file.path, jobId)
-            assertEquals(saved.id, finished.id)
+            library.completeYouTubeDownload(jobId, video.id, file.path)
             assertEquals(1, db.tracks().inFolder(null).size)
             assertEquals(file.path, db.tracks().getById(saved.id)!!.localUri)
             assertEquals(saved.id, db.downloads().get(jobId)!!.trackId)
             assertEquals(DownloadStatus.DONE, db.downloads().get(jobId)!!.status)
             val cancelled = db.downloads().insert(DownloadEntity(trackId = 0, title = "cancelled", bytesDone = 0, bytesTotal = 0,
                 status = DownloadStatus.RUNNING, error = null, source = "YOUTUBE", workKey = "BaW_jenozKc"))
-            assertEquals(1, db.downloads().cancelYouTube(cancelled))
+            assertEquals(1, db.downloads().stopActive(cancelled, "已中止"))
             assertEquals(0, db.downloads().startQueued(cancelled))
-            try { library.saveYouTube(YouTubeVideo("BaW_jenozKc", "cancelled"), file.path, cancelled); fail() }
+            try { library.completeYouTubeDownload(cancelled, "BaW_jenozKc", file.path); fail() }
             catch (_: kotlinx.coroutines.CancellationException) { }
             assertNull(db.tracks().findYouTube("BaW_jenozKc"))
+            val unsaved = db.downloads().insert(DownloadEntity(trackId = 0, title = "unsaved", bytesDone = 0, bytesTotal = 0,
+                status = DownloadStatus.RUNNING, error = null, source = "YOUTUBE", workKey = "BaW_jenozKc"))
+            assertTrue(runCatching { library.completeYouTubeDownload(unsaved, "BaW_jenozKc", file.path) }.isFailure)
             assertEquals(1, db.tracks().inFolder(null).size)
         } finally { db.close(); file.delete() }
     }

@@ -2,11 +2,13 @@ package com.nanahoshi.audioplayer.data
 
 import com.nanahoshi.audioplayer.data.db.DownloadStatus
 import com.nanahoshi.audioplayer.data.db.WhisperJobEntity
+import com.nanahoshi.audioplayer.playback.GeneratedSubtitles
 import java.net.URI
 
 internal const val WHISPER_MODEL_QWEN = "qwen-audio-3.1-asr"
 internal const val WHISPER_MODEL_QWEN3 = "qwen3-asr"
 internal const val SENSE_VOICE_MODEL = "sense-voice-small"
+internal const val PARAKEET_MODEL = "parakeet-tdt-ctc-0.6b-ja"
 internal const val QWEN3_ASR_MODEL = "Qwen/Qwen3-ASR-1.7B"
 internal const val QWEN_FILE_MODEL = "qwen-audio-3.1-asr-flash-filetrans"
 
@@ -21,6 +23,7 @@ internal fun whisperModelLabel(model: String): String = when (model) {
     WHISPER_MODEL_QWEN -> WHISPER_MODEL_QWEN
     WHISPER_MODEL_QWEN3 -> "Qwen3-ASR"
     SENSE_VOICE_MODEL -> "SenseVoiceSmall"
+    PARAKEET_MODEL -> "Parakeet 0.6B 日语（CTC）"
     else -> SENSE_VOICE_MODEL
 }
 
@@ -28,23 +31,39 @@ internal fun knownWhisperModel(model: String?): String? =
     model?.takeIf {
         it == WHISPER_MODEL_QWEN ||
             it == WHISPER_MODEL_QWEN3 ||
-            it == SENSE_VOICE_MODEL
+            isOnDeviceWhisperModel(it)
     }
 
 internal fun isCloudWhisperModel(model: String?): Boolean = model == WHISPER_MODEL_QWEN
 
 /** 完全在本机运行的听写模型：没有地址和口令，模型文件下载到手机里。 */
-internal fun isOnDeviceWhisperModel(model: String?): Boolean = model == SENSE_VOICE_MODEL
+internal fun isOnDeviceWhisperModel(model: String?): Boolean = OfflineWhisperModel.fromId(model) != null
 
-/** 与运行时分发一致：只有模型明确解析为 SenseVoice 的排队/进行中任务才阻止删除本机模型；空模型任务不会落到 SenseVoice。 */
-internal fun hasActiveSenseVoiceJob(jobs: List<WhisperJobEntity>): Boolean =
+internal fun missingOfflineWhisperModelMessage(model: String): String =
+    "请先在「设置 → 听写和翻译」下载 ${whisperModelLabel(model)} 模型。"
+
+internal fun hasActiveOfflineWhisperJob(jobs: List<WhisperJobEntity>, model: OfflineWhisperModel): Boolean =
     jobs.any {
         (it.status == DownloadStatus.QUEUED || it.status == DownloadStatus.RUNNING) &&
-            knownWhisperModel(it.model) == SENSE_VOICE_MODEL
+            it.model == model.id
     }
 
 internal fun whisperModelsMatch(stored: String?, requested: String): Boolean =
     knownWhisperModel(stored) == requested
+
+internal fun generatedSubtitlesMatch(
+    subtitles: GeneratedSubtitles,
+    model: String,
+    endpoint: String?,
+    latestDone: WhisperJobEntity,
+): Boolean {
+    val origin = subtitles.origin
+    return if (origin == null) {
+        whisperModelsMatch(latestDone.model, model) && sameWhisperEndpoint(latestDone.endpoint, endpoint, model)
+    } else {
+        whisperModelsMatch(origin.model, model) && sameWhisperEndpoint(origin.endpoint, endpoint, model)
+    }
+}
 
 /**
  * 比较两条听写地址是否指向同一个服务。线上接口以前要填到 `/v1`，现在只存主机基址，

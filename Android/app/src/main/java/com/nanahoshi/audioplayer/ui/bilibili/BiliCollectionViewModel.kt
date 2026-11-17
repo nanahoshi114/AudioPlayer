@@ -10,7 +10,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.drop
 import kotlin.random.Random
 
-enum class CollectionAction { PLAY, APPEND, SAVE, DOWNLOAD, COPY, SINGLE }
+enum class CollectionAction { PLAY, APPEND, SAVE, COPY, SINGLE }
 internal data class CollectionPreparation(val action: CollectionAction, val details: List<BiliVideoDetails>,
     val failed: List<String>, val targets: List<BiliVideoHit>)
 
@@ -222,7 +222,7 @@ class BiliCollectionViewModel(app: Application) : AndroidViewModel(app) {
                 if (value.action == CollectionAction.PLAY) graph.player.replaceAndPlayItems(items) else graph.player.appendItems(items)
             }
             CollectionAction.COPY -> { copyDetails = value.details; copyName = collection?.title.orEmpty() }
-            CollectionAction.SAVE, CollectionAction.DOWNLOAD -> import(value.details, value.action, null)
+            CollectionAction.SAVE -> import(value.details, value.action, null)
         }
     }
 
@@ -260,16 +260,12 @@ class BiliCollectionViewModel(app: Application) : AndroidViewModel(app) {
             val failed = mutableListOf<String>()
             val saved = mutableListOf<Long>()
             val copiedParts = mutableListOf<BiliPart>()
-            var downloads = 0
             for ((index, request) in requests.withIndex()) {
                 progress = "正在处理 ${index + 1}/${requests.size}"
                 try {
-                    if (action == CollectionAction.DOWNLOAD) downloads += graph.downloads.enqueueBiliImports(listOf(request))
-                    else {
-                        graph.library.importBili(request)
-                        for (part in request.parts) saved += checkNotNull(graph.db.tracks().findByBvid(part.bvid, part.cid)).id
-                        copiedParts += request.parts
-                    }
+                    graph.library.importBili(request)
+                    for (part in request.parts) saved += checkNotNull(graph.db.tracks().findByBvid(part.bvid, part.cid)).id
+                    copiedParts += request.parts
                 } catch (cancelled: CancellationException) { throw cancelled }
                 catch (failure: Exception) { failed += "${request.video.title}：${failure.message ?: "处理失败"}" }
             }
@@ -278,7 +274,6 @@ class BiliCollectionViewModel(app: Application) : AndroidViewModel(app) {
             }
             selected = emptySet()
             graph.messages.value = when (action) {
-                CollectionAction.DOWNLOAD -> "已加入 $downloads 个下载"
                 CollectionAction.COPY -> if (saved.isEmpty()) "没有可保存的音频，未创建播放列表" else "已复制为普通播放列表"
                 else -> "已加入 ${saved.distinct().size} 首到音频库"
             }

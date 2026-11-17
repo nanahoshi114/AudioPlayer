@@ -9,6 +9,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 
 data class DeleteResult(val deleted: Int, val unlinked: Int, val changed: Int = 0) {
@@ -47,25 +48,27 @@ internal suspend fun deleteLocalCopies(
         currentCoroutineContext().ensureActive()
         // Do not clear an association published by a download while confirmation was open.
         withContext(NonCancellable) {
-            db.withTransaction {
-                val track = db.tracks().getById(expected.id)
-                if (track == null || track.localUri != path || track.source != expected.source) {
-                    changed++
-                    return@withTransaction
-                }
-                when (track.localRemoval(filesDir)) {
-                    LocalRemoval.DOWNLOAD -> {
-                        if (!File(path).delete()) return@withTransaction
-                        if (deleteSubtitles) subtitles.discardStored(track.id, path, track.remoteUrl)
-                        db.downloads().deleteFinishedForPath(path)
-                        if (track.source == TrackSource.BILIBILI) deleteBiliSubtitle(filesDir, track.bvid, track.cid)
-                        deleted++
+            subtitles.generatedWriteLock.withLock {
+                db.withTransaction {
+                    val track = db.tracks().getById(expected.id)
+                    if (track == null || track.localUri != path || track.source != expected.source) {
+                        changed++
+                        return@withTransaction
                     }
-                    LocalRemoval.ASSOCIATION -> unlinked++
-                    null -> return@withTransaction
+                    when (track.localRemoval(filesDir)) {
+                        LocalRemoval.DOWNLOAD -> {
+                            if (!File(path).delete()) return@withTransaction
+                            if (deleteSubtitles) subtitles.discardStoredLocked(track.id, path, track.remoteUrl)
+                            db.downloads().deleteFinishedForPath(path)
+                            if (track.source == TrackSource.BILIBILI) deleteBiliSubtitle(filesDir, track.bvid, track.cid)
+                            deleted++
+                        }
+                        LocalRemoval.ASSOCIATION -> unlinked++
+                        null -> return@withTransaction
+                    }
+                    db.tracks().clearLocalUri(track.id)
+                    db.downloads().deleteFinishedForTrack(track.id)
                 }
-                db.tracks().clearLocalUri(track.id)
-                db.downloads().deleteFinishedForTrack(track.id)
             }
         }
     }

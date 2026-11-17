@@ -39,7 +39,7 @@ class BiliImportRequests(
         val options = videos.distinctBy { it.video.bvid }.filter { it.parts.isNotEmpty() }.map { details ->
             val existing = existingMode(details.video.bvid)
             BiliImportOption(details, existing,
-                if (details.parts.size == 1 && existing != BiliImportMode.GROUPED) BiliImportMode.SPLIT else null,
+                if (details.parts.size == 1) existing ?: BiliImportMode.SPLIT else null,
                 details.parts.map { it.cid }.toSet())
         }
         if (options.isEmpty()) return null

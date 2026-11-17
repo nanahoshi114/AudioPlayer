@@ -174,7 +174,7 @@ class AsmrClient {
         }
     }
 
-    private fun workInfo(input: String): WorkInfo {
+    private suspend fun workInfo(input: String): WorkInfo {
         val code = extractCode(input)
         val info = JSONObject(get("/api/workInfo/$code"))
         val id = info.optLong("id")
@@ -260,11 +260,11 @@ class AsmrClient {
 
     fun httpClient(): OkHttpClient = client
 
-    private fun get(path: String): String = call(path, null)
+    private suspend fun get(path: String): String = call(path, null)
 
-    private fun post(path: String, json: String): String = call(path, json)
+    private suspend fun post(path: String, json: String): String = call(path, json)
 
-    private fun call(path: String, json: String?): String {
+    private suspend fun call(path: String, json: String?): String {
         var last: Exception? = null
         for (base in MIRRORS) {
             try {
@@ -279,7 +279,7 @@ class AsmrClient {
                 } else {
                     builder.post(json.toRequestBody(JSON_MEDIA)).build()
                 }
-                client.newCall(request).execute().use { response ->
+                val result = client.newCall(request).withResponse { response ->
                     val body = response.body?.string().orEmpty()
                     if (!response.isSuccessful) {
                         val server = runCatching { JSONObject(body).optString("error") }.getOrNull().orEmpty()
@@ -291,10 +291,13 @@ class AsmrClient {
                         }
                         if (response.code == 404 || response.code == 400) throw AsmrException(message)
                         last = IOException(message)
-                        return@use
+                        return@withResponse null
                     }
-                    return body
+                    body
                 }
+                if (result != null) return result
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
             } catch (error: AsmrException) {
                 throw error
             } catch (error: Exception) {

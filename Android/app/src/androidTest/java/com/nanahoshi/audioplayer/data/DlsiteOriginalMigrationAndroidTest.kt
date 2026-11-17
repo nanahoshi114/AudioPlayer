@@ -42,7 +42,7 @@ class DlsiteOriginalMigrationAndroidTest {
             old.version = 14
         }
         val migrated = Room.databaseBuilder(context, AppDatabase::class.java, name)
-            .addMigrations(AppDatabase.MIGRATION_14_15, AppDatabase.MIGRATION_15_16, AppDatabase.MIGRATION_16_17).build()
+            .addMigrations(AppDatabase.MIGRATION_14_15, AppDatabase.MIGRATION_15_16, AppDatabase.MIGRATION_16_17, AppDatabase.MIGRATION_17_18, AppDatabase.MIGRATION_18_19).build()
         val fresh = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
         try {
             val track = migrated.tracks().getById(1)!!
@@ -65,9 +65,9 @@ class DlsiteOriginalMigrationAndroidTest {
             assertNull(whisper.awaitFileKey)
             fun structure(db: AppDatabase): List<String> {
                 val sql = db.openHelper.writableDatabase
-                assertEquals(17, sql.version)
+                assertEquals(19, sql.version)
                 return buildList {
-                    for (table in listOf("folders", "bili_import_intents", "downloads", "library_files", "whisper_jobs", "dlsite_original_works", "dlsite_original_entries")) {
+                    for (table in listOf("folders", "downloads", "library_files", "whisper_jobs", "dlsite_original_works", "dlsite_original_entries")) {
                         for (pragma in listOf("table_info", "index_list")) {
                             sql.query("PRAGMA $pragma($table)").use { rows ->
                                 while (rows.moveToNext()) add("$table|$pragma|" +
@@ -80,7 +80,9 @@ class DlsiteOriginalMigrationAndroidTest {
             assertEquals(structure(fresh), structure(migrated))
             assertTrue(migrated.dlsiteOriginals().works().isEmpty())
             assertNull(migrated.folders().get(1)!!.biliBvid)
-            assertTrue(migrated.biliImports().all().isEmpty())
+            migrated.openHelper.readableDatabase.query(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'bili_import_intents'",
+            ).use { assertFalse(it.moveToFirst()) }
             migrated.dlsiteOriginals().upsertWork(DlsiteOriginalWorkEntity("RJ123456", 1, "/fixture/original", "generation"))
             migrated.dlsiteOriginals().upsertEntries(listOf(DlsiteOriginalEntryEntity(
                 "RJ123456", "voice.wav", "AUDIO", 4096, "/fixture/original/voice.wav", "play.mp3", trackId = 1,

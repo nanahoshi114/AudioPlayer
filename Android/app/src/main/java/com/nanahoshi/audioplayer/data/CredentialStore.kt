@@ -258,6 +258,11 @@ class CredentialStore(context: Context) {
         return plainPrefs.getBoolean(KEY_TRANSLATE_AUTO_POLISH, false)
     }
 
+    fun translateAutoCorrect(): Boolean {
+        migrateTranslate()
+        return plainPrefs.getBoolean(KEY_TRANSLATE_AUTO_CORRECT, false)
+    }
+
     fun saveTranslate(platform: TranslatePlatform, token: String, model: String) {
         migrateTranslate()
         plainPrefs.edit().putString(KEY_TRANSLATE_PLATFORM, platform.name).apply()
@@ -294,6 +299,11 @@ class CredentialStore(context: Context) {
     fun saveTranslateAutoPolish(enabled: Boolean) {
         migrateTranslate()
         plainPrefs.edit().putBoolean(KEY_TRANSLATE_AUTO_POLISH, enabled).apply()
+    }
+
+    fun saveTranslateAutoCorrect(enabled: Boolean) {
+        migrateTranslate()
+        plainPrefs.edit().putBoolean(KEY_TRANSLATE_AUTO_CORRECT, enabled).apply()
     }
 
     private fun migrateTranslate() {
@@ -419,6 +429,7 @@ class CredentialStore(context: Context) {
         const val KEY_TRANSLATE_PLATFORM = "translate_platform"
         const val KEY_TRANSLATE_THINKING = "translate_thinking"
         const val KEY_TRANSLATE_AUTO_POLISH = "translate_auto_polish"
+        const val KEY_TRANSLATE_AUTO_CORRECT = "translate_auto_correct"
         const val KEY_TRANSLATE_MIGRATED = "translate_credentials_migrated"
 
         fun translateTokenKey(platform: TranslatePlatform) = "translate_token_${platform.name}"

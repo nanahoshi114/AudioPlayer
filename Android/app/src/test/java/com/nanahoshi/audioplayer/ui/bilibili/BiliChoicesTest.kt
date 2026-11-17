@@ -18,7 +18,7 @@ class BiliChoicesTest {
         assertEquals(choice,choice.toggleAll())
     }
     @Test fun batchSaveAndDownloadSelectAcrossVideosByBothBvAndCid() {
-        for (action in listOf(BiliAction.SAVE,BiliAction.DOWNLOAD)) {
+        for (action in listOf(BiliAction.SAVE)) {
             val choice=BiliPartChoice.create(action,listOf(group(listOf(first,second)),group(listOf(other))),listOf("failed"))
             assertEquals(listOf(first,second,other),choice.chosen)
             assertEquals(listOf(first,other),choice.toggle(second).chosen)
@@ -28,7 +28,7 @@ class BiliChoicesTest {
         }
     }
     @Test fun failedOnlyAndDuplicatePartResultsCannotCreateExtraActions() {
-        assertTrue(BiliPartChoice.create(BiliAction.DOWNLOAD,emptyList(),listOf("failure")).chosen.isEmpty())
+        assertTrue(BiliPartChoice.create(BiliAction.SAVE,emptyList(),listOf("failure")).chosen.isEmpty())
         val choice=BiliPartChoice.create(BiliAction.SAVE,listOf(group(listOf(first,first))),emptyList())
         assertEquals(listOf(first),choice.chosen)
     }

@@ -1,0 +1,9 @@
+Parakeet TDT-CTC 0.6B (ja)
+Creator: NVIDIA
+Original model: https://huggingface.co/nvidia/parakeet-tdt_ctc-0.6b-ja
+License: Creative Commons Attribution 4.0 International
+https://creativecommons.org/licenses/by/4.0/legalcode
+
+The downloadable model is the CTC branch exported to ONNX and quantized
+to INT8 by the sherpa-onnx project.
+https://k2-fsa.github.io/sherpa/onnx/pretrained_models/offline-ctc/nemo/japanese.html

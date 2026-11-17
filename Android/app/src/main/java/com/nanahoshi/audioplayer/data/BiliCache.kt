@@ -1,5 +1,6 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.playback.writeTextAtomically
 import java.io.File
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -52,7 +53,7 @@ fun writeBiliSubtitle(filesDir: File, bvid: String, cid: Long, document: String,
             val root = Json.parseToJsonElement(document).jsonObject
             JsonObject(root + ("_audioPlayerSubtitle" to JsonObject(mapOf("language" to JsonPrimitive(language))))).toString()
         }
-        file.writeText(cached)
+        file.writeTextAtomically(cached)
         true
     } catch (_: Exception) {
         false

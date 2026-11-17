@@ -515,11 +515,10 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             allowPartial = dlsite.all { !it.fileHash.isNullOrBlank() },
         ) ?: return null
         if (mode == DlsiteDownloadMode.PARTIAL) return graph.downloads.enqueue(tracks)
-        var count = 0
-        works.forEach { (workno, title) ->
-            if (graph.downloads.enqueueDlsiteArchive(workno, title) > 0L) count++
+        return graph.downloads.prepare {
+            val count = works.count { (workno, title) -> graph.downloads.enqueueDlsiteArchive(workno, title).added }
+            count + graph.downloads.enqueue(tracks.filter { it.source != TrackSource.DLSITE })
         }
-        return count + graph.downloads.enqueue(tracks.filter { it.source != TrackSource.DLSITE })
     }
 
     internal data class LocalRemovalTargets(
@@ -635,16 +634,18 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         if (bothKnown) {
             chosen = askCache(CachePrompt.Source(sourceFolderId)) as? TrackSource ?: return
         }
-        val tracks = graph.library.asmrTracksInTree(folderId)
+        val tracks = if (root == null) graph.library.tracksInTree(folderId)
+            else graph.library.asmrTracksInTree(folderId)
         // 普通父目录仍下载整个子树；DLsite 子作品各自转为一个完整原始包任务。
         if (root == null) {
             val worknos = tracks.filter { it.source == TrackSource.DLSITE }
                 .mapNotNull { graph.downloads.requestWorkno(it) }
                 .distinctBy { com.nanahoshi.audioplayer.dlsite.DlsiteClient.canonicalWorkno(it) }
-            for (workno in worknos) graph.downloads.enqueueDlsiteArchive(workno)
-            val files = graph.downloads.enqueue(tracks.filter { it.source != TrackSource.DLSITE })
-            graph.messages.value = if (worknos.isEmpty() && files == 0) "没有需要下载的音频"
-                else "已加入 ${worknos.size + files} 个下载任务"
+            val count = graph.downloads.prepare {
+                val archives = worknos.count { graph.downloads.enqueueDlsiteArchive(it).added }
+                archives + graph.downloads.enqueue(tracks.filter { it.source != TrackSource.DLSITE })
+            }
+            graph.messages.value = if (count == 0) "没有需要下载的音频" else "已加入 $count 个下载任务"
             return
         }
         // 没弹窗时：当前来源优先，作品外面按 Play 优先，其次 asmr.one。
@@ -658,8 +659,10 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
                 ?: tracks.filter { it.source == TrackSource.DLSITE }.mapNotNull { graph.downloads.requestWorkno(it) }
                     .distinctBy { com.nanahoshi.audioplayer.dlsite.DlsiteClient.canonicalWorkno(it) }
             if (worknos.isEmpty()) error("这个作品缺少编号")
-            for (workno in worknos) graph.downloads.enqueueDlsiteArchive(workno, root?.name ?: workno)
-            graph.messages.value = "已加入 ${worknos.size} 个完整原始包下载任务"
+            val count = graph.downloads.prepare {
+                worknos.count { graph.downloads.enqueueDlsiteArchive(it, root?.name ?: it, root?.id).added }
+            }
+            graph.messages.value = if (count == 0) "没有需要下载的音频" else "已加入 $count 个完整原始包下载任务"
             return
         }
         val pending = tracks.filter { it.source == source && !LocalAudio.hasStoredCopy(it.localUri) }

@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.ui.asmr
 
+import com.nanahoshi.audioplayer.data.storageKey
+import com.nanahoshi.audioplayer.data.sanitizeEntryName
 import android.app.Application
 import android.content.ActivityNotFoundException
 import android.content.Context
@@ -58,7 +60,6 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Description
-import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.MoreVert
@@ -121,7 +122,6 @@ import com.nanahoshi.audioplayer.bilibili.QrPoll
 import com.nanahoshi.audioplayer.bilibili.qrBitmap
 import com.nanahoshi.audioplayer.data.toHttps
 import com.nanahoshi.audioplayer.dlsite.DlsiteClient
-import com.nanahoshi.audioplayer.data.DlsiteDownloadMode
 import com.nanahoshi.audioplayer.asmr.AsmrCatalogItem
 import com.nanahoshi.audioplayer.asmr.AsmrNode
 import com.nanahoshi.audioplayer.asmr.AsmrWork
@@ -859,6 +859,10 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
         val siblings = (if (nodeStack.isEmpty()) current.nodes else nodeStack.last().children)
             .filter { isAsmrAudio(it.type, it.title) && !it.streamUrl.isNullOrBlank() }
             .sortedBy { it.title.lowercase() }
+        val parentPath = nodeStack.fold("") { path, folder ->
+            val name = sanitizeEntryName(folder.title)
+            if (path.isEmpty()) name else "$path/$name"
+        }
         val items = siblings.map { sibling ->
             com.nanahoshi.audioplayer.dlsite.RemotePlayable(
                 title = sibling.title,
@@ -869,7 +873,7 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
                 referer = com.nanahoshi.audioplayer.asmr.AsmrClient.REFERER,
                 durationMs = sibling.durationMs,
                 workno = current.id.toString(),
-                fileKey = sibling.hash,
+                fileKey = sibling.storageKey(parentPath),
             )
         }
         val index = siblings.indexOfFirst { it.hash == node.hash && it.title == node.title }.coerceAtLeast(0)
@@ -910,85 +914,6 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
             graph.messages.value = "这个文件没有可播放的音频"
         } else {
             graph.player.replaceAndPlayRemote(siblings, index)
-        }
-    }
-
-    fun downloadLibraryTrack(track: TrackEntity) {
-        viewModelScope.launch {
-            try {
-                if (com.nanahoshi.audioplayer.data.LocalAudio.hasStoredCopy(track.localUri)) return@launch
-                val workno = graph.downloads.requestWorkno(track) ?: error("这个作品缺少编号")
-                val mode = graph.dlsiteDownloadRequests.choose(listOf(workno),
-                    allowPartial = !track.fileHash.isNullOrBlank()) ?: return@launch
-                if (mode == DlsiteDownloadMode.ARCHIVE) {
-                    graph.downloads.enqueueDlsiteArchive(workno)
-                    graph.messages.value = "已加入完整原始包下载任务"
-                } else {
-                    val count = graph.downloads.enqueue(listOf(track))
-                    graph.messages.value = if (count > 0) "已加入下载" else "已在本地或正在下载"
-                }
-            } catch (cancelled: CancellationException) { throw cancelled }
-            catch (failure: Exception) { graph.messages.value = failure.message ?: "下载失败" }
-        }
-    }
-
-    fun downloadPlay(entry: com.nanahoshi.audioplayer.dlsite.PlayEntry) {
-        val audio = entry.audio ?: return
-        if (playDownloaded(audio.fileKey)) {
-            graph.messages.value = "已下载"
-            return
-        }
-        viewModelScope.launch {
-            val workno = audio.workno ?: facts?.sourceId.orEmpty()
-            if (workno.isBlank()) {
-                graph.messages.value = "这个作品缺少编号"
-                return@launch
-            }
-            val mode = graph.dlsiteDownloadRequests.choose(
-                listOf(facts?.title?.ifBlank { workno } ?: workno),
-                allowPartial = !audio.fileKey.isNullOrBlank(),
-            ) ?: return@launch
-            try {
-                if (mode == DlsiteDownloadMode.ARCHIVE) {
-                    val id = graph.downloads.enqueueDlsiteArchive(workno, facts?.title?.ifBlank { workno } ?: workno)
-                    graph.messages.value = if (id > 0L) "已加入完整原始包下载任务" else "完整原始包已在本地或正在下载"
-                } else {
-                    val added = graph.downloads.enqueueRemote(audio, workno)
-                    graph.messages.value = if (added) "已加入下载" else "正在下载"
-                }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Exception) {
-                graph.messages.value = error.message ?: "无法创建下载任务"
-            }
-        }
-    }
-
-    fun downloadNode(node: AsmrNode) {
-        val current = work ?: return
-        if (asmrDownloaded(node)) {
-            graph.messages.value = "已下载"
-            return
-        }
-        val url = node.streamUrl
-        if (url.isNullOrBlank()) {
-            graph.messages.value = "这个文件没有可用的下载地址"
-            return
-        }
-        val item = com.nanahoshi.audioplayer.dlsite.RemotePlayable(
-            title = node.title,
-            artist = current.circle.ifBlank { current.sourceId },
-            coverUri = current.coverUrl,
-            remoteUrl = url,
-            source = TrackSource.ASMR,
-            referer = com.nanahoshi.audioplayer.asmr.AsmrClient.REFERER,
-            durationMs = node.durationMs,
-            workno = current.sourceId,
-            fileKey = node.hash.ifBlank { node.title },
-        )
-        viewModelScope.launch {
-            val added = graph.downloads.enqueueRemote(item, current.sourceId)
-            graph.messages.value = if (added) "已加入下载" else "正在下载"
         }
     }
 
@@ -1661,18 +1586,6 @@ fun OnlineWorkScreen(
                                         source = "DLsite",
                                     ),
                                     onClick = { viewModel.playPlay(entry) },
-                                    trailing = {
-                                        val savedFile = viewModel.playDownloaded(audio.fileKey)
-                                        IconButton(
-                                            onClick = { viewModel.downloadPlay(entry) },
-                                            enabled = !savedFile,
-                                        ) {
-                                            Icon(
-                                                if (savedFile) Icons.Default.Check else Icons.Default.Download,
-                                                contentDescription = if (savedFile) "已下载" else "下载",
-                                            )
-                                        }
-                                    },
                                 )
                             } else {
                                 OnlineRemoteFileRow(entry.title) {
@@ -1694,20 +1607,11 @@ fun OnlineWorkScreen(
                         }) { entry ->
                             when (entry) {
                                 is LibraryEntry.Audio -> {
-                                    val downloaded = com.nanahoshi.audioplayer.data.LocalAudio.hasStoredCopy(entry.track.localUri)
                                     OnlineTrackRow(
                                         title = entry.track.title,
                                         coverUrl = entry.track.coverUri,
                                         supporting = trackSupporting(entry.track, entry.hasSubtitle),
                                         onClick = { viewModel.playLibrary(entry.track) },
-                                        trailing = {
-                                            if (entry.track.source == TrackSource.DLSITE) {
-                                                IconButton(onClick = { viewModel.downloadLibraryTrack(entry.track) }, enabled = !downloaded) {
-                                                    Icon(if (downloaded) Icons.Default.Check else Icons.Default.Download,
-                                                        contentDescription = if (downloaded) "已下载" else "下载")
-                                                }
-                                            }
-                                        },
                                     )
                                 }
                                 is LibraryEntry.File -> OnlineFileRow(entry.file) {
@@ -1721,7 +1625,7 @@ fun OnlineWorkScreen(
                         }
                         itemsIndexed(viewModel.nodeFiles, key = { index, node -> "node-file-$index-${node.hash}-${node.title}" }) { _, node ->
                             if (isAsmrAudio(node.type, node.title)) {
-                                val savedFile = viewModel.purchased && viewModel.asmrDownloaded(node)
+                                val savedFile = viewModel.asmrDownloaded(node)
                                 OnlineTrackRow(
                                     title = node.title,
                                     coverUrl = viewModel.coverUrl,
@@ -1732,21 +1636,6 @@ fun OnlineWorkScreen(
                                         hasSubtitle = viewModel.nodeHasSubtitle(node),
                                     ),
                                     onClick = { viewModel.playNode(node) },
-                                    trailing = if (viewModel.purchased) {
-                                        {
-                                            IconButton(
-                                                onClick = { viewModel.downloadNode(node) },
-                                                enabled = !savedFile,
-                                            ) {
-                                                Icon(
-                                                    if (savedFile) Icons.Default.Check else Icons.Default.Download,
-                                                    contentDescription = if (savedFile) "已下载" else "下载",
-                                                )
-                                            }
-                                        }
-                                    } else {
-                                        null
-                                    },
                                 )
                             } else {
                                 OnlineRemoteFileRow(node.title) {

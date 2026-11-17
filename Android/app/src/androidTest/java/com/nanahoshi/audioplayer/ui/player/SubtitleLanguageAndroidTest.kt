@@ -4,6 +4,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.nanahoshi.audioplayer.playback.LoadedSubtitles
 import com.nanahoshi.audioplayer.playback.SubtitleCue
 import com.nanahoshi.audioplayer.playback.isSimplifiedChinese
+import com.nanahoshi.audioplayer.playback.usesJapaneseCorrection
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -21,5 +22,13 @@ class SubtitleLanguageAndroidTest {
         assertTrue(isSimplifiedChinese(listOf(SubtitleCue(0, 1000, "<font color='red'>{\\an8}$chinese</font>"))))
         assertTrue(LoadedSubtitles(listOf(SubtitleCue(0, 1000, "おやすみなさい")), false, false).canTranslate)
         assertTrue(LoadedSubtitles(listOf(SubtitleCue(0, 1000, chinese + "hello")), false, false).canTranslate)
+    }
+
+    @Test fun unlabeledChineseIsNotTreatedAsJapaneseOnAndroid() {
+        // 字表资源与 ICU 判定须在 Android 上一致：专用简繁字视为中文证据，共用汉字仍按日文处理。
+        assertFalse(usesJapaneseCorrection(listOf(SubtitleCue(0, 1000, "這是一個測試"))))
+        assertFalse(usesJapaneseCorrection(listOf(SubtitleCue(0, 1000, "我们说"))))
+        assertTrue(usesJapaneseCorrection(listOf(SubtitleCue(0, 1000, "山水日月天地人生"))))
+        assertTrue(usesJapaneseCorrection(listOf(SubtitleCue(0, 1000, "这是一个人ありがとう"))))
     }
 }

@@ -1,5 +1,9 @@
 package com.nanahoshi.audioplayer.ui.player
 
+import com.nanahoshi.audioplayer.data.db.DownloadStatus
+import com.nanahoshi.audioplayer.data.matches
+import com.nanahoshi.audioplayer.data.operation
+import com.nanahoshi.audioplayer.data.SubtitleTask
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
@@ -46,7 +50,6 @@ import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.CollectionsBookmark
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
@@ -247,6 +250,14 @@ fun NowPlayingScreen(
     val subtitleSelection by viewModel.subtitleSelection.collectAsStateWithLifecycle()
     val selected = subtitleSelection.queueItemId == state.queueItemId
     val loaded = if (selected) subtitleState.forItem(state.queueItemId) else null
+    val current = queue.find { it.queueItemId == state.queueItemId }
+    val translationJobs by viewModel.translationJobs.collectAsStateWithLifecycle(emptyList())
+    val subtitleTask = current?.let { row ->
+        translationJobs.firstOrNull {
+            it.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING) &&
+                it.matches(row, loaded?.generatedFingerprint)
+        }
+    }
     val cues = loaded?.cues.orEmpty()
     val chinese = !selected || subtitleSelection.chinese
     val subtitle = cues.textAt(state.positionMs, chinese)
@@ -254,7 +265,6 @@ fun NowPlayingScreen(
     var discardPrompt by remember { mutableStateOf(false) }
     var fullTitle by remember { mutableStateOf(false) }
     val localNetwork = rememberLocalNetworkAccess { viewModel.reportLocalNetworkDenied() }
-    val current = queue.find { it.queueItemId == state.queueItemId }
     LaunchedEffect(queueExpanded, state.queueItemId) {
         if (!queueExpanded) return@LaunchedEffect
         val index = queue.indexOfFirst { it.queueItemId == state.queueItemId }
@@ -464,13 +474,6 @@ fun NowPlayingScreen(
                             onClick = { queueExpanded = true },
                         )
                         PlayerCollectionAction(current, collectionLink, onOpenCollection)
-                        if (viewModel.offerBiliCache) {
-                            SecondaryAction(
-                                icon = { Icon(Icons.Default.Download, contentDescription = null) },
-                                label = "下载音轨",
-                                onClick = viewModel::cacheCurrent,
-                            )
-                        }
                     }
                 }
             }
@@ -488,16 +491,16 @@ fun NowPlayingScreen(
                     cues = cues,
                     positionMs = state.positionMs,
                     chinese = chinese,
-                    translating = viewModel.translating,
+                    translating = subtitleTask?.operation == SubtitleTask.TRANSLATE,
                     canDelete = loaded?.generated == true,
                     onChinese = { viewModel.showChinese(state.queueItemId, true) },
                     onJapanese = { viewModel.showChinese(state.queueItemId, false) },
                     onTranslate = viewModel::requestTranslation,
                     canTranslate = loaded?.canTranslate == true,
-                    onStop = viewModel::cancelTranslation,
-                    polishing = viewModel.polishing,
+                    onStop = { subtitleTask?.id?.let(viewModel::cancelSubtitleOperation) },
+                    polishing = subtitleTask?.operation == SubtitleTask.POLISH,
                     onPolish = viewModel::requestPolish,
-                    onStopPolish = viewModel::cancelPolish,
+                    onStopPolish = { subtitleTask?.id?.let(viewModel::cancelSubtitleOperation) },
                     onDelete = { discardPrompt = true },
                     onSeek = viewModel.client::seekTo,
                     onBack = { showSubtitles = false },
@@ -829,7 +832,7 @@ private fun SleepTimerDialog(onDismiss: () -> Unit, onStart: (Long) -> Unit) {
 
 @Composable
 private fun WhisperPromptDialog(viewModel: PlayerViewModel) {
-    when (viewModel.whisperPrompt) {
+    when (val prompt = viewModel.whisperPrompt) {
         WhisperPrompt.NeedSettings -> AlertDialog(
             onDismissRequest = viewModel::dismissWhisperPrompt,
             text = { Text("请先在「设置 → 听写和翻译」保存听写设置（线上模型填 API Key，自部署模型填地址和 API Key）。") },
@@ -837,14 +840,14 @@ private fun WhisperPromptDialog(viewModel: PlayerViewModel) {
                 TextButton(onClick = viewModel::dismissWhisperPrompt) { Text("知道了") }
             },
         )
-        WhisperPrompt.NeedModelDownload -> AlertDialog(
+        is WhisperPrompt.NeedModelDownload -> AlertDialog(
             onDismissRequest = viewModel::dismissWhisperPrompt,
-            text = { Text("请先在「设置 → 听写和翻译」下载 SenseVoiceSmall 模型。") },
+            text = { Text(com.nanahoshi.audioplayer.data.missingOfflineWhisperModelMessage(prompt.model)) },
             confirmButton = {
                 TextButton(onClick = viewModel::dismissWhisperPrompt) { Text("知道了") }
             },
         )
-        WhisperPrompt.NeedDownload -> AlertDialog(
+        is WhisperPrompt.NeedDownload -> AlertDialog(
             onDismissRequest = viewModel::dismissWhisperPrompt,
             text = { Text("生成字幕需要先下载这首歌的音频，是否下载？") },
             confirmButton = {

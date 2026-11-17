@@ -1,10 +1,89 @@
 package com.nanahoshi.audioplayer.playback
 
+import java.io.File
+import java.io.IOException
+import kotlinx.coroutines.CancellationException
+import org.junit.Rule
+import org.junit.rules.TemporaryFolder
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
 class SubtitleCuesTest {
+    @get:Rule val temporaryFolder = TemporaryFolder()
+
+    @Test
+    fun generatedDocumentPreservesSourceAndDisplaysRevisedBilingualCues() {
+        val original = listOf(SubtitleCue(0, 900, "今日は"), SubtitleCue(1000, 1900, "いい天気"))
+        val revised = listOf(SubtitleCue(0, 1900, "今日はいい天気。", "今天天气不错。", sourceCount = 2))
+        val origin = SubtitleOrigin("parakeet-tdt-ctc-0.6b-ja", null)
+        val raw = encodeGeneratedCues(original, origin, revisedCues = revised)
+        val loaded = checkNotNull(parseGeneratedSubtitles(raw))
+        assertEquals(original, loaded.cues)
+        assertEquals(origin, loaded.origin)
+        assertEquals(revised, parseGeneratedCues(raw))
+        assertEquals("今日はいい天気。", loaded.displayCues.textAt(1100, chinese = false))
+        assertEquals("今天天气不错。", loaded.displayCues.textAt(1100, chinese = true))
+
+        val polished = revised.map { it.copy(translation = "今天天气真好。") }
+        val afterPolish = checkNotNull(parseGeneratedSubtitles(encodeGeneratedCues(loaded.cues, loaded.origin, polished)))
+        assertEquals(original, afterPolish.cues)
+        assertEquals(polished, afterPolish.displayCues)
+    }
+
+    @Test
+    fun translationOverlayChecksSourceTextAndTimingWhileReadingLegacyFiles() {
+        val original = listOf(SubtitleCue(0, 900, "はい"), SubtitleCue(1000, 1900, "そうです"))
+        val revised = listOf(SubtitleCue(0, 1900, "はい、そうです。", "嗯，是的。", sourceCount = 2))
+        val overlay = checkNotNull(parseGeneratedSubtitles(encodeGeneratedCues(
+            revised, null, sourceFingerprint = subtitleSourceFingerprint(original),
+        )))
+        assertEquals(revised, applySubtitleOverlay(original, overlay))
+        val changedText = listOf(original[0].copy(text = "いいえ"), original[1])
+        val changedTime = listOf(original[0].copy(endMs = 800), original[1])
+        assertEquals(changedText, applySubtitleOverlay(changedText, overlay))
+        assertEquals(changedTime, applySubtitleOverlay(changedTime, overlay))
+
+        val legacyCue = original[0].copy(translation = "好的。")
+        val legacy = checkNotNull(parseGeneratedSubtitles(encodeGeneratedCues(listOf(legacyCue))))
+        assertEquals(listOf(legacyCue, original[1]), applySubtitleOverlay(original, legacy))
+    }
+
+    @Test
+    fun sourceFingerprintIgnoresTranslationButTracksContentChanges() {
+        val original = listOf(SubtitleCue(0, 900, "はい"), SubtitleCue(1000, 1900, "そうです"))
+        val translated = original.map { it.copy(translation = "嗯，是的。") }
+        assertEquals(subtitleSourceFingerprint(original), subtitleSourceFingerprint(translated))
+        val changed = original.map { it.copy(text = it.text + "。") }
+        assertEquals(false, subtitleSourceFingerprint(original) == subtitleSourceFingerprint(changed))
+    }
+
+    @Test
+    fun atomicSubtitleWriteKeepsExistingContentsWhenReplacementFails() {
+        val directory = temporaryFolder.newFolder("subtitles")
+        val target = File(directory, "subtitle.json").apply { mkdir() }
+        val original = File(target, "original").apply { writeText("旧字幕") }
+        val failure = runCatching { target.writeTextAtomically("新字幕") }.exceptionOrNull()
+        assertEquals(IOException::class.java, failure?.javaClass)
+        assertEquals("旧字幕", original.readText())
+        assertEquals(listOf("subtitle.json"), directory.list()?.toList())
+    }
+
+    @Test
+    fun cancelledSubtitleCommitKeepsThePublishedFileAndDiscardsStaging() {
+        val directory = temporaryFolder.newFolder("cancelled")
+        val target = File(directory, "subtitle.json").apply { writeText("原文と旧訳文") }
+        val failure = runCatching {
+            target.withStagedSubtitle("新しい訳文") {
+                assertEquals("原文と旧訳文", target.readText())
+                throw CancellationException("已中止")
+            }
+        }.exceptionOrNull()
+        assertEquals(CancellationException::class.java, failure?.javaClass)
+        assertEquals("原文と旧訳文", target.readText())
+        assertEquals(listOf("subtitle.json"), directory.list()?.toList())
+    }
+
     @Test
     fun keepsOriginalExtensionBeforeStrippingIt() {
         val names = listOf("01.lrc", "01.mp3.srt", "01.mp3.lrc", "note.txt")

@@ -52,7 +52,7 @@ class BiliAndroidTest {
             old.execSQL("INSERT INTO translation_jobs(title,trackId,status) VALUES('old',2,'DONE')")
             old.version=13
         }
-        val migrated=Room.databaseBuilder(context,AppDatabase::class.java,name).addMigrations(AppDatabase.MIGRATION_13_14,AppDatabase.MIGRATION_14_15, AppDatabase.MIGRATION_15_16, AppDatabase.MIGRATION_16_17).build()
+        val migrated=Room.databaseBuilder(context,AppDatabase::class.java,name).addMigrations(AppDatabase.MIGRATION_13_14,AppDatabase.MIGRATION_14_15, AppDatabase.MIGRATION_15_16, AppDatabase.MIGRATION_16_17, AppDatabase.MIGRATION_17_18, AppDatabase.MIGRATION_18_19).build()
         val fresh=Room.inMemoryDatabaseBuilder(context,AppDatabase::class.java).build()
         try {
             assertEquals(5,migrated.tracks().inFolder(1).size)
@@ -65,7 +65,7 @@ class BiliAndroidTest {
             assertEquals("jNQXAC9IVRw",migrated.tracks().getById(5)!!.youtubeVideoId)
             fun structure(db: AppDatabase): List<String> {
                 val result=mutableListOf<String>();val sql=db.openHelper.writableDatabase
-                assertEquals(17,sql.version)
+                assertEquals(19,sql.version)
                 for (table in listOf("folders","tracks","downloads","queue_items","playlists","playlist_items","whisper_jobs","translation_jobs")) {
                     sql.query("PRAGMA table_info($table)").use { rows ->
                         while(rows.moveToNext()) result += table+"|"+(1 until rows.columnCount).joinToString("|") { rows.getString(it).orEmpty() }
@@ -78,78 +78,29 @@ class BiliAndroidTest {
         } finally { migrated.close();fresh.close();context.deleteDatabase(name) }
     }
 
-    @Test fun enqueueDeduplicatesAndUpgradesOldCacheTaskWithoutCreatingTracks() = runBlocking {
-        val db=Room.inMemoryDatabaseBuilder(context,AppDatabase::class.java).build()
-        val root=File(context.cacheDir,"bili-enqueue-test").apply { deleteRecursively();mkdirs() }
+    @Test fun completingADownloadRequiresTheExactSavedPart() = runBlocking {
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        val file = File.createTempFile("bili-complete", ".m4s", context.cacheDir).apply { writeBytes(ByteArray(2048)) }
         try {
-            val store=BiliDownloads(root,db,library(db))
-            assertEquals(1,store.enqueue(listOf(part,part)))
-            val old=db.downloads().nextQueued()!!;assertNull(old.biliImportPart)
-            assertEquals(0,store.enqueue(listOf(part),true))
-            assertEquals(part,biliImportPart(db.downloads().get(old.id)!!.biliImportPart!!,part.bvid,part.cid))
-            assertTrue(db.tracks().inFolder(null).isEmpty())
-            db.downloads().fail(old.id,"fixture failed")
-            assertEquals(1,store.enqueue(listOf(part),true))
-            assertTrue(db.tracks().inFolder(null).isEmpty())
-        } finally { db.close();root.deleteRecursively() }
-    }
+            val repo = library(db)
+            val folder = db.folders().insert(FolderEntity(name = "folder", position = 0))
+            val other = repo.importParts(listOf(part.copy(cid = 43)), folder).single()
+            val id = db.downloads().insert(job().copy(trackId = other.id))
+            assertTrue(runCatching { repo.completeBiliDownload(id, part.bvid, part.cid, file.path) }.isFailure)
+            assertNull(db.tracks().findByBvid(part.bvid, part.cid))
 
-    @Test fun completionReusesTrackAndFolderAndReadsLatestIntent() = runBlocking {
-        val db=Room.inMemoryDatabaseBuilder(context,AppDatabase::class.java).build()
-        val file=File.createTempFile("bili-complete", ".m4s",context.cacheDir).apply { writeBytes(ByteArray(2048)) }
-        try {
-            val repo=library(db);val folder=db.folders().insert(FolderEntity(name="folder",position=0))
-            val saved=repo.importParts(listOf(part),folder).single()
-            val id=db.downloads().insert(job())
-            db.downloads().setBiliImportPart(id,part.importMetadata())
-            repo.completeBiliDownload(id,part.bvid,part.cid,file.path)
-            assertEquals(saved.id,db.downloads().get(id)!!.trackId)
-            assertEquals(DownloadStatus.DONE,db.downloads().get(id)!!.status)
-            assertEquals(folder,db.tracks().getById(saved.id)!!.folderId)
-            assertEquals(file.path,db.tracks().getById(saved.id)!!.localUri)
-            assertEquals(1,db.tracks().inFolder(folder).size)
-            val other=part.copy(cid=43)
-            val failed=db.downloads().insert(job(other.importMetadata(),DownloadStatus.FAILED).copy(fileKey="43"))
-            try { repo.completeBiliDownload(failed,other.bvid,other.cid,file.path);fail() } catch (_: IllegalStateException) { }
-            assertNull(db.tracks().findByBvid(other.bvid,other.cid))
-        } finally { db.close();file.delete() }
-    }
-
-    @Test fun oldCacheDoesNotAutoImportButSearchReusesFileAndSavesIt() = runBlocking {
-        val db=Room.inMemoryDatabaseBuilder(context,AppDatabase::class.java).build()
-        val root=File(context.cacheDir,"bili-cache-import-test").apply { deleteRecursively();mkdirs() }
-        val file=biliAudioFile(root,part.bvid,part.cid)!!.apply { parentFile!!.mkdirs();writeBytes(ByteArray(2048)) }
-        try {
-            val repo=library(db);val id=db.downloads().insert(job())
-            repo.completeBiliDownload(id,part.bvid,part.cid,file.path)
-            assertTrue(db.tracks().inFolder(null).isEmpty())
-            assertEquals(0,BiliDownloads(root,db,repo).enqueue(listOf(part),true))
-            val saved=db.tracks().inFolder(null).single()
-            assertEquals(file.path,saved.localUri);assertEquals(saved.id,db.downloads().get(id)!!.trackId)
-            assertEquals(0,BiliDownloads(root,db,repo).enqueue(listOf(part),true))
-            assertEquals(1,db.tracks().inFolder(null).size)
-            file.writeBytes(ByteArray(0))
-            assertEquals(1,BiliDownloads(root,db,repo).enqueue(listOf(part),true))
-        } finally { db.close();root.deleteRecursively() }
-    }
-
-    @Test fun retryAfterDatabaseReopenStillImportsOnlyOnSuccessfulCompletion() = runBlocking {
-        val name="bili-retry-test.db";context.deleteDatabase(name)
-        val file=File.createTempFile("bili-retry", ".m4s",context.cacheDir).apply { writeBytes(ByteArray(2048)) }
-        var db=Room.databaseBuilder(context,AppDatabase::class.java,name).build()
-        try {
-            val id=db.downloads().insert(job(part.importMetadata(),DownloadStatus.FAILED))
-            assertNull(db.tracks().findByBvid(part.bvid,part.cid))
-            db.close();db=Room.databaseBuilder(context,AppDatabase::class.java,name).build()
-            assertEquals(part,biliImportPart(db.downloads().get(id)!!.biliImportPart!!,part.bvid,part.cid))
-            db.downloads().requeue(id);assertEquals(1,db.downloads().startQueued(id))
-            library(db).completeBiliDownload(id,part.bvid,part.cid,file.path)
-            val saved=db.tracks().inFolder(null).single()
-            assertEquals(part.title,saved.title);assertEquals(part.artist,saved.artist)
-            assertEquals(part.bvid,saved.bvid);assertEquals(part.cid,saved.cid)
-            assertEquals(saved.id,db.downloads().get(id)!!.trackId)
-            assertEquals(DownloadStatus.DONE,db.downloads().get(id)!!.status)
-        } finally { db.close();context.deleteDatabase(name);file.delete() }
+            val saved = repo.importParts(listOf(part), folder).single()
+            db.downloads().attachTrack(id, saved.id)
+            repo.completeBiliDownload(id, part.bvid, part.cid, file.path)
+            assertEquals(saved.id, db.downloads().get(id)!!.trackId)
+            assertEquals(DownloadStatus.DONE, db.downloads().get(id)!!.status)
+            assertEquals(true, db.downloads().get(id)!!.pendingBiliSubtitle)
+            assertEquals(folder, db.tracks().getById(saved.id)!!.folderId)
+            assertEquals(file.path, db.tracks().getById(saved.id)!!.localUri)
+        } finally {
+            db.close()
+            file.delete()
+        }
     }
 
     @Test fun remoteQueueKeepsIdentityAndBuildsBiliManifestWithoutSavingTrack() = runBlocking {

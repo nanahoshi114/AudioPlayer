@@ -141,6 +141,8 @@ data class DownloadEntity(
     val biliImportPart: String? = null,
     val kind: String? = null,
     val phase: String? = null,
+    val workFolderId: Long? = null,
+    val pendingBiliSubtitle: Boolean? = null,
 )
 
 @Entity(tableName = "playlists")
@@ -295,6 +297,7 @@ data class WhisperJobEntity(
     val model: String? = null,
     val awaitDownloadId: Long? = null,
     val awaitFileKey: String? = null,
+    val remoteSubmittedAt: Long? = null,
 )
 
 @Entity(tableName = "translation_jobs")
@@ -306,7 +309,23 @@ data class TranslationJobEntity(
     val queueItemId: Long?,
     val status: DownloadStatus,
     val error: String?,
+    val kind: String? = null,
+    val generatedFingerprint: String? = null,
+    val sourceFingerprint: String? = null,
+    val bvid: String? = null,
+    val cid: Long? = null,
+    val localUri: String? = null,
 )
+
+@Entity(tableName = "subtitle_publications")
+data class SubtitlePublicationEntity(
+    @PrimaryKey val filename: String,
+    val payload: String,
+    val whisperJobId: Long?,
+    val translationJobId: Long?,
+    val translatedAt: Long,
+)
+
 
 
 /** 原始文件清单独立于音频库，移除作品后仍能管理下载。 */
@@ -333,11 +352,4 @@ data class DlsiteOriginalEntryEntity(
     val trackId: Long? = null,
     val fileId: Long? = null,
     val folderId: Long? = null,
-)
-
-@Entity(tableName = "bili_import_intents", indices = [Index(value = ["batchId"], unique = true)])
-data class BiliImportIntentEntity(
-    @PrimaryKey val bvid: String,
-    val batchId: String,
-    val requestJson: String,
 )

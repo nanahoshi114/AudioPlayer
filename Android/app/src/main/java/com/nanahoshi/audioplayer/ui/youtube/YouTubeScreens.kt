@@ -96,15 +96,17 @@ class YouTubeViewModel(app: Application) : AndroidViewModel(app) {
                 "https://www.youtube.com/", video.durationMs, video.id, "audio"),
         ))
     }
+    fun saveSelection() = action {
+        videos.filter { it.id in selected }.forEach { graph.library.saveYouTube(it) }
+        clearSelection()
+        graph.messages.value = "已加入音频库"
+    }
+
     fun save(video: YouTubeVideo) = action {
         graph.library.saveYouTube(video)
         graph.messages.value = "已加入音频库"
     }
-    fun download(videos: List<YouTubeVideo>) = action {
-        val count = graph.downloads.enqueueYouTube(videos)
-        graph.messages.value = if (count == 0) "已在本地或正在下载" else "已加入 $count 个下载任务，完成后自动加入音频库"
-        selected = emptySet()
-    }
+
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -151,14 +153,14 @@ fun YouTubeBrowser(
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("已选 ${viewModel.selected.size} 个", Modifier.weight(1f))
                 TextButton(onClick = viewModel::clearSelection) { Text("取消") }
-                TextButton(onClick = { viewModel.download(viewModel.videos.filter { it.id in viewModel.selected }) }) { Text("下载") }
+                TextButton(onClick = viewModel::saveSelection) { Text("加入音频库") }
             }
         }
         if (viewModel.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         viewModel.error?.let { Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error) }
         if (viewModel.partial) Text("已显示部分视频，后续列表读取失败，可刷新重试。", Modifier.padding(16.dp), style = MaterialTheme.typography.bodySmall)
         if (!viewModel.loading && viewModel.videos.isEmpty() && viewModel.error == null) {
-            EmptyState(title = "还没有视频", message = if (playlistId == null) "输入关键词、视频编号或链接，查找后可播放或下载。" else "保存登录信息后点刷新读取列表。")
+            EmptyState(title = "还没有视频", message = if (playlistId == null) "输入关键词、视频编号或链接，查找后可播放或加入音频库。" else "保存登录信息后点刷新读取列表。")
         }
         LazyColumn(state = listState, modifier = Modifier.weight(1f)) {
             items(viewModel.videos, key = { it.id }) { video ->
@@ -184,8 +186,6 @@ fun YouTubeBrowser(
                                 DropdownMenu(menu, { menu = false }) {
                                     DropdownMenuItem(text = { Text(if (track != null) "已在音频库" else "加入音频库") }, enabled = track == null,
                                         onClick = { menu = false; viewModel.save(video) })
-                                    DropdownMenuItem(text = { Text(when { downloaded -> "已下载"; downloading -> "下载中"; else -> "下载" }) }, enabled = !downloaded && !downloading,
-                                        onClick = { menu = false; viewModel.download(listOf(video)) })
                                 }
                             }
                         }

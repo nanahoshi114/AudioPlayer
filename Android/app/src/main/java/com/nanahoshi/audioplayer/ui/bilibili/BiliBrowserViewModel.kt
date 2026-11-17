@@ -137,13 +137,8 @@ class BiliBrowserViewModel(app: Application) : AndroidViewModel(app) {
                     val requests = graph.biliImportRequests.choose(groups.map { BiliVideoDetails(it.video, it.parts) }, failed) ?: return@launch
                     working = true
                     try {
-                        if (action == BiliAction.SAVE) {
-                            requests.forEach { graph.library.importBili(it) }
-                            graph.messages.value = "已加入音频库" + if (failed.isEmpty()) "" else "，${failed.size} 个视频读取失败"
-                        } else {
-                            val count = graph.downloads.enqueueBiliImports(requests)
-                            graph.messages.value = if (count > 0) "已加入 $count 个下载任务，完成后按所选方式导入" else "已有本地文件或下载任务"
-                        }
+                        requests.forEach { graph.library.importBili(it) }
+                        graph.messages.value = "已加入音频库" + if (failed.isEmpty()) "" else "，${failed.size} 个视频读取失败"
                         selected = emptySet()
                     } finally { working = false }
                     return@launch
@@ -188,7 +183,7 @@ class BiliBrowserViewModel(app: Application) : AndroidViewModel(app) {
                             )))
                         }
                     }
-                    BiliAction.SAVE, BiliAction.DOWNLOAD -> error("请先选择导入方式")
+                    BiliAction.SAVE -> error("请先选择导入方式")
                 }
                 selected = emptySet()
             } catch (cancelled: CancellationException) { throw cancelled }

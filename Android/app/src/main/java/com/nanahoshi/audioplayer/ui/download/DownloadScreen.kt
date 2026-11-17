@@ -46,11 +46,13 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.nanahoshi.audioplayer.data.operation
 import com.nanahoshi.audioplayer.data.db.DownloadEntity
 import com.nanahoshi.audioplayer.data.db.DownloadStatus
 import com.nanahoshi.audioplayer.data.db.TranslateMark
 import com.nanahoshi.audioplayer.data.db.TranslationJobEntity
 import com.nanahoshi.audioplayer.data.db.WhisperJobEntity
+import com.nanahoshi.audioplayer.data.missingOfflineWhisperModelMessage
 import com.nanahoshi.audioplayer.graph
 import kotlinx.coroutines.launch
 
@@ -63,7 +65,15 @@ class DownloadViewModel(app: Application) : AndroidViewModel(app) {
     fun cancelDownload(id: Long) { graph.downloads.cancel(id) }
 
     fun retry(id: Long) {
-        graph.downloads.retry(id)
+        viewModelScope.launch {
+            try {
+                graph.downloads.retry(id)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                graph.messages.value = error.message ?: "无法重试下载"
+            }
+        }
     }
 
     fun delete(id: Long) {
@@ -73,6 +83,10 @@ class DownloadViewModel(app: Application) : AndroidViewModel(app) {
     fun retryWhisper(id: Long) {
         viewModelScope.launch {
             val job = graph.db.whisper().get(id) ?: return@launch
+            graph.whisper.missingOfflineModel(job.model)?.let {
+                graph.messages.value = missingOfflineWhisperModelMessage(it)
+                return@launch
+            }
             var mode = DlsiteDownloadMode.PARTIAL
             if (graph.whisper.needsDlsiteDownloadChoice(job)) {
                 val track = job.trackId?.takeIf { it > 0L }?.let { graph.db.tracks().getById(it) }
@@ -81,7 +95,7 @@ class DownloadViewModel(app: Application) : AndroidViewModel(app) {
                     allowPartial = track == null || !track.fileHash.isNullOrBlank(),
                 ) ?: return@launch
             }
-            graph.whisper.retry(id, mode)
+            graph.whisper.retry(id, mode)?.let { graph.messages.value = it }
         }
     }
 
@@ -98,6 +112,20 @@ class DownloadViewModel(app: Application) : AndroidViewModel(app) {
 
     fun cancelTranslation(id: Long) {
         graph.translator.cancel(id)
+    }
+
+    fun retryTranslation(job: TranslationJobEntity) {
+        viewModelScope.launch {
+            try {
+                graph.translator.retry(job.id, job.operation)
+            } catch (stopped: com.nanahoshi.audioplayer.data.SubtitleTaskStopped) {
+                graph.messages.value = stopped.message
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                graph.messages.value = error.message ?: "无法重试字幕任务"
+            }
+        }
     }
 
     fun play(job: DownloadEntity) {
@@ -136,12 +164,13 @@ class DownloadViewModel(app: Application) : AndroidViewModel(app) {
 fun DownloadScreen(
     onBack: () -> Unit,
     viewModel: DownloadViewModel = viewModel(),
+    initialSubtitles: Boolean = false,
 ) {
     val jobs by viewModel.jobs.collectAsStateWithLifecycle(emptyList())
     val whisperJobs by viewModel.whisperJobs.collectAsStateWithLifecycle(emptyList())
     val translationJobs by viewModel.translationJobs.collectAsStateWithLifecycle(emptyList())
     val localNetwork = rememberLocalNetworkAccess { viewModel.reportLocalNetworkDenied() }
-    var subtitles by rememberSaveable { mutableStateOf(false) }
+    var subtitles by rememberSaveable { mutableStateOf(initialSubtitles) }
     val audioState = rememberLazyListState()
     val subtitleState = rememberLazyListState()
     Column(Modifier.fillMaxSize()) {
@@ -155,7 +184,7 @@ fun DownloadScreen(
         if (if (subtitles) whisperJobs.isEmpty() && translationJobs.isEmpty() else jobs.isEmpty()) {
             EmptyState(
                 title = if (subtitles) "还没有字幕任务" else "还没有下载",
-                message = if (subtitles) "在播放页可以生成字幕或翻译字幕。" else "在作品、音频库或播放页选择音频下载。",
+                message = if (subtitles) "在播放页可以生成字幕或翻译字幕。" else "在音频库选择要下载的音频。",
                 modifier = Modifier.fillMaxSize(),
             )
         } else {
@@ -188,7 +217,7 @@ fun DownloadScreen(
                         )
                     }
                     items(translationJobs, key = { "translation-${it.id}" }) { job ->
-                        TranslationJobRow(job, onCancel = { viewModel.cancelTranslation(job.id) })
+                        TranslationJobRow(job, onCancel = { viewModel.cancelTranslation(job.id) }, onRetry = { viewModel.retryTranslation(job) })
                     }
                 }
             }
@@ -236,9 +265,7 @@ private fun DownloadRow(
             }
         },
         trailingContent = {
-            if ((job.source == TrackSource.YOUTUBE.name || job.kind == "DLSITE_ARCHIVE") &&
-                job.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING)
-            ) {
+            if (job.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING)) {
                 TextButton(onClick = onCancel) { Text("中止") }
             } else if (job.status == DownloadStatus.FAILED) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -306,7 +333,7 @@ private fun WhisperJobRow(job: WhisperJobEntity, onRetry: () -> Unit, onCancel: 
 }
 
 @Composable
-private fun TranslationJobRow(job: TranslationJobEntity, onCancel: () -> Unit) {
+private fun TranslationJobRow(job: TranslationJobEntity, onCancel: () -> Unit, onRetry: () -> Unit) {
     val stopped = job.status == DownloadStatus.FAILED && job.error == "已中止"
     val reply = job.error?.takeIf {
         job.status == DownloadStatus.FAILED && it.isNotBlank() && it != "翻译失败" && it != "已中止"
@@ -315,12 +342,13 @@ private fun TranslationJobRow(job: TranslationJobEntity, onCancel: () -> Unit) {
     val running = job.status == DownloadStatus.RUNNING || job.status == DownloadStatus.QUEUED
     val status = when {
         stopped -> "已中止"
-        running -> "翻译中"
-        job.status == DownloadStatus.FAILED -> "翻译失败"
+        job.status == DownloadStatus.QUEUED -> "排队"
+        running -> "进行中"
+        job.status == DownloadStatus.FAILED -> "失败"
         else -> "完成"
     }
     ListItem(
-        headlineContent = { Text(job.title) },
+        headlineContent = { Text("${job.title} · ${job.operation.label}") },
         supportingContent = {
             Column(Modifier.fillMaxWidth()) {
                 StatusBadge(
@@ -340,7 +368,10 @@ private fun TranslationJobRow(job: TranslationJobEntity, onCancel: () -> Unit) {
         trailingContent = {
             when {
                 running -> TextButton(onClick = onCancel) { Text("中止") }
-                reply != null -> TextButton(onClick = { shownReply = reply }) { Text("查看错误详情") }
+                job.status == DownloadStatus.FAILED -> Row {
+                    TextButton(onClick = onRetry) { Text("重试") }
+                    if (reply != null) TextButton(onClick = { shownReply = reply }) { Text("错误详情") }
+                }
             }
         },
     )

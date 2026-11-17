@@ -29,6 +29,28 @@ export GRADLE_USER_HOME="$HOME/.gradle"
 - 当前环境存在 JDK 25 回退 Kotlin JVM 24、加密偏好 API 弃用及 `android.disallowKotlinSourceSets` 提示。除非任务涉及相关问题，否则无需为消除提示调整依赖或配置。
 - 真机为 Realme RMX5010，沙箱内无法通过 adb 访问。安装应用须有用户明确授权；设备测试的编译通过与实际运行应分别说明。
 
+#### 模拟器仪器测试
+
+本机已配置可复用的 headless 模拟器 AVD `audiotest_api36`（Pixel 6，Android 16 / API 36，`system-images;android-36.1;google_apis_playstore;arm64-v8a`），无需真机即可运行 Room、迁移和纯逻辑类仪器测试。模拟器包与 AVD 分别位于 `~/Library/Android/sdk` 和 `~/.android/avd`，缺失时用 `sdkmanager` 安装 `emulator` 及上述系统镜像。
+
+```sh
+export PATH="$HOME/Library/Android/sdk/platform-tools:$HOME/Library/Android/sdk/emulator:$PATH"
+emulator -avd audiotest_api36 -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot &
+adb wait-for-device
+adb shell 'while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 2; done'
+
+cd Android
+export GRADLE_USER_HOME="$HOME/.gradle"
+./gradlew :app:connectedDebugAndroidTest --no-configuration-cache \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.nanahoshi.audioplayer.data.StoredCatalogOverlayAndroidTest
+
+adb emu kill
+```
+
+- `class` 参数传逗号分隔的多个类时只会执行第一个，须逐类运行；不传该参数则运行全部仪器测试。
+- Compose UI 仪器测试会因旧版 Espresso 反射调用 `InputManager.getInstance()` 失败（`NoSuchMethodException`），属环境问题，不要当作代码回归；验证改动优先使用非 UI 套件。
+- 在模拟器上安装应用同样需要用户明确授权；模拟器结果不能替代真机对通知、存储和系统交互的验证，两者须分别说明。
+
 ### 2.2 版本控制与安全
 
 - 未经用户明确要求，不执行提交或推送。提交说明使用简短中文，前缀采用 `feats:`、`fix:` 或 `docs:`。
@@ -65,7 +87,7 @@ export GRADLE_USER_HOME="$HOME/.gradle"
 
 ### 4.1 数据库
 
-- `AppDatabase` 当前版本为 **17**，`exportSchema = false`。新安装按实体建表，升级使用显式 `MIGRATION_*`；不支持数据库降级。
+- `AppDatabase` 当前版本为 **19**，`exportSchema = false`。新安装按实体建表，升级使用显式 `MIGRATION_*`；不支持数据库降级。18→19 移除废弃的 `bili_import_intents` 表，保留恒为 NULL 的 `downloads.biliImportPart` 列（minSdk 24 的 SQLite 不支持 DROP COLUMN，不重建下载表）。
 - 新增可空列时，迁移中的 `ALTER TABLE ... ADD COLUMN` 不设置 `DEFAULT`，实体字段不设置 `@ColumnInfo(defaultValue)`，确保新装与升级结构一致。现有 `endpoint`、`translatedAt`、`translateStatus`、`skipTranslate`、`model`、`biliImportPart` 等列遵循此规则。
 - `skipTranslate` 为 `null` 或 `false` 的旧任务，听写完成后仍执行翻译。旧任务 `model` 为空时保留原有按地址匹配的兼容逻辑。
 - 修改曲目、作品、下载、队列或播放列表时，应保留曲目身份及字幕关联；文件复用不得通过删除并重建曲目实现。
@@ -73,12 +95,13 @@ export GRADLE_USER_HOME="$HOME/.gradle"
 
 ### 4.2 下载与删除
 
-- 下载与任务页使用「音频 / 字幕任务」分段选择，分别保留位置；音频包含完整原始包，字幕任务包含听写和翻译。
+- 下载与任务页使用「音频 / 字幕任务」分段选择，分别保留位置；音频包含完整原始包，字幕任务包含听写、翻译和润色。
+- 用户确认后由独立的 `dataSync` 前台服务准备并消费音频下载队列，覆盖 DLsite 完整原始包下载、解压及发布，也负责 B 站附带字幕的后台抓取。进程终止后，未完成的音频任务标为中断，待补字幕下次打开应用时接手。
 - 下载管理使用「音频 / 字幕」分段选择，默认显示音频，分别保留滚动位置。音频包含已落盘的在线音频和 B 站下载音轨，字幕包含生成字幕及作品下载目录中的 `lrc/srt/vtt`。每行显示文件大小，搜索和多选作用于当前分类。顶栏下载入口展示进行中的任务。
-- 未入库的远端单文件按作品目录下载；同一作品内标题相同而 `fileKey` 不同的文件用 `fileKey` 短哈希子目录区分，同一 `fileKey` 始终复用已落盘路径，`fileKey` 为空时沿用扁平文件名。
+- 下载入口统一在音频库及库内详情。已入库曲目可以确认听写前置下载。入队、开工、重试及发布均重新核对曲目或整包作品根目录。未入库历史任务保留文件和记录，重试时须找到精确匹配的入库内容。移除库内内容后中止相应未完成任务。
 - 在线曲目优先播放有效的本地副本。删除已下载文件时保留在线曲目并清理完成的下载记录；音频带有生成字幕时先询问是否一并删除。选择保留时字幕文件与听写、翻译记录都不动，可在下载管理「字幕」中单独删除，重新下载同一音频会自动匹配、无需重新生成；所有来源一致，B 站随音轨保存的视频字幕仍随音轨删除。
 - 用户主动保存到本机的音频统一叫「下载」，App 自动生成的临时文件、元数据和字幕叫「缓存」；「清理缓存」只处理临时缓存。
-- 下载管理可删除失败任务；删除完整原始包任务时一并回收本任务的压缩包暂存，重试需从头下载。未完成任务的暂存保留供断点续传，启动时清理没有任务引用的孤儿暂存。
+- 所有音频任务均可中止。普通音频传输结束时清理本次半成品，启动时回收进程终止残留。DLsite 整包暂存用于断点续传，删除失败任务时才一起回收，启动时清理没有任务引用的孤儿整包暂存。
 - DLsite 完整原始包使用独立作品任务和原始目录清单；下载、解压和事务发布全部成功后才替换本地关联并删除压缩包，失败不影响已有副本、不自动降级为 Play 音轨。移除音频库内容不连带删除原始清单身份或磁盘下载。
 - 原始文件按作品号和完整相对路径关联，保留匹配曲目编号、Play 身份及字幕关系；不得只按文件名前缀或去掉扩展名合并不同音轨。原包独有曲目不得伪造 Play 文件身份，缺少本地文件时仅可重新下载完整包。包内文件已关联其他曲目时跳过并保留原关联，汇总提示后继续发布其余文件，不整体失败。
 - `localUri` 为 App 目录绝对路径时可删除文件；为关联的 `content:` 或 `file:` URI 时仅清除关联，保留用户文件及文件夹。LOCAL 曲目不适用此删除操作。
@@ -131,9 +154,7 @@ export GRADLE_USER_HOME="$HOME/.gradle"
 - 分页失败保留已加载内容和页码，中止后不自动续读；取消旧请求并阻止旧响应覆盖新查询。访问受限应显示错误，不作为空结果处理。
 - 点视频只播放所选 P，不自动加入音频库。所有 B 站导入入口共用多 P 方式选择：分开导入按勾选保存，统一导入保存全部 P 为一个带「多 P」标签的视频项。同一时间只处理一个导入选择，已有选择未完成时其他入口立即提示，不持锁等待用户；确认或取消后可继续新的选择。分 P 页面按 page 排序并支持多选，禁止部分移除；整组移除允许。
 - 未加入音频库的 B 站队列以 `workno=bvid`、`fileKey=cid` 保存身份，使用稳定观看页链接恢复；播放时解析 DASH 音轨，不将观看页当作媒体。
-- 搜索下载使用 `enqueueBiliImports`，持久化每 BV 的批次和导入请求；统一下载等待全部 P 有效后事务发布。`enqueueBili` 默认不加入音频库，保留纯下载语义。`biliImportPart` 兼容旧 BiliPart JSON 和含批次身份的元数据，不保存媒体临时地址。
-- B 站视频分组使用独立的 `folders.biliBvid` 唯一标识，不复用 asmr 字段；15→16 添加可空列（无 DEFAULT）及 `bili_import_intents`。转换先迁移全部既有曲目，再移除空分组，保留身份与关联。新的保存、转换或移除使旧批次失效，下载回调不得恢复过时分组。
-- 已有下载任务可补充自动加入音频库意图，完成时须重新读取任务信息。成功后在事务中复用或保存曲目、关联下载并登记完成；失败不新增曲目；只有用户确认组织方式转换时才调整既有曲目归属。
+- B 站按已入库 BV/CID 下载。分组使用独立的 `folders.biliBvid`，组织方式只由用户确认导入转换修改。17→18 清空过时的自动入库批次及下载元数据，保留曲目、下载记录和已完成音轨。
 - B 站下载仅保存音轨，视频字幕写入 `filesDir/bilibili/{bvid}/{cid}.json`。播放优先使用本地字幕，删除音轨时同时删除该缓存字幕。
 - B 站字幕需要有效登录。`code = 0` 且字幕为空、`login_mid = 0` 时应提示重新登录，并保留生成字幕入口；列表或正文因限流为空时，刷新播放信息后最多重试一次。
 - 从下载管理播放未加入音频库的 B 站音轨时，以队列的 `workno` 和 `fileKey` 获取身份，不依赖 `trackId`。
@@ -153,7 +174,7 @@ export GRADLE_USER_HOME="$HOME/.gradle"
 - 仅选择独立 `audio/mp4` 音轨，不使用带视频格式或 WebM/Opus 兜底，不读取 YouTube 原生字幕。当前不支持 PO Token；可用性受视频和网络环境影响。
 - 签名组件复用桌面端 cjs，在隐藏 WebView 中适配。隔离 `globalThis.location`，禁止联网、文件访问和 Java 桥，不修改 DLsite 的全局 Cookie；媒体 CDN 请求不携带用户登录 Cookie。
 - 音轨保存至 `filesDir/youtube/{videoId}/audio.m4a`。每个 HTTP 请求最多读取 1 MiB，校验 `Content-Range` 后拼接；断流最多重试当前段两次，保留完整段，不改为无界 Range 整段读取。
-- 中止时仅清理本次 `.part`，不得删除重试任务正在使用的暂存。下载完成后在事务中自动加入音频库并关联下载，同视频复用已有曲目。
+- 中止时仅清理本次 `.part`，不得删除重试任务正在使用的暂存。下载完成后在事务中关联已入库曲目，同视频复用原曲目。
 - 队列、播放列表、下载管理和生成字幕均须保留视频身份；删除本地副本后仍可恢复在线播放。
 
 ### 6.4 剪贴板导入
@@ -170,23 +191,28 @@ export GRADLE_USER_HOME="$HOME/.gradle"
 
 ### 7.1 任务生命周期
 
-- 听写结果保存至 `filesDir/subtitles/{sha256}.json`。文件内容、服务地址和模型相同，且生成文件仍存在时复用结果；地址或模型改变时重新生成。无有效模型信息的已完成记录不按地址直接复用。
+- 听写结果保存至 `filesDir/subtitles/{sha256}.json`。文件内容、服务地址和模型相同，且生成文件仍存在时复用结果；地址或模型改变时重新生成。新文件以其中记录的生成模型和地址为准，翻译回写时保留。旧文件按最近已完成记录判断，无有效模型信息时不按地址直接复用。
 - 「生成字幕」设置 `skipTranslate = true`；「生成字幕和翻译」才在听写后翻译。重试保留原设置。
-- 手动翻译和润色由 `TranslateCenter` 独立协程执行；离开播放页仅取消界面等待。自动润色在提交译文前完成，润色失败保留未润色译文。译文文件与任务状态在同一提交点更新，避免任务已中止但字幕已含译文。
-- 中止仅取消本地任务。Qwen3-ASR 无服务端取消接口；SenseVoiceSmall 在片段间响应取消，JNI 解码与 release 不得并发。听写等待下载时，取消听写不连带取消音频下载。
-- 选择 DLsite 完整原始包的听写任务绑定指定下载任务，等待解压和目标文件关联完成；目标缺失时明确失败，不被其它压缩音轨下载提前唤醒。旧任务空依赖字段保留原兼容逻辑。
-- `filesDir/whisper-src/` 暂存文件保持无后缀，上传时根据文件头设置格式。任务结束、取消或重试后仅清理无任务引用的暂存；重试优先复用原文件，其次从曲目本地文件复制。SenseVoiceSmall 直接读取本地文件，不使用上传暂存。
+- 本机和在线听写、翻译及润色共用 `SubtitleTaskService`（`dataSync`）。在用户发起任务或应用重新进入前台后启动，覆盖等待音频下载、识别、自动翻译和润色。全部任务结束后释放唤醒锁并停止服务。系统超时时停止服务、取消本地请求并登记任务失败。应用进程终止后，重新进入应用会接手仍在排队或听写中的任务；中断的翻译登记为失败，保留已保存字幕。
+- 离开播放页仅取消界面等待。听写后的自动润色在提交译文前完成，润色失败保留未润色译文。自动翻译、独立翻译和润色以持久化发布记录协调译文文件和任务状态，启动时先补完已提交的发布。
+- 中止仅取消本地任务。Qwen3-ASR 无服务端取消接口；本机模型在片段间响应取消，JNI 解码与 release 不得并发。听写等待下载时，取消听写不连带取消音频下载。
+- 听写前置下载绑定指定任务。选择 DLsite 完整原始包时等待解压和目标文件关联完成；目标缺失时明确失败，不被其它压缩音轨下载提前唤醒。旧任务空依赖字段保留原兼容逻辑。
+- `filesDir/whisper-src/` 暂存文件保持无后缀，上传时根据文件头设置格式。任务结束、取消或重试后仅清理无任务引用的暂存；重试优先复用原文件，其次从曲目本地文件复制。本机模型直接读取本地文件，不使用上传暂存。
+
+- 独立翻译及手动润色在读取源字幕前登记任务，支持中止和失败重试。复用现有听写只翻译时也建立独立记录。重试或提交前核对原字幕身份，避免覆盖已变化的字幕；非生成字幕的保存在写锁外核对且只比较源内容指纹，读不到源时放行，译文覆盖按内嵌源指纹精确套用。生成字幕保留本地严格核对。
 
 ### 7.2 模型与网络
 
-- 听写模型为 `qwen-audio-3.1-asr`、`Qwen3-ASR` 和 `SenseVoiceSmall`。地址及密钥按模型独立保存，运行中的任务使用其自身配置；地址为空时仍保存模型选择。
-- `qwen-audio-3.1-asr` 固定使用阿里云接口和 `qwen-audio-3.1-asr-flash-filetrans` 模型，经临时上传后轮询结果，不上传超过 1 GB 的文件。轮询总上限 30 分钟，超时释放本次上传请求并按失败结束任务，可重试；用户中止仍显示「已中止」，不阻塞后续听写。
+- 听写模型为 `qwen-audio-3.1-asr`、`Qwen3-ASR`、`SenseVoiceSmall` 和 Parakeet 0.6B 日语（CTC）。地址及密钥按模型独立保存，运行中的任务使用其自身配置；地址为空时仍保存模型选择。
+- `qwen-audio-3.1-asr` 固定使用阿里云接口和 `qwen-audio-3.1-asr-flash-filetrans` 模型，经临时上传后轮询结果，不上传超过 1 GB 的文件。保存远端任务编号和提交时间，进程重启后接着查原任务。30 分钟轮询到期时取消当前查询并按失败结束。恢复时已过期的任务最多查询一次。手动重试可以重新提交，用户中止显示「已中止」。
 - Qwen3-ASR 要求非空地址，先读取模型名再请求 `/v1/audio/transcriptions`，语言为日语；保留服务返回的分段时间，只有整段文字时覆盖整首时长。保存地址不自动补 `/v1`。
-- SenseVoiceSmall 使用 sherpa-onnx，在 arm64 设备离线运行，`endpoint` 为 `null`，双方为空时仍可去重。就绪状态使用 `SenseVoiceModelManager.isReady()`。
-- SenseVoiceSmall 固定使用 `int8-2024-07-17` 多语种包及 `version.txt` 校验；`2025-09-09` 包为粤语模型，不可替代。使用 Silero VAD 将 16 kHz 单声道音频切成不超过 28 秒的片段，拼接时保留时间偏移。
+- 本机模型使用 sherpa-onnx，在 arm64 设备离线运行，`endpoint` 为 `null`，按各自模型身份去重。下载和重试当次选择 GitHub 或 Hugging Face，模型就绪、取消和删除按各自安装目录处理。
+- 模型下载由用户确认后启动独立的 `dataSync` 前台服务，覆盖下载、校验和安装。通知可取消对应下载，全部任务结束后释放唤醒锁并停止服务。进程终止后由用户重试，清理旧暂存。
+- SenseVoiceSmall 固定使用 `int8-2024-07-17` 多语种包，保留 `filesDir/sense-voice/` 和 `version.txt`。Parakeet 固定使用 NVIDIA 日语模型的 `35000-int8` CTC 导出包及独立安装目录。两个模型对 16 kHz 音频使用 Silero VAD，送入识别器的单声道片段不超过 28 秒，拼接时保留时间偏移。Parakeet 双声道分别检测人声，再按片段选择混合或使用单侧。来源、占用和 CC BY 4.0 署名见 `Android/docs/whisper-api.md`。
 - 已移除模型的偏好迁移至 `qwen-audio-3.1-asr`，不生成虚假密钥；旧模型的待执行任务明确失败。
 - Android 17 下，Qwen3-ASR 访问局域网、本机或 `.local` 地址前申请 `ACCESS_LOCAL_NETWORK`。使用 `isLocalNetworkAddress` 判断，仅解析字面 IP，不额外发起 DNS 查询。
 - 翻译平台限定千问 AI 平台和 DeepSeek，地址固定，密钥与模型名按平台独立保存。平台地址、默认模型及思考参数集中在 `data/TranslatePlatforms.kt`，修改时保留各平台的字段差异；思考内容 `reasoning_content` 不写入字幕。
+- 日文校对合并的条数、跨度、字数为软限制，按听写模型区分（`qwen-audio-3.1-asr` 为 2 条／18 秒，其余 4 条／12 秒，双语各 80 字）；自身超限的条目标记 `lock` 禁止合并。结构合法（JSON 可解析、编号连续全覆盖、双语非空）是硬要求；软违规默认直接交付，「翻译调优」开关（默认关）开启后定向修正一次，每批最多 2 次请求。润色不按合并字数硬拒绝。
 
 ### 7.3 字幕交互
 

@@ -164,12 +164,4 @@ class BiliSearchTest {
             gate.complete(Unit);state.loadMore();assertEquals(listOf("resumed"),state.items);assertFalse(state.paused)
         } finally { scope.cancel() }
     }
-    @Test fun persistedImportMetadataContainsOnlyThePartAndChecksIdentity() {
-        val part = BiliPart(bvid,42,2,"title","UP",1000,"https://i0.hdslb.com/a.jpg")
-        assertEquals(part,biliImportPart(part.importMetadata(),bvid,42))
-        assertFalse(part.importMetadata().contains("Cookie"));assertFalse(part.importMetadata().contains("videoplayback"))
-        for (raw in listOf("{}",part.copy(cid=43).importMetadata(),part.copy(page=0).importMetadata())) {
-            try { biliImportPart(raw,bvid,42);fail() } catch (_: BilibiliException) { }
-        }
-    }
 }

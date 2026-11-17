@@ -4,6 +4,7 @@ import com.nanahoshi.audioplayer.youtube.WebViewYouTubeSolver
 import com.nanahoshi.audioplayer.youtube.YouTubeClient
 
 import android.app.Application
+import androidx.room.withTransaction
 import coil.EventListener
 import coil.ImageLoader
 import coil.ImageLoaderFactory
@@ -24,7 +25,11 @@ import com.nanahoshi.audioplayer.data.LibraryPreferences
 import com.nanahoshi.audioplayer.data.TranslateCenter
 import com.nanahoshi.audioplayer.data.WhisperCenter
 import com.nanahoshi.audioplayer.data.LibraryRepository
-import com.nanahoshi.audioplayer.data.SenseVoiceModelManager
+import com.nanahoshi.audioplayer.data.OfflineWhisperModel
+import com.nanahoshi.audioplayer.data.OfflineWhisperModelManager
+import com.nanahoshi.audioplayer.data.SUBTITLE_INTERRUPTED
+import com.nanahoshi.audioplayer.data.SubtitleTaskRequests
+import com.nanahoshi.audioplayer.data.SubtitleTaskService
 import com.nanahoshi.audioplayer.data.db.AppDatabase
 import com.nanahoshi.audioplayer.data.db.DownloadStatus
 import com.nanahoshi.audioplayer.playback.CurrentSubtitles
@@ -38,6 +43,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 
 class AppGraph(app: Application) {
@@ -64,11 +70,36 @@ class AppGraph(app: Application) {
         { messages.value = "请先完成当前的入库选择" },
     )
     val dlsiteDownloadRequests = com.nanahoshi.audioplayer.data.DlsiteDownloadRequests()
-    val downloads = DownloadCenter(app, db, asmr, dlsite, bilibili, youtube, library) { messages.value = it }
     val subtitles = SubtitleSource(app, db, bilibili, asmr)
-    val translator = TranslateCenter(app, db, credentials, subtitles)
-    val senseVoice = SenseVoiceModelManager(app)
-    val whisper = WhisperCenter(app, db, credentials, downloads, translator, senseVoice)
+    val downloads = DownloadCenter(app, db, asmr, dlsite, bilibili, youtube, library, subtitles) { messages.value = it }
+    internal val subtitleTaskRequests = SubtitleTaskRequests { SubtitleTaskService.start(app, it) }
+    private val subtitleRecovery = CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+        // 恢复失败不得使启动崩溃或让 recovery.join() 重抛；两段各自捕获，恢复失败不跳过中断登记。
+        try {
+            subtitles.recoverPublications()
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            android.util.Log.w("SubtitleRecovery", "recover publications failed", error)
+        }
+        try {
+            db.withTransaction {
+                db.whisper().failInterruptedTranslations(SUBTITLE_INTERRUPTED)
+                db.translations().failInterrupted(SUBTITLE_INTERRUPTED)
+            }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            android.util.Log.w("SubtitleRecovery", "fail interrupted failed", error)
+        }
+    }
+    val translator = TranslateCenter(app, db, credentials, subtitles, subtitleTaskRequests, subtitleRecovery)
+    internal val offlineWhisperModels = OfflineWhisperModel.entries.associateWith {
+        OfflineWhisperModelManager(app.filesDir, it)
+    }
+    val whisper = WhisperCenter(
+        app, db, credentials, downloads, translator, subtitles, offlineWhisperModels, subtitleTaskRequests, subtitleRecovery,
+    )
     internal val subtitleDisplay = SubtitleDisplayPreferences(app)
     internal val currentSubtitles = CurrentSubtitles(
         CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),

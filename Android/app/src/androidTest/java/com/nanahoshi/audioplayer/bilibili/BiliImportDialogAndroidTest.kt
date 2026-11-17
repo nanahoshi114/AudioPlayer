@@ -19,20 +19,28 @@ class BiliImportDialogAndroidTest {
     private val parts = listOf(BiliPart(video.bvid, 41, 1, "one", "UP", 1000, ""),
         BiliPart(video.bvid, 42, 2, "two", "UP", 1000, ""))
 
-    @Test fun splitModeExposesThePartChecklistAndRequiresOneSelection() {
+    @Test fun mixedBatchShowsOnlyMultiPartVideoAndStillImportsSinglePart() {
         val requests = BiliImportRequests({ null })
+        val singleVideo = video.copy(bvid = "BV0987654321", title = "single-part video", durationMs = 1000)
+        val singlePart = parts.first().copy(bvid = singleVideo.bvid, cid = 51)
         var imported: List<BiliImportRequest>? = null
         compose.setContent { MaterialTheme {
-            LaunchedEffect(Unit) { imported = requests.choose(listOf(BiliVideoDetails(video, parts))) }
+            LaunchedEffect(Unit) {
+                imported = requests.choose(listOf(BiliVideoDetails(singleVideo, listOf(singlePart)), BiliVideoDetails(video, parts)))
+            }
             BiliImportDialog(requests)
         } }
+        compose.onNodeWithText(video.title).assertIsDisplayed()
+        compose.onNodeWithText(singleVideo.title).assertDoesNotExist()
         compose.onNodeWithText("按此方式导入").assertIsNotEnabled()
         compose.onNodeWithText("分开导入").performClick()
         compose.onNodeWithText("已选", substring = true).performClick()
         compose.onNodeWithText("按此方式导入").assertIsNotEnabled()
         compose.onNodeWithText("P2 · two").performClick()
         compose.onNodeWithText("按此方式导入").assertIsEnabled().performClick()
-        compose.runOnIdle { assertEquals(listOf(parts[1]), imported!!.single().parts) }
+        compose.runOnIdle {
+            assertEquals(listOf(listOf(singlePart), listOf(parts[1])), imported!!.map { it.parts })
+        }
     }
 
     @Test fun groupedModeRequiresExplicitConversionConfirmationAndIncludesAllParts() {

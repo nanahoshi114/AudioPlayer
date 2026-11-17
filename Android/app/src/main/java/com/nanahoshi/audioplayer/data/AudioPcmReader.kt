@@ -3,6 +3,7 @@ package com.nanahoshi.audioplayer.data
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import java.io.Closeable
 import java.io.File
 import java.nio.ByteOrder
 
@@ -23,7 +24,7 @@ internal fun toMono(samples: FloatArray, channels: Int): FloatArray {
 
 /**
  * 线性插值重采样。[carry] 是上一块结束时剩下的相位小数。块间插值需要上一块的最后一个
- * 样本做锚点：调用方把上一块最后一个样本拼在本块开头再传入（见 [AudioPcmReader.pump]）。
+ * 样本做锚点：调用方把上一块最后一个样本拼在本块开头再传入。
  * 返回结果和本块结束时的新相位。采样率相同就直接返回原样。
  */
 internal fun resampleLinear(
@@ -47,85 +48,90 @@ internal fun resampleLinear(
 }
 
 /**
- * 把音频文件流式解码成 16kHz 单声道 PCM float（[-1, 1]）。每次 [readChunk] 只占一块内存，
- * 不会把整首音频读进内存；供本机听写模型按段消费。
+ * 把音频文件流式解码成 16kHz PCM float（[-1, 1]）。默认混成单声道，可保留恰好两个声道。
  */
-class AudioPcmReader(file: File) {
+class AudioPcmReader(file: File, private val keepStereo: Boolean = false) : Closeable {
     private val extractor = MediaExtractor()
     private val codec: MediaCodec
     private val channels: Int
     private val sourceRate: Int
-    private var resampleCarry = 0f
-    private var resampleAnchor: Float? = null
-    private var pending = FloatArray(0)
+    val isStereo: Boolean get() = keepStereo && channels == 2
+    private val resampleCarry = FloatArray(2)
+    private val resampleAnchor = arrayOfNulls<Float>(2)
+    private var pending = emptyArray<FloatArray>()
     private var pendingOffset = 0
     private var inputDone = false
     private var outputDone = false
     private var released = false
 
     init {
+        // 构造期任何一步失败都要释放已创建的原生句柄；全部成功后才赋给 val codec。
+        var decoder: MediaCodec? = null
         try {
             extractor.setDataSource(file.absolutePath)
-        } catch (error: Exception) {
-            throw WhisperException("音频解码失败")
-        }
-        var trackIndex = -1
-        var format: MediaFormat? = null
-        for (index in 0 until extractor.trackCount) {
-            val candidate = extractor.getTrackFormat(index)
-            if (candidate.getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true) {
-                trackIndex = index
-                format = candidate
-                break
+            var trackIndex = -1
+            var format: MediaFormat? = null
+            for (index in 0 until extractor.trackCount) {
+                val candidate = extractor.getTrackFormat(index)
+                if (candidate.getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true) {
+                    trackIndex = index
+                    format = candidate
+                    break
+                }
             }
-        }
-        if (trackIndex < 0 || format == null) throw WhisperException("音频解码失败")
-        extractor.selectTrack(trackIndex)
-        val mime = format.getString(MediaFormat.KEY_MIME)!!
-        channels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT).coerceAtLeast(1)
-        sourceRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE).coerceAtLeast(1)
-        codec = try {
-            MediaCodec.createDecoderByType(mime)
+            if (trackIndex < 0 || format == null) throw WhisperException("音频解码失败")
+            extractor.selectTrack(trackIndex)
+            val mime = format.getString(MediaFormat.KEY_MIME)!!
+            channels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT).coerceAtLeast(1)
+            sourceRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE).coerceAtLeast(1)
+            decoder = MediaCodec.createDecoderByType(mime)
+            decoder.configure(format, null, null, 0)
+            decoder.start()
+            codec = decoder
         } catch (error: Exception) {
-            throw WhisperException("音频解码失败")
+            runCatching { decoder?.stop() }
+            runCatching { decoder?.release() }
+            runCatching { extractor.release() }
+            throw if (error is WhisperException) error else WhisperException("音频解码失败")
         }
-        codec.configure(format, null, null, 0)
-        codec.start()
     }
 
     /** 读取下一块 16kHz 单声道样本；读完返回 null。 */
-    fun readChunk(): FloatArray? {
-        val out = FloatArray(CHUNK_SAMPLES)
+    fun readChunk(sampleCount: Int = CHUNK_SAMPLES): FloatArray? = readChannels(sampleCount)?.single()
+
+    /** 各声道的采样位置和返回长度一致。 */
+    internal fun readChannels(sampleCount: Int): Array<FloatArray>? {
+        require(sampleCount > 0)
+        val out = Array(if (isStereo) 2 else 1) { FloatArray(sampleCount) }
         var filled = 0
-        while (filled < CHUNK_SAMPLES) {
+        while (filled < sampleCount) {
             filled += drainPending(out, filled)
-            if (filled >= CHUNK_SAMPLES) break
-            if (outputDone && pendingOffset >= pending.size) break
+            if (filled >= sampleCount) break
+            if (outputDone && pending.isEmpty()) break
             pump()
         }
         if (filled == 0) return null
-        return if (filled == CHUNK_SAMPLES) out else out.copyOf(filled)
+        return if (filled == sampleCount) out else Array(out.size) { out[it].copyOf(filled) }
     }
 
-    fun close() {
+    override fun close() {
         if (released) return
         released = true
-        try {
-            codec.stop()
-        } catch (_: Exception) {
-        }
-        codec.release()
-        extractor.release()
+        runCatching { codec.stop() }
+        runCatching { codec.release() }
+        runCatching { extractor.release() }
     }
 
-    private fun drainPending(out: FloatArray, offset: Int): Int {
-        val available = pending.size - pendingOffset
+    private fun drainPending(out: Array<FloatArray>, offset: Int): Int {
+        val available = (pending.firstOrNull()?.size ?: 0) - pendingOffset
         if (available <= 0) return 0
-        val take = minOf(available, out.size - offset)
-        System.arraycopy(pending, pendingOffset, out, offset, take)
+        val take = minOf(available, out[0].size - offset)
+        for (channel in out.indices) {
+            System.arraycopy(pending[channel], pendingOffset, out[channel], offset, take)
+        }
         pendingOffset += take
-        if (pendingOffset >= pending.size) {
-            pending = FloatArray(0)
+        if (pendingOffset >= pending[0].size) {
+            pending = emptyArray()
             pendingOffset = 0
         }
         return take
@@ -146,18 +152,13 @@ class AudioPcmReader(file: File) {
                     for (i in shorts.indices) {
                         shorts[i] = buffer.short
                     }
-                    val floats = toMono(FloatArray(shorts.size) { shorts[it] / 32768f }, channels)
-                    val resampled: FloatArray = if (floats.isEmpty() || sourceRate == TARGET_RATE) {
-                        floats
+                    val decoded = if (isStereo) {
+                        Array(2) { channel -> FloatArray(shorts.size / 2) { shorts[it * 2 + channel] / 32768f } }
                     } else {
-                        val anchor = resampleAnchor
-                        resampleAnchor = floats[floats.size - 1]
-                        val input = if (anchor == null) floats else floatArrayOf(anchor) + floats
-                        val (out, carry) = resampleLinear(input, sourceRate, TARGET_RATE, resampleCarry)
-                        resampleCarry = carry
-                        out
+                        arrayOf(toMono(FloatArray(shorts.size) { shorts[it] / 32768f }, channels))
                     }
-                    pending = resampled
+                    pending = Array(decoded.size) { resampleChannel(decoded[it], it) }
+                    if (pending[0].isEmpty()) pending = emptyArray()
                     pendingOffset = 0
                     codec.releaseOutputBuffer(index, false)
                     if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) outputDone = true
@@ -171,6 +172,16 @@ class AudioPcmReader(file: File) {
             }
             // INFO_OUTPUT_FORMAT_CHANGED 等负值继续循环
         }
+    }
+
+    private fun resampleChannel(samples: FloatArray, channel: Int): FloatArray {
+        if (samples.isEmpty() || sourceRate == TARGET_RATE) return samples
+        val anchor = resampleAnchor[channel]
+        resampleAnchor[channel] = samples.last()
+        val input = if (anchor == null) samples else floatArrayOf(anchor) + samples
+        val (out, carry) = resampleLinear(input, sourceRate, TARGET_RATE, resampleCarry[channel])
+        resampleCarry[channel] = carry
+        return out
     }
 
     private fun feedInput() {

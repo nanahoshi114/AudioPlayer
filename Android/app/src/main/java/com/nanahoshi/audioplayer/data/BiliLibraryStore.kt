@@ -1,14 +1,11 @@
 package com.nanahoshi.audioplayer.data
 
 import android.content.Context
-import android.net.Uri
 import androidx.room.withTransaction
 import com.nanahoshi.audioplayer.bilibili.*
 import com.nanahoshi.audioplayer.data.db.*
-import java.io.File
-import java.util.UUID
 
-/** Library organization and delayed download publication share the same Room transaction. */
+/** 保存作品分组及其分 P，沿用现有曲目编号。 */
 internal class BiliLibraryStore(
     private val context: Context,
     private val db: AppDatabase,
@@ -30,24 +27,7 @@ internal class BiliLibraryStore(
     suspend fun save(request: BiliImportRequest): List<TrackEntity> = db.withTransaction {
         val checked = request.checked()
         validateConversion(checked)
-        db.biliImports().delete(checked.video.bvid)
-        db.downloads().clearBiliImportMetadata(checked.video.bvid)
         apply(checked)
-    }
-
-    suspend fun beginDownload(request: BiliImportRequest): String = db.withTransaction {
-        val checked = request.checked()
-        validateConversion(checked)
-        val id = UUID.randomUUID().toString()
-        db.downloads().clearBiliImportMetadata(checked.video.bvid)
-        for (part in checked.parts) {
-            val active = db.downloads().activeForFile(TrackSource.BILIBILI.name, part.bvid, part.cid.toString())
-            if (active != null) db.downloads().setBiliImportPart(active.id,
-                biliLibraryJson.encodeToString(BiliDownloadImport.serializer(), BiliDownloadImport(part, id)))
-        }
-        db.biliImports().put(BiliImportIntentEntity(checked.video.bvid, id,
-            biliLibraryJson.encodeToString(BiliImportRequest.serializer(), checked)))
-        id
     }
 
     private suspend fun apply(request: BiliImportRequest): List<TrackEntity> {
@@ -82,36 +62,4 @@ internal class BiliLibraryStore(
         return db.tracks().forBvid(bvid)
     }
 
-    internal suspend fun hasLocalPart(part: BiliPart): Boolean {
-        if (readyBiliAudio(context.filesDir, part.bvid, part.cid) != null) return true
-        val uri = db.tracks().findByBvid(part.bvid, part.cid)?.localUri ?: return false
-        return runCatching {
-            when {
-                uri.startsWith("content:") -> LocalAudio.contentUriReadable(context, Uri.parse(uri))
-                else -> File(if (uri.startsWith("file:")) Uri.parse(uri).path.orEmpty() else uri).let { it.isFile && it.length() > 0 }
-            }
-        }.getOrDefault(false)
-    }
-
-    suspend fun publish(bvid: String? = null) {
-        var failure: Exception? = null
-        for (snapshot in db.biliImports().all().filter { bvid == null || it.bvid == bvid }) {
-            try {
-                db.withTransaction {
-                    val intent = db.biliImports().get(snapshot.bvid)?.takeIf { it.batchId == snapshot.batchId } ?: return@withTransaction
-                    val request = biliLibraryJson.decodeFromString(BiliImportRequest.serializer(), intent.requestJson).checked()
-                    val ready = request.parts.filter { hasLocalPart(it) }
-                    val complete = ready.size == request.parts.size
-                    // New split imports publish successful parts individually. Conversions and
-                    // grouped imports wait for every requested part before publishing.
-                    if (complete || (request.mode == BiliImportMode.SPLIT && db.folders().findBiliVideo(intent.bvid) == null && ready.isNotEmpty())) {
-                        apply(request.copy(parts = ready))
-                        if (complete) db.biliImports().delete(intent.bvid)
-                    }
-                }
-            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
-            catch (error: Exception) { if (failure == null) failure = error }
-        }
-        failure?.let { throw it }
-    }
 }

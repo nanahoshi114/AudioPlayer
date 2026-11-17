@@ -1,9 +1,9 @@
 package com.nanahoshi.audioplayer.data
 
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
@@ -28,24 +28,35 @@ internal class QwenFileTranscriber(
         .writeTimeout(30, TimeUnit.MINUTES)
         .build()
 
-    suspend fun transcribe(file: File, base: String, ticket: InflightCalls.Ticket, token: String): List<WhisperCue> {
-        if (file.length() > QWEN_TEMP_BYTES) throw WhisperException("这首超过 1GB，千问接不了")
+    suspend fun transcribe(
+        file: File,
+        base: String,
+        ticket: InflightCalls.Ticket,
+        token: String,
+        remoteId: String?,
+        submittedAt: Long?,
+        onSubmitted: suspend (String, Long) -> Unit,
+    ): List<WhisperCue> {
         val origin = qwenHttpOrigin(base)?.toHttpUrlOrNull() ?: throw WhisperException("听写地址不正确")
-        val policy = policy(origin, ticket, token)
-        val key = upload(policy, file, ticket)
-        val taskId = submit(origin, "oss://$key", ticket, token)
-        val resultUrl = try {
-            withTimeout(QWEN_POLL_TIMEOUT_MS) { poll(origin, taskId, ticket, token) }
-        } catch (timeout: TimeoutCancellationException) {
-            // 超时后还要主动取消仍在阻塞的轮询请求，否则会继续等到 read 超时。
-            calls.cancel(ticket.key)
-            throw WhisperException("听写超时，请重试")
+        val taskId = remoteId ?: run {
+            if (file.length() > QWEN_TEMP_BYTES) throw WhisperException("这首超过 1GB，千问接不了")
+            val key = upload(policy(origin, ticket, token), file, ticket)
+            submit(origin, "oss://$key", ticket, token).also { id ->
+                onSubmitted(id, System.currentTimeMillis())
+            }
         }
+        val now = System.currentTimeMillis()
+        val remaining = QWEN_POLL_TIMEOUT_MS - (now - (submittedAt ?: now)).coerceAtLeast(0L)
+        val resultUrl = if (remaining > 0) {
+            withTimeoutOrNull(remaining) { poll(origin, taskId, ticket, token, singleQuery = false) }
+        } else {
+            withTimeoutOrNull(15_000L) { poll(origin, taskId, ticket, token, singleQuery = true) }
+        } ?: throw WhisperException("听写超时，请重试")
         val payload = download(resultUrl, ticket)
         return cuesFromQwenPayload(payload)
     }
 
-    private fun policy(origin: HttpUrl, ticket: InflightCalls.Ticket, token: String): JSONObject {
+    private suspend fun policy(origin: HttpUrl, ticket: InflightCalls.Ticket, token: String): JSONObject {
         val url = origin.newBuilder()
             .addPathSegment("api")
             .addPathSegment("v1")
@@ -120,7 +131,9 @@ internal class QwenFileTranscriber(
         return id
     }
 
-    private suspend fun poll(origin: HttpUrl, taskId: String, ticket: InflightCalls.Ticket, token: String): String {
+    private suspend fun poll(
+        origin: HttpUrl, taskId: String, ticket: InflightCalls.Ticket, token: String, singleQuery: Boolean,
+    ): String? {
         val url = origin.newBuilder()
             .addPathSegment("api")
             .addPathSegment("v1")
@@ -131,7 +144,10 @@ internal class QwenFileTranscriber(
             val json = get(url, ticket, token)
             val output = json.optJSONObject("output") ?: throw WhisperException(qwenErrorMessage(json.toString()))
             when (output.optString("task_status")) {
-                "PENDING", "RUNNING", "UNKNOWN" -> delay(2_000)
+                "PENDING", "RUNNING", "UNKNOWN" -> {
+                    if (singleQuery) return null
+                    delay(2_000)
+                }
                 "SUCCEEDED" -> {
                     val result = output.optJSONArray("results")?.optJSONObject(0)
                         ?: throw WhisperException("生成失败")
@@ -160,12 +176,23 @@ internal class QwenFileTranscriber(
         }
     }
 
-    private fun get(url: HttpUrl, ticket: InflightCalls.Ticket, token: String): JSONObject =
-        execute(Request.Builder().url(url).get(), ticket, authorize = true, token = token) { response ->
-            val text = response.body?.string().orEmpty()
-            if (!response.isSuccessful) throw WhisperException(qwenErrorMessage(text))
-            parseObject(text)
+    private suspend fun get(url: HttpUrl, ticket: InflightCalls.Ticket, token: String): JSONObject {
+        val request = Request.Builder().url(url).header("Authorization", "Bearer $token").build()
+        val call = http.newCall(request)
+        if (!calls.begin(ticket, call)) throw CancellationException()
+        try {
+            return call.withResponse { response ->
+                val text = response.body?.string().orEmpty()
+                if (!response.isSuccessful) throw WhisperException(qwenErrorMessage(text))
+                parseObject(text)
+            }
+        } catch (error: IOException) {
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            throw WhisperException("无法连接听写服务")
+        } finally {
+            calls.end(ticket, call)
         }
+    }
 
     private fun <T> execute(
         builder: Request.Builder,

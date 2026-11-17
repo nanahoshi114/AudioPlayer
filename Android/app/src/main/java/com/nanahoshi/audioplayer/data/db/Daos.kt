@@ -196,9 +196,6 @@ interface LibraryFileDao {
 
 @Dao
 interface DownloadDao {
-    @Query("UPDATE downloads SET biliImportPart = NULL WHERE source = 'BILIBILI' AND workKey = :bvid")
-    suspend fun clearBiliImportMetadata(bvid: String)
-
     @Query("UPDATE downloads SET status = 'FAILED', error = :error WHERE id = :id AND status = 'RUNNING'")
     suspend fun failRunning(id: Long, error: String)
     @Query("SELECT * FROM downloads WHERE kind = 'DLSITE_ARCHIVE' AND workKey = :workno ORDER BY id DESC LIMIT 1")
@@ -207,23 +204,29 @@ interface DownloadDao {
     @Query("SELECT * FROM downloads WHERE kind = 'DLSITE_ARCHIVE' AND workKey = :workno AND status IN ('QUEUED', 'RUNNING') LIMIT 1")
     suspend fun activeArchive(workno: String): DownloadEntity?
 
+    @Query("UPDATE downloads SET status = 'FAILED', error = :error WHERE id = :id AND status IN ('QUEUED', 'RUNNING')")
+    suspend fun stopActive(id: Long, error: String): Int
+
+    @Query("UPDATE downloads SET trackId = :trackId, workFolderId = :folderId, source = :source, workKey = :workKey, fileKey = :fileKey WHERE id = :id")
+    suspend fun bindLibraryTarget(id: Long, trackId: Long, folderId: Long?, source: String?, workKey: String?, fileKey: String?)
+
+    @Query("UPDATE downloads SET pendingBiliSubtitle = :pending WHERE id = :id")
+    suspend fun setPendingBiliSubtitle(id: Long, pending: Boolean?)
+
+    @Query("SELECT * FROM downloads WHERE pendingBiliSubtitle = 1 AND status = 'DONE' ORDER BY id")
+    suspend fun pendingBiliSubtitles(): List<DownloadEntity>
+
+    @Query("SELECT * FROM downloads WHERE status IN ('QUEUED', 'RUNNING')")
+    suspend fun active(): List<DownloadEntity>
+
     @Query("UPDATE downloads SET phase = :phase WHERE id = :id AND status = 'RUNNING'")
     suspend fun setPhase(id: Long, phase: String)
-
-    @Query("UPDATE downloads SET status = 'FAILED', error = '已中止' WHERE id = :id AND kind = 'DLSITE_ARCHIVE' AND status IN ('QUEUED', 'RUNNING')")
-    suspend fun cancelArchive(id: Long): Int
-
-    @Query("UPDATE downloads SET biliImportPart = :metadata WHERE id = :id AND source = 'BILIBILI'")
-    suspend fun setBiliImportPart(id: Long, metadata: String)
 
     @Query("UPDATE downloads SET status = 'RUNNING' WHERE id = :id AND status = 'QUEUED'")
     suspend fun startQueued(id: Long): Int
 
     @Query("SELECT * FROM downloads WHERE id = :id")
     suspend fun get(id: Long): DownloadEntity?
-
-    @Query("UPDATE downloads SET status = 'FAILED', error = '已中止' WHERE id = :id AND source = 'YOUTUBE' AND status IN ('QUEUED', 'RUNNING')")
-    suspend fun cancelYouTube(id: Long): Int
 
     @Query("UPDATE downloads SET trackId = :trackId WHERE id = :id")
     suspend fun attachTrack(id: Long, trackId: Long)
@@ -233,6 +236,9 @@ interface DownloadDao {
 
     @Query("SELECT * FROM downloads ORDER BY id DESC")
     fun observe(): Flow<List<DownloadEntity>>
+
+    @Query("SELECT * FROM downloads WHERE status IN ('QUEUED', 'RUNNING') OR (status = 'DONE' AND pendingBiliSubtitle = 1) ORDER BY id ASC")
+    fun observeActive(): Flow<List<DownloadEntity>>
 
     @Query("SELECT * FROM downloads WHERE status = 'QUEUED' ORDER BY id ASC LIMIT 1")
     suspend fun nextQueued(): DownloadEntity?
@@ -282,7 +288,7 @@ interface DownloadDao {
     @Query("UPDATE downloads SET status = 'FAILED', error = :error WHERE status IN ('QUEUED', 'RUNNING')")
     suspend fun failActive(error: String)
 
-    @Query("UPDATE downloads SET status = 'QUEUED', bytesDone = 0, bytesTotal = 0, error = NULL WHERE id = :id")
+    @Query("UPDATE downloads SET status = 'QUEUED', bytesDone = 0, bytesTotal = 0, error = NULL, phase = NULL WHERE id = :id AND status = 'FAILED'")
     suspend fun requeue(id: Long)
 
     @Query("DELETE FROM downloads WHERE trackId = :trackId AND status = 'DONE'")
@@ -394,10 +400,10 @@ interface WhisperDao {
     @Query("UPDATE whisper_jobs SET progress = :progress WHERE id = :id")
     suspend fun setProgress(id: Long, progress: Float)
 
-    @Query("UPDATE whisper_jobs SET remoteJobId = :remoteId WHERE id = :id")
-    suspend fun setRemoteId(id: Long, remoteId: String)
+    @Query("UPDATE whisper_jobs SET remoteJobId = :remoteId, remoteSubmittedAt = :submittedAt WHERE id = :id AND status = 'RUNNING'")
+    suspend fun setRemoteId(id: Long, remoteId: String, submittedAt: Long)
 
-    @Query("UPDATE whisper_jobs SET fingerprint = :fingerprint, localPath = :path WHERE id = :id")
+    @Query("UPDATE whisper_jobs SET fingerprint = :fingerprint, localPath = :path WHERE id = :id AND status = 'QUEUED'")
     suspend fun attachFile(id: Long, fingerprint: String, path: String)
 
     @Query("UPDATE whisper_jobs SET status = 'DONE', progress = 1, error = NULL, translateStatus = NULL WHERE id = :id")
@@ -439,18 +445,30 @@ interface WhisperDao {
     @Query("UPDATE whisper_jobs SET status = 'DONE', progress = 1, error = :error, translateStatus = 'FAILED' WHERE id = :id")
     suspend fun markTranslateFailed(id: Long, error: String)
 
+    @Query("UPDATE whisper_jobs SET error = :error, translateStatus = 'FAILED' WHERE id = :id AND translateStatus = 'RUNNING' AND NOT EXISTS (SELECT 1 FROM subtitle_publications WHERE whisperJobId = :id)")
+    suspend fun failTranslateIfUnpublished(id: Long, error: String): Int
+
+    @Query("UPDATE whisper_jobs SET error = :error, translateStatus = 'FAILED' WHERE translateStatus = 'RUNNING' AND NOT EXISTS (SELECT 1 FROM subtitle_publications WHERE whisperJobId = whisper_jobs.id)")
+    suspend fun failInterruptedTranslations(error: String)
+
     @Query("UPDATE whisper_jobs SET translatedAt = :at WHERE id = :id")
     suspend fun setTranslatedAt(id: Long, at: Long)
 
     @Query("UPDATE whisper_jobs SET status = 'FAILED', error = :error WHERE id = :id")
     suspend fun fail(id: Long, error: String)
 
+    @Query("UPDATE whisper_jobs SET status = 'FAILED', error = :error WHERE status IN ('QUEUED', 'RUNNING')")
+    suspend fun failActive(error: String)
+
+    @Query("UPDATE whisper_jobs SET status = 'FAILED', error = :error WHERE id = :id AND status = 'QUEUED'")
+    suspend fun failWaiting(id: Long, error: String)
+
     @Query(
         """
         UPDATE whisper_jobs
         SET title = :title, fingerprint = :fingerprint, trackId = :trackId, localPath = :path,
             awaitRemoteUrl = :url, endpoint = :endpoint, skipTranslate = :skipTranslate, model = :model,
-            status = 'QUEUED', remoteJobId = NULL, progress = 0, error = NULL, translateStatus = NULL
+            status = 'QUEUED', remoteJobId = NULL, remoteSubmittedAt = NULL, progress = 0, error = NULL, translateStatus = NULL
         WHERE id = :id
         """,
     )
@@ -469,7 +487,7 @@ interface WhisperDao {
     @Query(
         """
         UPDATE whisper_jobs
-        SET status = 'QUEUED', fingerprint = '', localPath = NULL, remoteJobId = NULL, progress = 0, error = NULL,
+        SET status = 'QUEUED', fingerprint = '', localPath = NULL, remoteJobId = NULL, remoteSubmittedAt = NULL, progress = 0, error = NULL,
             translateStatus = NULL
         WHERE id = :id
         """,
@@ -479,6 +497,33 @@ interface WhisperDao {
 
 @Dao
 interface TranslationDao {
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun stagePublication(item: SubtitlePublicationEntity)
+
+    @Query("SELECT * FROM subtitle_publications")
+    suspend fun pendingPublications(): List<SubtitlePublicationEntity>
+
+    @Query("DELETE FROM subtitle_publications WHERE filename = :filename")
+    suspend fun clearPublication(filename: String)
+
+    @Query("SELECT * FROM translation_jobs WHERE status IN ('QUEUED', 'RUNNING') ORDER BY id")
+    suspend fun active(): List<TranslationJobEntity>
+
+    @Query("UPDATE translation_jobs SET status = 'QUEUED', error = NULL WHERE id = :id AND status = 'FAILED'")
+    suspend fun requeue(id: Long): Int
+
+    @Query("UPDATE translation_jobs SET status = 'RUNNING', error = NULL WHERE id = :id AND status = 'QUEUED'")
+    suspend fun startQueued(id: Long): Int
+
+    @Query("UPDATE translation_jobs SET status = 'FAILED', error = :error WHERE id = :id AND status IN ('QUEUED', 'RUNNING') AND NOT EXISTS (SELECT 1 FROM subtitle_publications WHERE translationJobId = :id)")
+    suspend fun failIfActive(id: Long, error: String): Int
+
+    @Query("DELETE FROM translation_jobs WHERE generatedFingerprint = :fingerprint AND status IN ('DONE', 'FAILED')")
+    suspend fun deleteInactiveForFingerprint(fingerprint: String)
+
+    @Query("UPDATE translation_jobs SET sourceFingerprint = :value WHERE id = :id AND status = 'RUNNING'")
+    suspend fun setSourceFingerprint(id: Long, value: String)
+
     @Query("SELECT * FROM translation_jobs ORDER BY id DESC")
     fun observe(): Flow<List<TranslationJobEntity>>
 
@@ -498,7 +543,7 @@ interface TranslationDao {
     suspend fun all(): List<TranslationJobEntity>
 
     /** 覆盖文件只可能由完成或仍在执行的任务写出；失败历史不参与命名，避免整表加载。 */
-    @Query("SELECT * FROM translation_jobs WHERE status <> 'FAILED'")
+    @Query("SELECT * FROM translation_jobs WHERE status <> 'FAILED' AND generatedFingerprint IS NULL")
     suspend fun overlayCandidates(): List<TranslationJobEntity>
 
     @Insert
@@ -522,12 +567,21 @@ interface TranslationDao {
     @Query("UPDATE translation_jobs SET status = 'FAILED', error = :error WHERE id = :id")
     suspend fun fail(id: Long, error: String)
 
+    @Query("UPDATE translation_jobs SET status = 'FAILED', error = :error WHERE status IN ('QUEUED', 'RUNNING') AND NOT EXISTS (SELECT 1 FROM subtitle_publications WHERE translationJobId = translation_jobs.id)")
+    suspend fun failInterrupted(error: String)
+
+    @Query("DELETE FROM translation_jobs WHERE id = :id AND status IN ('DONE', 'FAILED')")
+    suspend fun deleteInactive(id: Long)
+
     /** 只删终态记录；进行中的翻译保留，与听写侧「保留进行中的听写」一致。 */
     @Query("DELETE FROM translation_jobs WHERE status IN ('DONE', 'FAILED') AND trackId = :trackId")
     suspend fun deleteInactiveForTrack(trackId: Long)
 
     @Query("DELETE FROM translation_jobs WHERE status IN ('DONE', 'FAILED') AND remoteUrl = :url")
     suspend fun deleteInactiveForUrl(url: String)
+
+    @Query("DELETE FROM translation_jobs WHERE status IN ('DONE', 'FAILED') AND bvid = :bvid AND cid = :cid")
+    suspend fun deleteInactiveForBili(bvid: String, cid: Long)
 
     @Query("DELETE FROM translation_jobs WHERE status IN ('DONE', 'FAILED') AND queueItemId = :queueItemId")
     suspend fun deleteInactiveForQueue(queueItemId: Long)
@@ -707,16 +761,4 @@ interface DlsiteOriginalDao {
 
     @Query("DELETE FROM dlsite_original_entries WHERE workno = :workno")
     suspend fun deleteEntries(workno: String)
-}
-
-@Dao
-interface BiliImportDao {
-    @Query("SELECT * FROM bili_import_intents")
-    suspend fun all(): List<BiliImportIntentEntity>
-    @Query("SELECT * FROM bili_import_intents WHERE bvid = :bvid")
-    suspend fun get(bvid: String): BiliImportIntentEntity?
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun put(intent: BiliImportIntentEntity)
-    @Query("DELETE FROM bili_import_intents WHERE bvid = :bvid")
-    suspend fun delete(bvid: String)
 }

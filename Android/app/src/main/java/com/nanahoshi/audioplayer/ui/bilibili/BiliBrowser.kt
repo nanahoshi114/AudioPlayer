@@ -116,9 +116,6 @@ fun BiliBrowser(onOpenCollection: (BiliCollection) -> Unit = {}, viewModel: Bili
                 TextButton(enabled = !viewModel.resolving && !viewModel.working, onClick = {
                     viewModel.prepare(BiliAction.SAVE, items.filter { it.bvid in viewModel.selected })
                 }) { Text("加入音频库") }
-                TextButton(enabled = !viewModel.resolving && !viewModel.working, onClick = {
-                    viewModel.prepare(BiliAction.DOWNLOAD, items.filter { it.bvid in viewModel.selected })
-                }) { Text("下载") }
             }
         }
         if (viewModel.resolving) Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -129,7 +126,7 @@ fun BiliBrowser(onOpenCollection: (BiliCollection) -> Unit = {}, viewModel: Bili
         if (count == 0 && !loading && error == null) {
             EmptyState(title = if (searched) (if (users) "没有找到 UP 主" else "没有找到视频") else "搜索 B 站音频",
                 message = if (uploader != null) "这位 UP 主暂时没有投稿。"
-                    else if (users) "输入昵称查找 UP 主，也可以输入 UID 或主页链接。" else "输入关键词、BV 号或视频链接，查找后可播放、加入音频库或下载。")
+                    else if (users) "输入昵称查找 UP 主，也可以输入 UID 或主页链接。" else "输入关键词、BV 号或视频链接，查找后可播放或加入音频库。")
         }
         LazyColumn(state = state, modifier = Modifier.weight(1f)) {
             if (users) {
@@ -161,8 +158,8 @@ fun BiliBrowser(onOpenCollection: (BiliCollection) -> Unit = {}, viewModel: Bili
                         trailingContent = { if (viewModel.selected.isEmpty()) Box {
                             IconButton(onClick = { menu = true }, enabled = !busy) { Icon(Icons.Default.MoreVert, "更多") }
                             DropdownMenu(menu, { menu = false }) {
-                                for (action in listOf(BiliAction.SAVE, BiliAction.DOWNLOAD)) DropdownMenuItem(text = { Text(action.label) }, onClick = {
-                                    menu = false; viewModel.prepare(action, listOf(video))
+                                DropdownMenuItem(text = { Text(BiliAction.SAVE.label) }, onClick = {
+                                    menu = false; viewModel.prepare(BiliAction.SAVE, listOf(video))
                                 })
                             }
                         } }, modifier = Modifier.combinedClickable(

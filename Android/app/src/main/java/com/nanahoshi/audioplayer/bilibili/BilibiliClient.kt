@@ -8,6 +8,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.SerialName
@@ -111,7 +112,7 @@ class BilibiliClient(
 
     @Volatile private var mixinKey: String? = null
     @Volatile private var mixinFetchedAt: Long = 0
-    private val sessionRefreshLock = Any()
+    private val sessionRefreshLock = kotlinx.coroutines.sync.Mutex()
     private val searchApi = BiliSearchApi { path, params, referer, refresh ->
         val signed = WbiSigner.sign(params, mixin(refresh))
         val url = "https://api.bilibili.com$path".toHttpUrl().newBuilder().apply {
@@ -501,7 +502,7 @@ class BilibiliClient(
             http.newCall(request).withResponse { readExchange(it, allowHtml = false).body }
         }
 
-    private fun prepareIdentity() {
+    private suspend fun prepareIdentity() {
         if (credentials.needsSpiBuvid()) {
             try {
                 val body = execute(
@@ -515,6 +516,8 @@ class BilibiliClient(
                 if (response.code == 0 && buvid3.isNotBlank()) {
                     credentials.saveSpiBuvid(buvid3, buvid4)
                 }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (error: Exception) {
                 Log.w(TAG, "buvid skipped: ${error.javaClass.simpleName}")
             }
@@ -522,6 +525,8 @@ class BilibiliClient(
         if (!credentials.hasFreshTicket()) {
             try {
                 fetchTicket()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (error: Exception) {
                 Log.w(TAG, "ticket skipped: ${error.javaClass.simpleName}")
             }
@@ -529,9 +534,9 @@ class BilibiliClient(
         maybeRefreshSession()
     }
 
-    private fun maybeRefreshSession() {
+    private suspend fun maybeRefreshSession() {
         if (!credentials.hasBiliRefresh() || !credentials.biliRefreshDue()) return
-        synchronized(sessionRefreshLock) {
+        sessionRefreshLock.withLock {
             val token = credentials.biliRefreshToken() ?: return
             if (!credentials.biliRefreshDue()) return
             val info = try {
@@ -542,6 +547,8 @@ class BilibiliClient(
                     .build()
                 val body = execute(Request.Builder().url(url).get(), "https://www.bilibili.com")
                 json.decodeFromString<ApiResponse<CookieInfoData>>(body)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (error: Exception) {
                 Log.w(TAG, "session check skipped: ${error.javaClass.simpleName}")
                 credentials.markBiliRefreshFailed()
@@ -554,6 +561,8 @@ class BilibiliClient(
                 } else {
                     credentials.markBiliRefreshFailed()
                 }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (error: Exception) {
                 Log.w(TAG, "session refresh skipped: ${error.javaClass.simpleName}")
                 credentials.markBiliRefreshFailed()
@@ -561,7 +570,7 @@ class BilibiliClient(
         }
     }
 
-    private fun refreshSession(oldToken: String, timestamp: Long): Boolean {
+    private suspend fun refreshSession(oldToken: String, timestamp: Long): Boolean {
         val csrf = cookieField(credentials.cookie().orEmpty(), "bili_jct") ?: return false
         val stamp = timestamp.takeIf { it > 0L } ?: System.currentTimeMillis()
         val page = exchange(
@@ -612,7 +621,7 @@ class BilibiliClient(
         return true
     }
 
-    private fun fetchTicket() {
+    private suspend fun fetchTicket() {
         val ts = System.currentTimeMillis() / 1000
         val hexSign = hmacSha256("XgwSnGZ1p", "ts$ts")
         val url = "https://api.bilibili.com/bapis/bilibili.api.ticket.v1.Ticket/GenWebTicket".toHttpUrl()
@@ -645,19 +654,19 @@ class BilibiliClient(
             .joinToString("") { "%02x".format(it.toInt() and 0xff) }
     }
 
-    private fun execute(
+    private suspend fun execute(
         builder: Request.Builder,
         referer: String,
         guestOnly: Boolean = false,
         allowHtml: Boolean = false,
     ): String = exchange(builder, referer, guestOnly, allowHtml).body
 
-    private fun exchange(
+    private suspend fun exchange(
         builder: Request.Builder,
         referer: String,
         guestOnly: Boolean = false,
         allowHtml: Boolean = false,
-    ): Exchange = http.newCall(buildRequest(builder, referer, guestOnly)).execute().use {
+    ): Exchange = http.newCall(buildRequest(builder, referer, guestOnly)).withResponse {
         readExchange(it, allowHtml)
     }
 

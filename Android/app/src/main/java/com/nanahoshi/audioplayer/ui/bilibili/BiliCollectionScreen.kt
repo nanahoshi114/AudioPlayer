@@ -102,7 +102,6 @@ fun BiliCollectionScreen(
                         TextButton(onClick = { model.prepareSelection(CollectionAction.PLAY) }, enabled = !model.busy) { Text("播放") }
                         TextButton(onClick = { model.prepareSelection(CollectionAction.APPEND) }, enabled = !model.busy) { Text("加入播放队列") }
                         TextButton(onClick = { model.prepareSelection(CollectionAction.SAVE) }, enabled = !model.busy) { Text("加入音频库") }
-                        TextButton(onClick = { model.prepareSelection(CollectionAction.DOWNLOAD) }, enabled = !model.busy) { Text("下载") }
                     }
                 }
             }
@@ -117,9 +116,10 @@ fun BiliCollectionScreen(
                         Box {
                             IconButton(onClick = { rowMenu = true }, enabled = !model.busy) { Icon(Icons.Default.MoreVert, "视频操作") }
                             DropdownMenu(rowMenu, { rowMenu = false }) {
-                                for ((label, action) in listOf("加入音频库" to CollectionAction.SAVE, "下载" to CollectionAction.DOWNLOAD)) {
-                                    DropdownMenuItem(text = { Text(label) }, onClick = { rowMenu = false; model.prepare(action, listOf(video)) })
-                                }
+                                DropdownMenuItem(text = { Text("加入音频库") }, onClick = {
+                                    rowMenu = false
+                                    model.prepare(CollectionAction.SAVE, listOf(video))
+                                })
                             }
                         }
                     }, modifier = Modifier.combinedClickable(enabled = !model.busy,
@@ -215,7 +215,7 @@ internal fun CollectionSortSelector(sort: CollectionSort, onSort: (CollectionSor
 
 @Composable
 internal fun CollectionMenuItems(saved: Boolean, onAction: (CollectionAction) -> Unit, onUnbookmark: () -> Unit) {
-    for ((label, action) in listOf("加入音频库" to CollectionAction.SAVE, "下载全部音轨" to CollectionAction.DOWNLOAD,
+    for ((label, action) in listOf("加入音频库" to CollectionAction.SAVE,
         "复制为普通播放列表" to CollectionAction.COPY)) {
         DropdownMenuItem(text = { Text(label) }, onClick = { onAction(action) })
     }

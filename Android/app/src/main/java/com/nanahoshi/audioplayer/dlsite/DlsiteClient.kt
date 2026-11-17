@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.dlsite
 
+import com.nanahoshi.audioplayer.data.withResponse
+
 import com.nanahoshi.audioplayer.asmr.WorkFacts
 import com.nanahoshi.audioplayer.data.CredentialStore
 import com.nanahoshi.audioplayer.data.TrackSource
@@ -339,6 +341,10 @@ class DlsiteClient(private val credentials: CredentialStore) {
         signedPlayFileBlocking(workno, optimizedName).url
 
     fun signedPlayFileBlocking(workno: String, optimizedName: String): SignedPlayFile {
+        return kotlinx.coroutines.runBlocking { signedPlayFile(workno, optimizedName) }
+    }
+
+    internal suspend fun signedPlayFile(workno: String, optimizedName: String): SignedPlayFile {
         val token = sign(worknoOf(workno))
         val name = optimizedName.removePrefix("dlsite:")
         return SignedPlayFile(token.url.trimEnd('/') + "/optimized/" + name, token.cookie)
@@ -391,7 +397,7 @@ class DlsiteClient(private val credentials: CredentialStore) {
         return ids
     }
 
-    private fun sign(workno: String): DownloadToken {
+    private suspend fun sign(workno: String): DownloadToken {
         var last: DlsiteException? = null
         for (id in worknoCandidates(workno)) {
             try {
@@ -404,14 +410,14 @@ class DlsiteClient(private val credentials: CredentialStore) {
         throw last ?: DlsiteException("没有可播放的地址")
     }
 
-    private fun signOnce(workno: String): DownloadToken {
+    private suspend fun signOnce(workno: String): DownloadToken {
         val call = request(
             "https://play.dl.dlsite.com/api/v3/download/sign/cookie?workno=$workno",
             PLAY_REFERER,
             acceptJson = true,
             authed = true,
         )
-        client.newCall(call).execute().use { response ->
+        return client.newCall(call).withResponse { response ->
             val body = response.body?.string().orEmpty()
             if (response.code == 401) throw DlsiteException("登录已失效，请重新登录")
             if (!response.isSuccessful) throw DlsiteException("暂时无法连接 DLsite")
@@ -425,7 +431,7 @@ class DlsiteClient(private val credentials: CredentialStore) {
             }
             val cookie = playAccessCookie(cookieHeader(), extras)
             playAccessCookie = cookie
-            return DownloadToken(directory, cookie)
+            DownloadToken(directory, cookie)
         }
     }
 

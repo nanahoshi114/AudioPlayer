@@ -1,6 +1,7 @@
 package com.nanahoshi.audioplayer
 
 import android.Manifest
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -11,6 +12,9 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.DisposableEffect
 import com.nanahoshi.audioplayer.data.AccentMode
+import com.nanahoshi.audioplayer.data.AudioDownloadService
+import com.nanahoshi.audioplayer.data.SubtitleTaskService
+import com.nanahoshi.audioplayer.data.db.TranslateMark
 import com.nanahoshi.audioplayer.data.ThemeMode
 import com.nanahoshi.audioplayer.ui.settings.AppearanceScreen
 import com.nanahoshi.audioplayer.ui.settings.AboutScreen
@@ -109,6 +113,7 @@ import com.nanahoshi.audioplayer.ui.theme.AudioPlayerTheme
 import com.nanahoshi.audioplayer.ui.importing.ClipboardImportDialog
 import com.nanahoshi.audioplayer.ui.importing.ClipboardImportViewModel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -117,6 +122,7 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
     private val clipboardImport by lazy { ViewModelProvider(this)[ClipboardImportViewModel::class.java] }
     private var clipboardCheckedThisEntry = false
+    private val openTaskPage = MutableStateFlow<String?>(null)
 
     override fun onStart() {
         super.onStart()
@@ -131,6 +137,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        application.graph().downloads.resumePendingSubtitles()
+        application.graph().whisper.resumePending()
         window.decorView.post { inspectClipboardWhenReady() }
     }
 
@@ -147,6 +155,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 进程死亡后从最近任务恢复会重投原启动 Intent；只在全新启动时处理通知动作，避免重放导航。
+        if (savedInstanceState == null) handleDownloadNotification(intent)
         val client = application.graph().player
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -194,9 +204,24 @@ class MainActivity : ComponentActivity() {
                 onDispose { }
             }
             AudioPlayerTheme(darkTheme = dark, accent = accent) {
-                PlayerApp(clipboardImport)
+                PlayerApp(clipboardImport, openTaskPage)
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleDownloadNotification(intent)
+    }
+
+    private fun handleDownloadNotification(intent: Intent) {
+        val destination = when (intent.action) {
+            AudioDownloadService.OPEN_DOWNLOADS -> Routes.Downloads
+            SubtitleTaskService.OPEN_TASKS -> Routes.SubtitleTasks
+            else -> return
+        }
+        intent.action = null
+        openTaskPage.value = destination
     }
 }
 
@@ -225,6 +250,7 @@ private object Routes {
     const val Purchases = "purchases"
     const val NowPlaying = "now"
     const val Downloads = "downloads"
+    const val SubtitleTasks = "downloads/subtitles"
     const val Stored = "stored"
     const val Preview = "preview/{fileId}"
     fun preview(fileId: Long) = "preview/$fileId"
@@ -237,10 +263,22 @@ private object Routes {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun PlayerApp(clipboardImport: ClipboardImportViewModel) {
+private fun PlayerApp(
+    clipboardImport: ClipboardImportViewModel,
+    openTaskPage: MutableStateFlow<String?>,
+) {
     val navController = rememberNavController()
     val backStack by navController.currentBackStackEntryAsState()
     val route = backStack?.destination?.route
+    LaunchedEffect(route, navController, openTaskPage) {
+        if (route == null) return@LaunchedEffect
+        openTaskPage.collect { destination ->
+            if (destination != null) {
+                openTaskPage.value = null
+                navController.navigate(destination) { launchSingleTop = true }
+            }
+        }
+    }
     var lastTab by remember { mutableStateOf(Routes.Library) }
     SideEffect {
         if (isTab(route)) lastTab = route!!
@@ -265,8 +303,13 @@ private fun PlayerApp(clipboardImport: ClipboardImportViewModel) {
     val downloads by graph.downloads.observe().collectAsStateWithLifecycle(emptyList())
     val whisperJobs by graph.whisper.observe().collectAsStateWithLifecycle(emptyList())
     val translations by graph.db.translations().observe().collectAsStateWithLifecycle(emptyList())
-    val activeTasks = downloads.count { it.status == DownloadStatus.QUEUED || it.status == DownloadStatus.RUNNING } +
-        whisperJobs.count { it.status == DownloadStatus.QUEUED || it.status == DownloadStatus.RUNNING } +
+    val activeTasks = downloads.count {
+        it.status == DownloadStatus.QUEUED || it.status == DownloadStatus.RUNNING || it.pendingBiliSubtitle == true
+    } +
+        whisperJobs.count {
+            it.status == DownloadStatus.QUEUED || it.status == DownloadStatus.RUNNING ||
+                it.translateStatus == TranslateMark.RUNNING
+        } +
         translations.count { it.status == DownloadStatus.QUEUED || it.status == DownloadStatus.RUNNING }
     val fade = if (reduceMotion) snap<Float>() else tween<Float>(180, easing = Motion.enter)
     val fadeAway = if (reduceMotion) snap<Float>() else tween<Float>(Motion.short, easing = Motion.exit)
@@ -596,6 +639,9 @@ private fun PlayerApp(clipboardImport: ClipboardImportViewModel) {
                 )
             }
             composable(Routes.Downloads) { DownloadScreen(onBack = { navController.popBackStack() }) }
+            composable(Routes.SubtitleTasks) {
+                DownloadScreen(onBack = { navController.popBackStack() }, initialSubtitles = true)
+            }
             composable(Routes.Stored) {
                 StoredFilesScreen(
                     onBack = { navController.popBackStack() },

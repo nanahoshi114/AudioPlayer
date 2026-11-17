@@ -15,6 +15,7 @@ import com.nanahoshi.audioplayer.dlsite.DlsiteClient
 import com.nanahoshi.audioplayer.dlsite.PlayEntry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -54,6 +55,7 @@ class DlsiteOriginalStore(
         generation: String,
         beforeCommit: suspend () -> Unit = {},
         onPublish: suspend () -> Unit = {},
+        onCommitted: () -> Unit = {},
     ): DlsiteOriginalImportResult = withContext(Dispatchers.IO) {
         val code = DlsiteClient.canonicalWorkno(workno)
         val rootDirectory = directory.canonicalFile
@@ -81,140 +83,147 @@ class DlsiteOriginalStore(
             ?.let(::flattenOriginalPlay).orEmpty()
         val playPaths = matchDlsiteOriginalPaths(originalLeaves, play.map { it.path })
         val playByPath = play.associateBy { it.path }
+        val originalContext = currentCoroutineContext()
         val durations = disk.filter { it.kind == DlsiteOriginalKind.AUDIO }
-            .associate { it.path to audioDuration(it.file) }
-        db.withTransaction {
-            beforeCommit()
-            val now = System.currentTimeMillis()
-            val root = library.folderBySource(code) ?: FolderEntity(
-                parentId = null,
-                name = sanitizeEntryName("$code ${facts.title}"),
-                position = db.folders().maxPosition(null) + 1,
-                addedAt = now,
-                asmrWorkId = code.filter { it.isDigit() }.toLongOrNull() ?: 0L,
-                asmrSourceId = code,
-                coverUri = cover,
-                workMeta = facts.copy(sourceId = code).toJson(),
-            ).let { it.copy(id = db.folders().insert(it)) }
-            val workId = root.asmrWorkId ?: code.filter { it.isDigit() }.toLongOrNull() ?: 0L
-            val oldEntries = db.dlsiteOriginals().entries(code).associateBy { it.relativePath }
-            val folders = db.folders().all()
-            val byFolderId = folders.associateBy { it.id }
-            val folderIds = originalFolderIds(folders, root.id)
-            val oldTracks = db.tracks().inFolders(folderIds.toList()).filter { it.source == TrackSource.DLSITE }
-            val oldFiles = folderIds.flatMap { id -> db.files().listIn(id) }
-                .filter { libraryFileSource(it.fileHash) == TrackSource.DLSITE }
-            val trackPaths = oldTracks.mapNotNull { track ->
-                relativeLibraryPath(track.folderId, track.title, root.id, byFolderId)?.let { it to track }
+            .associate {
+                originalContext.ensureActive()
+                it.path to audioDuration(it.file)
             }
-            val filePaths = oldFiles.mapNotNull { file ->
-                relativeLibraryPath(file.folderId, file.name, root.id, byFolderId)?.let { it to file }
-            }
-            val oldLeafPaths = trackPaths.map { it.first } + filePaths.map { it.first }
-            val matchedPaths = matchDlsiteOriginalPaths(originalLeaves, oldLeafPaths)
-            val tracksByPath = trackPaths.groupBy({ it.first }, { it.second })
-            val filesByPath = filePaths.groupBy({ it.first }, { it.second })
-            val tracksByPlay = oldTracks.filter { !it.fileHash.isNullOrBlank() }.groupBy { rawFileKey(it.fileHash) }
-            val directoryIds = mutableMapOf("" to root.id)
-            val usedFolderIds = mutableSetOf(root.id)
-            val usedTrackIds = mutableSetOf<Long>()
-            val usedFileIds = mutableSetOf<Long>()
-            val entries = mutableListOf<DlsiteOriginalEntryEntity>()
-            var linked = 0
-            val skipped = mutableListOf<String>()
-            for (item in disk) {
-                currentCoroutineContext().ensureActive()
-                val parentPath = item.path.substringBeforeLast('/', "")
-                val parentId = directoryIds.getValue(parentPath)
-                val name = item.path.substringAfterLast('/')
-                val previous = oldEntries[item.path]
-                if (item.kind == DlsiteOriginalKind.FOLDER) {
-                    val prior = previous?.folderId?.let { byFolderId[it] }?.takeIf {
-                        it.id != root.id && it.contentSource == TrackSource.DLSITE.name && it.id !in usedFolderIds
-                    }
-                    val compatible = folders.filter {
-                        it.parentId == parentId && it.contentSource == TrackSource.DLSITE.name &&
-                            matchKey(it.name) == matchKey(name) && it.id !in usedFolderIds
-                    }.singleOrNull()
-                    val folder = (prior ?: compatible)?.copy(
-                        parentId = parentId, name = name, asmrWorkId = workId, contentSource = TrackSource.DLSITE.name,
-                    ) ?: FolderEntity(
-                        parentId = parentId, name = name, position = db.folders().maxPosition(parentId) + 1,
-                        addedAt = now, asmrWorkId = workId, contentSource = TrackSource.DLSITE.name,
-                    )
-                    val id = if (folder.id > 0) {
-                        db.folders().update(folder)
-                        folder.id
-                    } else db.folders().insert(folder)
-                    usedFolderIds += id
-                    directoryIds[item.path] = id
-                    entries += item.entry(code, folderId = id)
-                    continue
+        originalContext.ensureActive()
+        withContext(NonCancellable) {
+            db.withTransaction {
+                beforeCommit()
+                val now = System.currentTimeMillis()
+                val root = library.folderBySource(code) ?: FolderEntity(
+                    parentId = null,
+                    name = sanitizeEntryName("$code ${facts.title}"),
+                    position = db.folders().maxPosition(null) + 1,
+                    addedAt = now,
+                    asmrWorkId = code.filter { it.isDigit() }.toLongOrNull() ?: 0L,
+                    asmrSourceId = code,
+                    coverUri = cover,
+                    workMeta = facts.copy(sourceId = code).toJson(),
+                ).let { it.copy(id = db.folders().insert(it)) }
+                val workId = root.asmrWorkId ?: code.filter { it.isDigit() }.toLongOrNull() ?: 0L
+                val oldEntries = db.dlsiteOriginals().entries(code).associateBy { it.relativePath }
+                val folders = db.folders().all()
+                val byFolderId = folders.associateBy { it.id }
+                val folderIds = originalFolderIds(folders, root.id)
+                val oldTracks = db.tracks().inFolders(folderIds.toList()).filter { it.source == TrackSource.DLSITE }
+                val oldFiles = folderIds.flatMap { id -> db.files().listIn(id) }
+                    .filter { libraryFileSource(it.fileHash) == TrackSource.DLSITE }
+                val trackPaths = oldTracks.mapNotNull { track ->
+                    relativeLibraryPath(track.folderId, track.title, root.id, byFolderId)?.let { it to track }
                 }
-                val remote = playPaths[item.path]?.let { playByPath[it] }?.node
-                if (item.kind == DlsiteOriginalKind.AUDIO) {
-                    val previousTrack = previous?.trackId?.let { db.tracks().getById(it) }
-                        ?.takeIf { it.source == TrackSource.DLSITE && it.id !in usedTrackIds }
-                    val playKey = remote?.audio?.fileKey?.takeIf { it.isNotBlank() }
-                    val byKey = playKey?.let { tracksByPlay[it]?.singleOrNull() }?.takeIf { it.id !in usedTrackIds }
-                    val byPath = matchedPaths[item.path]?.let { tracksByPath[it]?.singleOrNull() }
-                        ?.takeIf { it.id !in usedTrackIds }
-                    val old = previousTrack ?: byKey ?: byPath
-                    val track = old?.copy(
-                        title = name, folderId = parentId, localUri = item.file.absolutePath,
-                        durationMs = durations.getValue(item.path).takeIf { it > 0 } ?: old.durationMs,
-                    ) ?: TrackEntity(
-                        source = TrackSource.DLSITE, title = name, artist = facts.circle.ifBlank { code },
-                        durationMs = durations.getValue(item.path), coverUri = cover, localUri = item.file.absolutePath,
-                        bvid = null, cid = null, page = null, addedAt = now, folderId = parentId,
-                        remoteUrl = remote?.audio?.remoteUrl, asmrWorkId = workId,
-                        fileHash = playKey?.let { scopedFileHash(TrackSource.DLSITE, it) },
-                    )
-                    val owner = db.tracks().findByLocalUri(item.file.absolutePath)
-                    if (owner != null && owner.id != track.id) {
-                        // 文件已被别的曲目占用：保留原关联并跳过本条，不让整个发布回滚。
-                        skipped += item.path
-                        usedTrackIds += owner.id
-                        entries += item.entry(code, trackId = owner.id, playFileKey = playKey
-                            ?: rawFileKey(track.fileHash) ?: previous?.playFileKey)
+                val filePaths = oldFiles.mapNotNull { file ->
+                    relativeLibraryPath(file.folderId, file.name, root.id, byFolderId)?.let { it to file }
+                }
+                val oldLeafPaths = trackPaths.map { it.first } + filePaths.map { it.first }
+                val matchedPaths = matchDlsiteOriginalPaths(originalLeaves, oldLeafPaths)
+                val tracksByPath = trackPaths.groupBy({ it.first }, { it.second })
+                val filesByPath = filePaths.groupBy({ it.first }, { it.second })
+                val tracksByPlay = oldTracks.filter { !it.fileHash.isNullOrBlank() }.groupBy { rawFileKey(it.fileHash) }
+                val directoryIds = mutableMapOf("" to root.id)
+                val usedFolderIds = mutableSetOf(root.id)
+                val usedTrackIds = mutableSetOf<Long>()
+                val usedFileIds = mutableSetOf<Long>()
+                val entries = mutableListOf<DlsiteOriginalEntryEntity>()
+                var linked = 0
+                val skipped = mutableListOf<String>()
+                for (item in disk) {
+                    currentCoroutineContext().ensureActive()
+                    val parentPath = item.path.substringBeforeLast('/', "")
+                    val parentId = directoryIds.getValue(parentPath)
+                    val name = item.path.substringAfterLast('/')
+                    val previous = oldEntries[item.path]
+                    if (item.kind == DlsiteOriginalKind.FOLDER) {
+                        val prior = previous?.folderId?.let { byFolderId[it] }?.takeIf {
+                            it.id != root.id && it.contentSource == TrackSource.DLSITE.name && it.id !in usedFolderIds
+                        }
+                        val compatible = folders.filter {
+                            it.parentId == parentId && it.contentSource == TrackSource.DLSITE.name &&
+                                matchKey(it.name) == matchKey(name) && it.id !in usedFolderIds
+                        }.singleOrNull()
+                        val folder = (prior ?: compatible)?.copy(
+                            parentId = parentId, name = name, asmrWorkId = workId, contentSource = TrackSource.DLSITE.name,
+                        ) ?: FolderEntity(
+                            parentId = parentId, name = name, position = db.folders().maxPosition(parentId) + 1,
+                            addedAt = now, asmrWorkId = workId, contentSource = TrackSource.DLSITE.name,
+                        )
+                        val id = if (folder.id > 0) {
+                            db.folders().update(folder)
+                            folder.id
+                        } else db.folders().insert(folder)
+                        usedFolderIds += id
+                        directoryIds[item.path] = id
+                        entries += item.entry(code, folderId = id)
                         continue
                     }
-                    val id = if (track.id > 0) {
-                        db.tracks().update(track)
-                        linked++
-                        track.id
-                    } else db.tracks().insert(track)
-                    usedTrackIds += id
-                    entries += item.entry(code, trackId = id, playFileKey = playKey
-                        ?: rawFileKey(track.fileHash) ?: previous?.playFileKey)
-                } else {
-                    val previousFile = previous?.fileId?.let { db.files().get(it) }
-                        ?.takeIf { libraryFileSource(it.fileHash) == TrackSource.DLSITE && it.id !in usedFileIds }
-                    val byPath = matchedPaths[item.path]?.let { filesByPath[it]?.singleOrNull() }
-                        ?.takeIf { it.id !in usedFileIds }
-                    val old = previousFile ?: byPath
-                    val fileKind = if (item.kind == DlsiteOriginalKind.TEXT) FileKind.TEXT else previewKind(name)
-                    val file = old?.copy(folderId = parentId, name = name, kind = fileKind,
-                        localUri = item.file.absolutePath) ?: LibraryFileEntity(
-                        folderId = parentId, name = name, kind = fileKind,
-                        remoteUrl = remote?.preview?.url.orEmpty(), addedAt = now, asmrWorkId = workId,
-                        fileHash = scopedFileHash(TrackSource.DLSITE, "original:${item.path}"),
-                        localUri = item.file.absolutePath,
-                    )
-                    val id = if (file.id > 0) {
-                        db.files().update(file)
-                        file.id
-                    } else db.files().insert(file)
-                    usedFileIds += id
-                    entries += item.entry(code, fileId = id)
+                    val remote = playPaths[item.path]?.let { playByPath[it] }?.node
+                    if (item.kind == DlsiteOriginalKind.AUDIO) {
+                        val previousTrack = previous?.trackId?.let { db.tracks().getById(it) }
+                            ?.takeIf { it.source == TrackSource.DLSITE && it.id !in usedTrackIds }
+                        val playKey = remote?.audio?.fileKey?.takeIf { it.isNotBlank() }
+                        val byKey = playKey?.let { tracksByPlay[it]?.singleOrNull() }?.takeIf { it.id !in usedTrackIds }
+                        val byPath = matchedPaths[item.path]?.let { tracksByPath[it]?.singleOrNull() }
+                            ?.takeIf { it.id !in usedTrackIds }
+                        val old = previousTrack ?: byKey ?: byPath
+                        val track = old?.copy(
+                            title = name, folderId = parentId, localUri = item.file.absolutePath,
+                            durationMs = durations.getValue(item.path).takeIf { it > 0 } ?: old.durationMs,
+                        ) ?: TrackEntity(
+                            source = TrackSource.DLSITE, title = name, artist = facts.circle.ifBlank { code },
+                            durationMs = durations.getValue(item.path), coverUri = cover, localUri = item.file.absolutePath,
+                            bvid = null, cid = null, page = null, addedAt = now, folderId = parentId,
+                            remoteUrl = remote?.audio?.remoteUrl, asmrWorkId = workId,
+                            fileHash = playKey?.let { scopedFileHash(TrackSource.DLSITE, it) },
+                        )
+                        val owner = db.tracks().findByLocalUri(item.file.absolutePath)
+                        if (owner != null && owner.id != track.id) {
+                            // 文件已被别的曲目占用：保留原关联并跳过本条，不让整个发布回滚。
+                            skipped += item.path
+                            usedTrackIds += owner.id
+                            entries += item.entry(code, trackId = owner.id, playFileKey = playKey
+                                ?: rawFileKey(track.fileHash) ?: previous?.playFileKey)
+                            continue
+                        }
+                        val id = if (track.id > 0) {
+                            db.tracks().update(track)
+                            linked++
+                            track.id
+                        } else db.tracks().insert(track)
+                        usedTrackIds += id
+                        entries += item.entry(code, trackId = id, playFileKey = playKey
+                            ?: rawFileKey(track.fileHash) ?: previous?.playFileKey)
+                    } else {
+                        val previousFile = previous?.fileId?.let { db.files().get(it) }
+                            ?.takeIf { libraryFileSource(it.fileHash) == TrackSource.DLSITE && it.id !in usedFileIds }
+                        val byPath = matchedPaths[item.path]?.let { filesByPath[it]?.singleOrNull() }
+                            ?.takeIf { it.id !in usedFileIds }
+                        val old = previousFile ?: byPath
+                        val fileKind = if (item.kind == DlsiteOriginalKind.TEXT) FileKind.TEXT else previewKind(name)
+                        val file = old?.copy(folderId = parentId, name = name, kind = fileKind,
+                            localUri = item.file.absolutePath) ?: LibraryFileEntity(
+                            folderId = parentId, name = name, kind = fileKind,
+                            remoteUrl = remote?.preview?.url.orEmpty(), addedAt = now, asmrWorkId = workId,
+                            fileHash = scopedFileHash(TrackSource.DLSITE, "original:${item.path}"),
+                            localUri = item.file.absolutePath,
+                        )
+                        val id = if (file.id > 0) {
+                            db.files().update(file)
+                            file.id
+                        } else db.files().insert(file)
+                        usedFileIds += id
+                        entries += item.entry(code, fileId = id)
+                    }
                 }
-            }
-            db.dlsiteOriginals().deleteEntries(code)
-            db.dlsiteOriginals().upsertEntries(entries)
-            db.dlsiteOriginals().upsertWork(DlsiteOriginalWorkEntity(code, root.id, rootDirectory.absolutePath, generation))
-            beforeCommit()
-            onPublish()
-            DlsiteOriginalImportResult(code, root.id, usedTrackIds.size, linked, skipped)
+                db.dlsiteOriginals().deleteEntries(code)
+                db.dlsiteOriginals().upsertEntries(entries)
+                db.dlsiteOriginals().upsertWork(DlsiteOriginalWorkEntity(code, root.id, rootDirectory.absolutePath, generation))
+                beforeCommit()
+                onPublish()
+                DlsiteOriginalImportResult(code, root.id, usedTrackIds.size, linked, skipped)
+            }.also { onCommitted() }
         }
     }
 

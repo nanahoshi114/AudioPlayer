@@ -2,6 +2,10 @@ package com.nanahoshi.audioplayer.data
 
 import com.nanahoshi.audioplayer.data.db.DownloadStatus
 import com.nanahoshi.audioplayer.data.db.WhisperJobEntity
+import com.nanahoshi.audioplayer.playback.SubtitleCue
+import com.nanahoshi.audioplayer.playback.SubtitleOrigin
+import com.nanahoshi.audioplayer.playback.encodeGeneratedCues
+import com.nanahoshi.audioplayer.playback.parseGeneratedSubtitles
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -25,6 +29,9 @@ class WhisperModelTest {
         assertNull(knownWhisperModel("whisper-1"))
         assertNull(knownWhisperModel("jobs"))
         assertTrue(isOnDeviceWhisperModel(SENSE_VOICE_MODEL))
+        assertTrue(isOnDeviceWhisperModel(PARAKEET_MODEL))
+        assertEquals(PARAKEET_MODEL, knownWhisperModel(PARAKEET_MODEL))
+        assertNull(effectiveWhisperBase(PARAKEET_MODEL, "http://192.168.1.20:8000"))
         assertFalse(isOnDeviceWhisperModel(WHISPER_MODEL_QWEN))
         assertTrue(isCloudWhisperModel(WHISPER_MODEL_QWEN))
         assertFalse(isCloudWhisperModel(WHISPER_MODEL_QWEN3))
@@ -41,7 +48,9 @@ class WhisperModelTest {
     }
 
     @Test
-    fun onlyActiveSenseVoiceJobsBlockModelDeletion() {
+    fun onlyActiveJobsForTheSelectedModelBlockDeletion() {
+        fun hasActiveSenseVoiceJob(jobs: List<WhisperJobEntity>) =
+            hasActiveOfflineWhisperJob(jobs, OfflineWhisperModel.SenseVoice)
         fun job(status: DownloadStatus, model: String?) = WhisperJobEntity(
             title = "t", fingerprint = "f", trackId = null, localPath = null, remoteJobId = null,
             status = status, progress = 0f, error = null, awaitRemoteUrl = null, model = model)
@@ -55,8 +64,41 @@ class WhisperModelTest {
         assertFalse(hasActiveSenseVoiceJob(listOf(job(DownloadStatus.RUNNING, WHISPER_MODEL_QWEN))))
         assertFalse(hasActiveSenseVoiceJob(listOf(job(DownloadStatus.RUNNING, WHISPER_MODEL_QWEN3))))
         assertFalse(hasActiveSenseVoiceJob(listOf(job(DownloadStatus.RUNNING, "whisper-1"))))
+        assertFalse(hasActiveSenseVoiceJob(listOf(job(DownloadStatus.RUNNING, PARAKEET_MODEL))))
+        assertTrue(hasActiveOfflineWhisperJob(listOf(job(DownloadStatus.QUEUED, PARAKEET_MODEL)), OfflineWhisperModel.Parakeet))
         assertTrue(hasActiveSenseVoiceJob(listOf(
             job(DownloadStatus.DONE, SENSE_VOICE_MODEL), job(DownloadStatus.QUEUED, SENSE_VOICE_MODEL))))
+    }
+
+    @Test
+    fun generatedSubtitleOriginTakesPrecedenceOverHistoricalJobs() {
+        val history = WhisperJobEntity(
+            title = "t", fingerprint = "f", trackId = null, localPath = null, remoteJobId = null,
+            status = DownloadStatus.DONE, progress = 1f, error = null, awaitRemoteUrl = null,
+            model = SENSE_VOICE_MODEL,
+        )
+        val cues = listOf(SubtitleCue(0, 800, "こんにちは"))
+        val parakeet = checkNotNull(parseGeneratedSubtitles(
+            encodeGeneratedCues(cues, SubtitleOrigin(PARAKEET_MODEL, null)),
+        ))
+        assertFalse(generatedSubtitlesMatch(parakeet, SENSE_VOICE_MODEL, null, history))
+        assertTrue(generatedSubtitlesMatch(parakeet, PARAKEET_MODEL, null, history))
+
+        val translated = cues.map { it.copy(translation = "你好") }
+        val updated = checkNotNull(parseGeneratedSubtitles(encodeGeneratedCues(translated, parakeet.origin)))
+        assertEquals(translated, updated.cues)
+        assertEquals(parakeet.origin, updated.origin)
+
+        val legacy = checkNotNull(parseGeneratedSubtitles(encodeGeneratedCues(cues)))
+        assertTrue(generatedSubtitlesMatch(legacy, SENSE_VOICE_MODEL, null, history))
+        assertFalse(generatedSubtitlesMatch(legacy, PARAKEET_MODEL, null, history))
+        assertFalse(generatedSubtitlesMatch(legacy, SENSE_VOICE_MODEL, null, history.copy(model = null)))
+
+        val remote = checkNotNull(parseGeneratedSubtitles(
+            encodeGeneratedCues(cues, SubtitleOrigin(WHISPER_MODEL_QWEN3, "https://example.com")),
+        ))
+        assertTrue(generatedSubtitlesMatch(remote, WHISPER_MODEL_QWEN3, "https://example.com/v1", history))
+        assertFalse(generatedSubtitlesMatch(remote, WHISPER_MODEL_QWEN3, "https://other.example.com", history))
     }
 
     @Test

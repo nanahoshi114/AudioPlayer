@@ -11,7 +11,7 @@ Android 已接入 YouTube 搜索、播放列表、独立音轨在线播放和下
 - [`YouTubeClient.kt`](../app/src/main/java/com/nanahoshi/audioplayer/youtube/YouTubeClient.kt)：`lookup`、`playlist`、`accountStatus`、`videoInfo`、`resolveAudio`、`downloadAudio`。
 - [`YouTubeModels.kt`](../app/src/main/java/com/nanahoshi/audioplayer/youtube/YouTubeModels.kt)：输入识别、返回字段、分页节点解析、音轨选择、地址参数和授权头处理。
 - [`YouTubeSolver.kt`](../app/src/main/java/com/nanahoshi/audioplayer/youtube/YouTubeSolver.kt)：系统 WebView 适配。
-- [`YouTubeScreens.kt`](../app/src/main/java/com/nanahoshi/audioplayer/ui/youtube/YouTubeScreens.kt)：搜索、列表、播放、保存、多选下载和登录卡片。
+- [`YouTubeScreens.kt`](../app/src/main/java/com/nanahoshi/audioplayer/ui/youtube/YouTubeScreens.kt)：搜索、列表、播放、批量入库和登录卡片。
 
 搜索最多 3 页、40 条，列表最多 5 页、200 条；按视频编号去重，返回标题、作者、封面和毫秒时长。搜索读取 `videoRenderer`，列表读取 `playlistVideoRenderer`，下一页读取 `continuationItemRenderer` 内的 token。列表后续页失败时返回已有结果并提示不完整，搜索失败则报错。搜索和列表请求可取消，账号切换会取消旧请求并清空原结果。
 
@@ -42,11 +42,11 @@ Android 已接入 YouTube 搜索、播放列表、独立音轨在线播放和下
 
 ### 入库、队列和本地文件
 
-`TrackSource.YOUTUBE` 标识来源；`tracks.youtubeVideoId` 是可空、唯一索引的视频编号列，数据库从 12 升到 13，只新增这一列和索引，不设置默认值。作品编号、B 站 bvid/cid 不复用于 YouTube 曲目。当前数据库为 14，后续 13→14 仅新增 B 站下载入库元数据列，不改变上述 YouTube 结构。
+`TrackSource.YOUTUBE` 标识来源；`tracks.youtubeVideoId` 是可空、唯一索引的视频编号列，数据库从 12 升到 13，只新增这一列和索引，不设置默认值。作品编号、B 站 bvid/cid 不复用于 YouTube 曲目。后续数据库迁移沿用上述 YouTube 结构。
 
 - 点查找结果只播放这一首，不自动入库。已保存曲目使用 trackId；未入库内容走远端队列，`workno` 携带视频编号，`fileKey=audio`，`remoteUrl` 是稳定观看页地址而非临时媒体地址。
 - 队列与播放列表查询包含视频编号，冷启动恢复时重新取媒体地址；已下载时优先读取本地文件。在线播放使用现有 Media3 服务，支持后台播放和 Range 跳转。
-- 「保存到音频库」只保存在线曲目；「下载」完成后自动入库，已存在的同一编号复用原曲目，不移动原文件夹。按视频编号去重下载任务。
+- 搜索和私人列表提供「加入音频库」。下载从库内发起，完成后关联该视频的现有曲目。重试、开工和发布时校验入库身份。按视频编号去重下载任务。
 - 下载文件为 `filesDir/youtube/{videoId}/audio.m4a`。每次运行先写独立的 `.part`，取消关闭 HTTP 并删除本次暂存，重试不会被旧请求的清理误删。启动时清理上次中断留下的 YouTube `.part`。
 - 每个 HTTP 请求最多读取 1 MiB，校验 `Content-Range` 的起点、终点和总大小，再按顺序拼接。断流、读取超时或 TLS 读取错误最多重试当前段两次，已经完成的段保留；不能把不匹配的段拼进文件。服务器忽略范围时只接受不超过 1 MiB 的小文件，不退回整部大文件读取。
 - 正常写完、大小与声明长度一致（长度未知的小文件除外）、至少 1024 字节且存在 MP4 `ftyp` 文件头后，才改成正式文件并在事务中关联曲目与完成记录。没有额外转码。每段保留 30 秒读取超时和 10 分钟请求上限，整部下载不再共用一个请求的十分钟期限。

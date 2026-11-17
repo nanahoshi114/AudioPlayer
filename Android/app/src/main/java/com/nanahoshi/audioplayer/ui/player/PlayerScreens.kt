@@ -1,10 +1,10 @@
 package com.nanahoshi.audioplayer.ui.player
 
-import com.nanahoshi.audioplayer.youtube.YouTubeVideo
-import com.nanahoshi.audioplayer.youtube.readyYouTubeAudio
 
 import android.Manifest
 import android.app.Activity
+import com.nanahoshi.audioplayer.data.SubtitleTask
+import com.nanahoshi.audioplayer.playback.LoadedSubtitles
 import android.app.Application
 import android.content.Context
 import android.content.ContextWrapper
@@ -81,9 +81,10 @@ import com.nanahoshi.audioplayer.data.effectiveWhisperBase
 import com.nanahoshi.audioplayer.data.isLocalNetworkAddress
 import com.nanahoshi.audioplayer.data.isOnDeviceWhisperModel
 import com.nanahoshi.audioplayer.data.WhisperStart
+import com.nanahoshi.audioplayer.data.SUBTITLE_INTERRUPTED
+import com.nanahoshi.audioplayer.data.SubtitleTaskStopped
 import com.nanahoshi.audioplayer.graph
 import com.nanahoshi.audioplayer.playback.PlayerUiState
-import com.nanahoshi.audioplayer.playback.hasTranslation
 import com.nanahoshi.audioplayer.playback.indexAt
 import com.nanahoshi.audioplayer.playback.line
 import com.nanahoshi.audioplayer.playback.textAt
@@ -97,7 +98,6 @@ import com.nanahoshi.audioplayer.playback.PlayingBiliCollection
 import com.nanahoshi.audioplayer.playback.PlayingBiliVideo
 import com.nanahoshi.audioplayer.playback.biliVideoId
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
@@ -119,26 +119,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     internal val collectionLink = collectionTracker.link
     internal val subtitles = graph.currentSubtitles.state
     internal val subtitleSelection = graph.currentSubtitles.selection
-    var offerBiliCache by mutableStateOf(false)
-        private set
-    var translating by mutableStateOf(false)
-        private set
-    var polishing by mutableStateOf(false)
-        private set
+    internal val translationJobs = graph.translator.jobs
     internal var whisperPrompt by mutableStateOf<WhisperPrompt?>(null)
         private set
     internal var translatePrompt by mutableStateOf(false)
         private set
-    private var generateWithTranslation = false
-
-    init {
-        viewModelScope.launch {
-            client.state.map { it.queueItemId }.distinctUntilChanged().collectLatest { queueItemId ->
-                offerBiliCache = false
-                offerBiliCache = biliNeedsCache(queueItemId)
-            }
-        }
-    }
 
     fun showChinese(queueItemId: Long, chinese: Boolean) =
         graph.currentSubtitles.showChinese(queueItemId, chinese)
@@ -163,160 +148,68 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         graph.messages.value = "需要允许访问本地网络，才能连接你填写的听写服务"
     }
 
-    fun requestTranslation() {
-        val queueItemId = client.state.value.queueItemId
-        if (subtitles.value.forItem(queueItemId)?.canTranslate != true) return
+    fun requestTranslation() = requestSubtitleOperation(SubtitleTask.TRANSLATE)
+
+    fun requestPolish() = requestSubtitleOperation(SubtitleTask.POLISH)
+
+    private fun requestSubtitleOperation(task: SubtitleTask) {
+        val itemId = client.state.value.queueItemId
+        val loaded = subtitles.value.forItem(itemId) ?: return
+        if (task == SubtitleTask.TRANSLATE && !loaded.canTranslate) return
         viewModelScope.launch {
-            if (!graph.credentials.hasTranslate()) {
-                translatePrompt = true
-                return@launch
-            }
-            if (translating) return@launch
-            val row = currentRow()?.takeIf { it.queueItemId == queueItemId } ?: return@launch
-            translating = true
-            try {
-                val translated = graph.translator.translateRow(row)
-                if (translated) {
-                    showChinese(row.queueItemId, true)
-                } else {
-                    graph.messages.value = "翻译失败，请重试"
-                }
-            } catch (cancelled: CancellationException) {
-                if (!isActive) throw cancelled
-            } finally {
-                translating = false
-            }
+            val row = graph.library.queueSnapshot().firstOrNull { it.queueItemId == itemId } ?: return@launch
+            submitSubtitleOperation(task, row, loaded)
         }
     }
 
-    fun cancelTranslation() {
-        viewModelScope.launch {
-            val row = currentRow() ?: return@launch
-            graph.translator.cancelRow(row)
-        }
-    }
+    fun cancelSubtitleOperation(id: Long) = graph.translator.cancel(id)
 
-    fun requestPolish() {
-        viewModelScope.launch {
-            if (!graph.credentials.hasTranslate()) {
-                translatePrompt = true
-                return@launch
-            }
-            if (polishing) return@launch
-            val row = currentRow() ?: return@launch
-            polishing = true
-            try {
-                val polished = graph.translator.polishRow(row)
-                if (polished) {
-                    showChinese(row.queueItemId, true)
-                } else {
-                    graph.messages.value = "润色失败，已保留原译文"
-                }
-            } catch (cancelled: CancellationException) {
-                if (!isActive) throw cancelled
-            } finally {
-                polishing = false
-            }
+    private suspend fun submitSubtitleOperation(task: SubtitleTask, row: QueuedTrack, loaded: LoadedSubtitles?) {
+        if (!graph.credentials.hasTranslate()) {
+            translatePrompt = true
+            return
         }
-    }
-
-    fun cancelPolish() {
-        viewModelScope.launch {
-            val row = currentRow() ?: return@launch
-            graph.translator.cancelPolish(row)
+        try {
+            if (graph.translator.submit(task, row, loaded)) showChinese(row.queueItemId, true)
+        } catch (stopped: SubtitleTaskStopped) {
+            graph.messages.value = stopped.message ?: SUBTITLE_INTERRUPTED
+        } catch (cancelled: CancellationException) {
+            if (!coroutineContext.isActive) throw cancelled
+        } catch (_: Exception) {
+            graph.messages.value = "无法创建字幕任务，请重试"
         }
-    }
-
-    fun cacheCurrent() {
-        viewModelScope.launch {
-            val row = currentRow() ?: return@launch
-            if (row.source == TrackSource.YOUTUBE) {
-                val id = row.youtubeVideoId ?: row.workno ?: return@launch
-                try {
-                    val count = graph.downloads.enqueueYouTube(listOf(YouTubeVideo(
-                        id, row.title, row.artist.orEmpty(), row.coverUri ?: "https://i.ytimg.com/vi/$id/hqdefault.jpg", row.durationMs,
-                    )))
-                    offerBiliCache = false
-                    graph.messages.value = if (count == 0) "已在本地或正在下载" else "已加入下载"
-                } catch (cancelled: CancellationException) { throw cancelled }
-                catch (_: Exception) { graph.messages.value = "YouTube 下载失败，请重试" }
-                return@launch
-            }
-            // 没入库的队列项把 bvid/cid 放在 workno/fileKey。
-            val bvid = row.bvid ?: row.workno ?: return@launch
-            val cid = row.cid ?: row.fileKey?.toLongOrNull() ?: return@launch
-            val added = if (row.trackId != null && row.trackId > 0L) {
-                val track = graph.db.tracks().getById(row.trackId)
-                if (track != null) graph.downloads.enqueue(listOf(track)) else 0
-            } else {
-                graph.downloads.enqueueBili(
-                    listOf(
-                        com.nanahoshi.audioplayer.bilibili.BiliPart(
-                            bvid = bvid,
-                            cid = cid,
-                            page = row.page ?: 1,
-                            title = row.title,
-                            artist = row.artist.orEmpty(),
-                            durationMs = row.durationMs,
-                            coverUrl = row.coverUri.orEmpty(),
-                        ),
-                    ),
-                )
-            }
-            offerBiliCache = false
-            graph.messages.value = if (added == 0) "已在本地或正在下载" else "已加入下载"
-        }
-    }
-
-    private suspend fun biliNeedsCache(queueItemId: Long): Boolean {
-        val row = graph.library.queueSnapshot().find { it.queueItemId == queueItemId } ?: return false
-        if (row.source == TrackSource.YOUTUBE) {
-            return readyYouTubeAudio(getApplication<Application>().filesDir, row.youtubeVideoId ?: row.workno) == null
-        }
-        if (row.source != com.nanahoshi.audioplayer.data.TrackSource.BILIBILI) return false
-        // 没入库的队列项没有 trackId，本地路径会放在 remoteUrl，bvid/cid 会放在 workno/fileKey。
-        val path = row.localUri ?: row.remoteUrl
-        if (!path.isNullOrBlank() && path.startsWith("/") && java.io.File(path).isFile) return false
-        val bvid = row.bvid ?: row.workno
-        val cid = row.cid ?: row.fileKey?.toLongOrNull()
-        return com.nanahoshi.audioplayer.data.readyBiliAudio(
-            getApplication<Application>().filesDir,
-            bvid,
-            cid,
-        ) == null
     }
 
     fun requestGenerate(translate: Boolean) {
         viewModelScope.launch {
             val model = graph.credentials.resolvedWhisperModel()
-            // SenseVoiceSmall 在本机运行，hasWhisper 一直为 false，按模型是否就绪判断。
             if (isOnDeviceWhisperModel(model)) {
-                if (!graph.senseVoice.isReady()) {
-                    whisperPrompt = WhisperPrompt.NeedModelDownload
+                graph.whisper.missingOfflineModel(model)?.let {
+                    whisperPrompt = WhisperPrompt.NeedModelDownload(it)
                     return@launch
                 }
-            } else if (!graph.credentials.hasWhisper()) {
+            } else if (!graph.credentials.hasWhisper(model)) {
                 whisperPrompt = WhisperPrompt.NeedSettings
                 return@launch
             }
-            generateWithTranslation = translate
             val row = currentRow() ?: return@launch
-            val file = graph.whisper.existingFile(row)
-            if (file != null) {
-                report(graph.whisper.start(row, file, translate), row, translate)
+            val local = graph.whisper.startIfLocal(row, translate, model)
+            if (local != WhisperStart.Unavailable) {
+                report(local, row, translate)
                 return@launch
             }
-            val canDownload = row.source == TrackSource.ASMR || row.source == TrackSource.DLSITE || row.source == TrackSource.YOUTUBE
-            val hasTarget = (row.trackId != null && row.trackId > 0L) || !row.remoteUrl.isNullOrBlank()
-            if (canDownload && hasTarget) {
-                if (row.source == TrackSource.DLSITE && ((row.trackId ?: 0L) > 0L || !row.fileKey.isNullOrBlank())) {
-                    downloadAndGenerate(row, translate)
-                    return@launch
-                }
-                whisperPrompt = WhisperPrompt.NeedDownload
+            if (row.source == TrackSource.LOCAL) {
+                graph.messages.value = "这首歌没有可用的音频文件，无法生成字幕"
                 return@launch
             }
-            graph.messages.value = "这首歌没有可用的音频文件，无法生成字幕"
+            val saved = graph.downloads.libraryTrack(row)
+            if (saved == null) {
+                graph.messages.value = "请先加入音频库，再生成字幕"
+                return@launch
+            }
+            val target = row.copy(trackId = saved.id)
+            if (saved.source == TrackSource.DLSITE) downloadAndGenerate(target, translate, model)
+            else whisperPrompt = WhisperPrompt.NeedDownload(target, translate, model)
         }
     }
 
@@ -328,25 +221,24 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun confirmWhisperDownload() {
+        val prompt = whisperPrompt as? WhisperPrompt.NeedDownload ?: return
         whisperPrompt = null
-        val translate = generateWithTranslation
         viewModelScope.launch {
-            val row = currentRow() ?: return@launch
-            downloadAndGenerate(row, translate)
+            downloadAndGenerate(prompt.row, prompt.translate, prompt.model)
         }
     }
 
-    private suspend fun downloadAndGenerate(row: QueuedTrack, translate: Boolean) {
+    private suspend fun downloadAndGenerate(row: QueuedTrack, translate: Boolean, model: String) {
         var mode = DlsiteDownloadMode.PARTIAL
         val isPurchasedDlsite = row.source == TrackSource.DLSITE && ((row.trackId ?: 0L) > 0L || !row.fileKey.isNullOrBlank())
-        if (isPurchasedDlsite && graph.whisper.existingFile(row) == null) {
+        if (isPurchasedDlsite) {
             val track = row.trackId?.takeIf { it > 0L }?.let { graph.db.tracks().getById(it) }
             mode = graph.dlsiteDownloadRequests.choose(
                 listOf(row.title),
                 allowPartial = if (track != null) !track.fileHash.isNullOrBlank() else !row.fileKey.isNullOrBlank(),
             ) ?: return
         }
-        report(graph.whisper.startAfterDownload(row, translate, mode), row, translate)
+        report(graph.whisper.startAfterDownload(row, translate, model, mode), row, translate)
     }
 
     private suspend fun currentRow() =
@@ -362,35 +254,21 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 if (translate) translateExisting(row)
             }
             WhisperStart.Unavailable -> graph.messages.value = "这首歌没有可用的音频文件，无法生成字幕"
+            is WhisperStart.BackgroundUnavailable -> graph.messages.value = result.message
+            is WhisperStart.NeedModelDownload -> whisperPrompt = WhisperPrompt.NeedModelDownload(result.model)
         }
     }
 
     private suspend fun translateExisting(row: QueuedTrack) {
-        val cues = graph.subtitles.load(row).cues
-        if (cues.isEmpty() || cues.hasTranslation()) return
-        if (!graph.credentials.hasTranslate()) {
-            translatePrompt = true
-            return
-        }
-        if (translating) return
-        translating = true
-        try {
-            val translated = graph.translator.translateRow(row)
-            if (translated) {
-                showChinese(row.queueItemId, true)
-            } else {
-                graph.messages.value = "翻译失败，请重试"
-            }
-        } catch (cancelled: CancellationException) {
-            if (!coroutineContext.isActive) throw cancelled
-        } finally {
-            translating = false
-        }
+        val loaded = subtitles.value.forItem(row.queueItemId)
+        if (loaded?.canTranslate == false && loaded.cues.isNotEmpty()) return
+        submitSubtitleOperation(SubtitleTask.TRANSLATE, row, loaded?.takeIf { it.canTranslate })
     }
+
 }
 
-internal enum class WhisperPrompt {
-    NeedSettings,
-    NeedModelDownload,
-    NeedDownload,
+internal sealed interface WhisperPrompt {
+    data object NeedSettings : WhisperPrompt
+    data class NeedModelDownload(val model: String) : WhisperPrompt
+    data class NeedDownload(val row: QueuedTrack, val translate: Boolean, val model: String) : WhisperPrompt
 }

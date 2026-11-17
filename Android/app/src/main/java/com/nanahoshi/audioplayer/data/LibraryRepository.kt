@@ -10,7 +10,6 @@ import com.nanahoshi.audioplayer.asmr.AsmrNode
 import com.nanahoshi.audioplayer.asmr.AsmrWork
 import com.nanahoshi.audioplayer.asmr.WorkFacts
 import com.nanahoshi.audioplayer.bilibili.BiliPart
-import com.nanahoshi.audioplayer.bilibili.biliImportPart
 import com.nanahoshi.audioplayer.dlsite.DlsiteClient
 import com.nanahoshi.audioplayer.dlsite.PlayEntry
 import com.nanahoshi.audioplayer.dlsite.RemotePlayable
@@ -84,38 +83,21 @@ class LibraryRepository(
     /** 作品导入串行化：前置检查必须在拿锁后重新生效，否则两个入口会同时填充同一作品。 */
     private val workImportLock = kotlinx.coroutines.sync.Mutex()
 
-    suspend fun saveYouTube(video: YouTubeVideo, localPath: String? = null, downloadId: Long? = null): TrackEntity =
-        withContext(Dispatchers.IO) {
-            youtubeLock.lock()
-            try {
-                db.withTransaction {
-                    if (downloadId != null && db.downloads().get(downloadId)?.status != com.nanahoshi.audioplayer.data.db.DownloadStatus.RUNNING) {
-                        throw CancellationException("已中止")
-                    }
-                    val old = db.tracks().findYouTube(video.id)
-                    val saved = if (old != null) {
-                        if (localPath != null) db.tracks().updateLocalUri(old.id, localPath)
-                        old.copy(localUri = localPath ?: old.localUri)
-                    } else {
-                        val stored = localPath ?: readyYouTubeAudio(context.filesDir, video.id)?.absolutePath
-                        val track = TrackEntity(
-                            source = TrackSource.YOUTUBE, title = video.title, artist = video.author,
-                            durationMs = video.durationMs, coverUri = video.coverUrl, localUri = stored,
-                            bvid = null, cid = null, page = null, addedAt = System.currentTimeMillis(),
-                            remoteUrl = video.watchUrl, youtubeVideoId = video.id,
-                        )
-                        track.copy(id = db.tracks().insert(track))
-                    }
-                    if (downloadId != null && localPath != null) {
-                        db.downloads().attachTrack(downloadId, saved.id)
-                        val size = java.io.File(localPath).length()
-                        db.downloads().setLocalPath(downloadId, localPath)
-                        db.downloads().finish(downloadId, size, size)
-                    }
-                    saved
-                }
-            } finally { youtubeLock.unlock() }
+    suspend fun saveYouTube(video: YouTubeVideo): TrackEntity = withContext(Dispatchers.IO) {
+        youtubeLock.withLock {
+            db.withTransaction {
+                db.tracks().findYouTube(video.id)?.let { return@withTransaction it }
+                val track = TrackEntity(
+                    source = TrackSource.YOUTUBE, title = video.title, artist = video.author,
+                    durationMs = video.durationMs, coverUri = video.coverUrl,
+                    localUri = readyYouTubeAudio(context.filesDir, video.id)?.absolutePath,
+                    bvid = null, cid = null, page = null, addedAt = System.currentTimeMillis(),
+                    remoteUrl = video.watchUrl, youtubeVideoId = video.id,
+                )
+                track.copy(id = db.tracks().insert(track))
+            }
         }
+    }
 
     fun observeTracks(): Flow<List<TrackEntity>> = db.tracks().observeAll()
 
@@ -427,10 +409,12 @@ class LibraryRepository(
             val parents = trackIds.mapNotNull { db.tracks().getById(it) }.map { it.folderId }
             if (!policy.allows(parents, folderIds.toSet())) throw LibraryRemovalRejected()
             val removedFolders = descendantFolderIds(db.folders().all(), folderIds.toSet())
-            val videoIds = db.folders().all().filter { it.id in removedFolders }.mapNotNull { it.biliBvid } +
-                db.tracks().inFolders(removedFolders.toList()).mapNotNull { it.bvid } +
-                trackIds.mapNotNull { db.tracks().getById(it)?.bvid }
-            videoIds.distinct().forEach { db.biliImports().delete(it); db.downloads().clearBiliImportMetadata(it) }
+            val removedTracks = trackIdsIn(removedFolders) + trackIds
+            for (job in db.downloads().active()) {
+                if (job.trackId in removedTracks || job.workFolderId in removedFolders) {
+                    db.downloads().stopActive(job.id, DOWNLOAD_LIBRARY_REQUIRED)
+                }
+            }
             folderIds.forEach { db.folders().delete(it) }
             trackIds.forEach { db.tracks().delete(it) }
             compactQueue()
@@ -699,11 +683,14 @@ class LibraryRepository(
         rootId
     }
 
-    suspend fun asmrTracksInTree(folderId: Long): List<TrackEntity> = withContext(Dispatchers.IO) {
+    suspend fun asmrTracksInTree(folderId: Long): List<TrackEntity> =
+        tracksInTree(folderId).filter { it.source == TrackSource.ASMR || it.source == TrackSource.DLSITE }
+
+    internal suspend fun tracksInTree(folderId: Long): List<TrackEntity> = withContext(Dispatchers.IO) {
         val folders = db.folders().all()
+        if (folders.none { it.id == folderId }) return@withContext emptyList()
         val ids = descendantFolderIds(folders, setOf(folderId))
-        if (ids.isEmpty()) return@withContext emptyList()
-        db.tracks().inFolders(ids.toList()).filter { it.source == TrackSource.ASMR || it.source == TrackSource.DLSITE }
+        ids.toList().chunked(500).flatMap { db.tracks().inFolders(it) }
     }
 
     suspend fun libraryFile(id: Long): LibraryFileEntity? = withContext(Dispatchers.IO) {
@@ -726,22 +713,29 @@ class LibraryRepository(
         db.withTransaction { parts.map { upsertBili(it, folderId) } }
     }
 
-    /** 入库意图必须读最新任务，搜索页可能在旧缓存任务运行中补上它。 */
+    internal suspend fun completeYouTubeDownload(jobId: Long, videoId: String, path: String) = db.withTransaction {
+        val job = db.downloads().get(jobId) ?: error("下载任务已经移除")
+        if (job.status != com.nanahoshi.audioplayer.data.db.DownloadStatus.RUNNING) throw CancellationException()
+        val track = db.tracks().findYouTube(videoId)?.takeIf { it.id == job.trackId }
+            ?: error(DOWNLOAD_LIBRARY_REQUIRED)
+        val size = java.io.File(path).length()
+        check(size > 0) { "音轨文件不存在，请重试" }
+        db.tracks().updateLocalUri(track.id, path)
+        db.downloads().setLocalPath(jobId, path)
+        db.downloads().finish(jobId, size, size)
+    }
+
     internal suspend fun completeBiliDownload(jobId: Long, bvid: String, cid: Long, path: String) = db.withTransaction {
         val job = db.downloads().get(jobId) ?: error("下载任务已经移除")
         check(job.status == com.nanahoshi.audioplayer.data.db.DownloadStatus.RUNNING) { "下载任务已经结束，请重试" }
+        val track = db.tracks().findByBvid(bvid, cid)?.takeIf { it.id == job.trackId }
+            ?: error(DOWNLOAD_LIBRARY_REQUIRED)
         val size = java.io.File(path).length()
         check(size > 0) { "音轨文件不存在，请重试" }
-        val metadata = job.biliImportPart?.let { com.nanahoshi.audioplayer.bilibili.decodeBiliDownloadImport(it, bvid, cid) }
-        val track = if (metadata != null && metadata.batchId == null) upsertBili(metadata.part, null)
-            else db.tracks().findByBvid(bvid, cid)
-        if (track != null) {
-            db.tracks().updateLocalUri(track.id, path)
-            db.downloads().attachTrack(jobId, track.id)
-        }
+        db.tracks().updateLocalUri(track.id, path)
         db.downloads().setLocalPath(jobId, path)
+        db.downloads().setPendingBiliSubtitle(jobId, true)
         db.downloads().finish(jobId, size, size)
-        if (metadata?.batchId != null && db.biliImports().get(bvid)?.batchId == metadata.batchId) biliLibrary.publish(bvid)
     }
 
     suspend fun deleteTrack(id: Long) = withContext(Dispatchers.IO) {
