@@ -1,9 +1,14 @@
 package com.nanahoshi.audioplayer.ui.bilibili
 
+import androidx.annotation.StringRes
+import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.bilibili.BiliPart
 import com.nanahoshi.audioplayer.bilibili.BiliVideoHit
 
-internal enum class BiliAction(val label: String) { PLAY("播放"), SAVE("加入音频库") }
+internal enum class BiliAction(@param:StringRes val labelRes: Int) {
+    PLAY(R.string.bilibili_play),
+    SAVE(R.string.bilibili_add_to_library),
+}
 internal data class BiliPartGroup(val video: BiliVideoHit, val parts: List<BiliPart>)
 internal data class BiliPartChoice(
     val action: BiliAction, val groups: List<BiliPartGroup>, val failed: List<String>, val selected: Set<Pair<String, Long>>,

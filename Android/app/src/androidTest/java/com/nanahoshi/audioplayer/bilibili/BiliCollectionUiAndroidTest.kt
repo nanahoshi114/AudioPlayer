@@ -12,6 +12,8 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.ui.bilibili.BiliCollectionRouteError
 import com.nanahoshi.audioplayer.ui.bilibili.CollectionAction
 import com.nanahoshi.audioplayer.ui.bilibili.CollectionFailureDialog
@@ -61,9 +63,16 @@ class BiliCollectionUiAndroidTest {
             }
         }
         for (option in listOf(CollectionSort.REVERSE, CollectionSort.RANDOM, CollectionSort.RANDOM, CollectionSort.FORWARD)) {
-            compose.onNodeWithText("排序：${sort.value.label}").assertIsDisplayed().performClick()
-            compose.onNodeWithText(option.label).assertIsDisplayed().performClick()
-            compose.onNodeWithText("排序：${option.label}").assertIsDisplayed()
+            val context = InstrumentationRegistry.getInstrumentation().targetContext
+            compose.onNodeWithText(context.getString(
+                R.string.bilibili_sort_label,
+                context.getString(sort.value.labelRes),
+            )).assertIsDisplayed().performClick()
+            compose.onNodeWithText(context.getString(option.labelRes)).assertIsDisplayed().performClick()
+            compose.onNodeWithText(context.getString(
+                R.string.bilibili_sort_label,
+                context.getString(option.labelRes),
+            )).assertIsDisplayed()
         }
         compose.runOnIdle { assertEquals(4, changes) }
     }
@@ -82,12 +91,12 @@ class BiliCollectionUiAndroidTest {
                 }
             }
         }
-        compose.onNodeWithText("B站系列 · 12 个视频").assertIsDisplayed()
+        compose.onNodeWithText("B 站系列 · 12 个视频").assertIsDisplayed()
         compose.onNodeWithText("收藏的系列").performClick()
         compose.onNodeWithText("改名").assertDoesNotExist()
         compose.onNodeWithContentDescription("拖动排序").assertDoesNotExist()
         compose.onNodeWithText("复制为自建播放列表").performClick()
-        compose.onNodeWithText("取消收藏").performClick()
+        compose.onNodeWithText("移出播放列表").performClick()
         compose.runOnIdle { assertEquals(1, opened); assertEquals(CollectionAction.COPY, action); assertEquals(1, unbookmarked) }
     }
 

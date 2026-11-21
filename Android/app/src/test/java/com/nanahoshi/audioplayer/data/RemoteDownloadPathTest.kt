@@ -6,6 +6,15 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class RemoteDownloadPathTest {
+    @Test fun sameReadableTitleCannotOverwriteAnotherTrackOrSource() {
+        val first = trackDownloadRelativePath(TrackSource.ASMR, 1, "01.mp3")
+        val second = trackDownloadRelativePath(TrackSource.ASMR, 2, "01.mp3")
+        val dlsite = trackDownloadRelativePath(TrackSource.DLSITE, 1, "01.mp3")
+        assertNotEquals(first, second)
+        assertNotEquals(first, dlsite)
+        assertTrue(first.endsWith("/01.mp3"))
+        assertEquals(first, trackDownloadRelativePath(TrackSource.ASMR, 1, "01.mp3"))
+    }
     @Test fun sameTitleDifferentKeysLandInDifferentDirectories() {
         val a = remoteRelativePath("01.mp3", "hash-a", occupied = true)
         val b = remoteRelativePath("01.mp3", "hash-b", occupied = true)

@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.ui.settings
 
+import com.nanahoshi.audioplayer.R
+import androidx.compose.ui.res.stringResource
 import android.app.Application
 import android.content.ActivityNotFoundException
 import android.content.Intent
@@ -9,6 +11,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -32,11 +36,16 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
@@ -47,6 +56,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nanahoshi.audioplayer.data.formatCacheBytes
 import com.nanahoshi.audioplayer.data.whisperModelLabel
+import com.nanahoshi.audioplayer.data.DOWNLOAD_CONCURRENCY_OPTIONS
 import com.nanahoshi.audioplayer.graph
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -64,6 +74,8 @@ fun SettingsScreen(
     val limit by viewModel.limitBytes.collectAsStateWithLifecycle()
     val appearance by viewModel.appearance.collectAsStateWithLifecycle()
     val desktop by viewModel.subtitleDisplay.desktop.collectAsStateWithLifecycle()
+    val downloadConcurrency by viewModel.downloadPreferences.maxConcurrentDownloads.collectAsStateWithLifecycle()
+    var choosingDownloadConcurrency by rememberSaveable { mutableStateOf(false) }
     val context = LocalContext.current
     val overlayPermission = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         viewModel.subtitleDisplay.enableDesktop(Settings.canDrawOverlays(context))
@@ -71,60 +83,67 @@ fun SettingsScreen(
     LaunchedEffect(limit) { viewModel.refreshUsage() }
     val used = viewModel.usedBytes
     val cacheLine = if (used == null) {
-        "正在统计…"
+        stringResource(R.string.settings_cache_stats_loading)
     } else {
-        "已用 ${formatCacheBytes(used)} / 上限 ${formatCacheBytes(limit)}"
+        stringResource(R.string.settings_cache_usage, formatCacheBytes(used), formatCacheBytes(limit))
     }
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         item(key = "appearance-title") {
-            Text("外观", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp, bottom = 8.dp))
+            Text(stringResource(R.string.settings_section_appearance), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp, bottom = 8.dp))
         }
         item(key = "appearance") {
             SettingsGroup {
                 SettingsRow(
                     icon = { Icon(Icons.Default.Palette, contentDescription = null) },
-                    title = "主题与颜色",
+                    title = stringResource(R.string.settings_theme_color_title),
                     summary = appearanceSummary(appearance),
                     onClick = onOpenAppearance,
                 )
             }
         }
         item(key = "storage-title") {
-            Text("存储", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 20.dp, bottom = 8.dp))
+            Text(stringResource(R.string.settings_section_storage), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 20.dp, bottom = 8.dp))
         }
         item(key = "storage") {
             SettingsGroup {
                 SettingsRow(
                     icon = { Icon(Icons.Default.DownloadDone, contentDescription = null) },
-                    title = "下载管理",
-                    summary = "手机中已下载或生成的文件，可搜索、分享、删除",
+                    title = stringResource(R.string.settings_download_management_title),
+                    summary = stringResource(R.string.settings_download_management_summary),
                     onClick = onOpenStored,
                 )
                 HorizontalDivider()
                 SettingsRow(
+                    icon = { Icon(Icons.Default.DownloadDone, contentDescription = null) },
+                    title = stringResource(R.string.settings_concurrent_downloads),
+                    summary = stringResource(R.string.settings_concurrent_downloads_summary, downloadConcurrency),
+                    onClick = { choosingDownloadConcurrency = true },
+                )
+                HorizontalDivider()
+                SettingsRow(
                     icon = { Icon(Icons.Default.CleaningServices, contentDescription = null) },
-                    title = "清理缓存",
+                    title = stringResource(R.string.settings_clear_cache),
                     summary = cacheLine,
                     onClick = onOpenCache,
                 )
             }
         }
         item(key = "subtitle-title") {
-            Text("字幕", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 20.dp, bottom = 8.dp))
+            Text(stringResource(R.string.settings_section_subtitles), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 20.dp, bottom = 8.dp))
         }
         item(key = "models") {
             SettingsGroup {
                 SettingsRow(
                     icon = { Icon(Icons.Default.Translate, contentDescription = null) },
-                    title = "听写和翻译",
+                    title = stringResource(R.string.settings_whisper_translate_title),
                     summary = "${viewModel.whisperLabel()}，${viewModel.translateLabel()}",
                     onClick = onOpenModels,
                 )
                 HorizontalDivider()
                 SubtitleSwitch(
                     icon = { Icon(Icons.Default.Subtitles, contentDescription = null) },
-                    title = "桌面字幕",
-                    summary = "离开播放器后，在其他应用上层显示字幕",
+                    title = stringResource(R.string.settings_desktop_subtitles_title),
+                    summary = stringResource(R.string.settings_desktop_subtitles_summary),
                     checked = desktop.enabled,
                 ) { enabled ->
                     if (!enabled || Settings.canDrawOverlays(context)) {
@@ -145,8 +164,8 @@ fun SettingsScreen(
                     HorizontalDivider()
                     SubtitleSwitch(
                         icon = { Icon(Icons.Default.Lock, contentDescription = null) },
-                        title = "锁定桌面字幕",
-                        summary = "锁定后触摸会传给下方应用，回这里解锁",
+                        title = stringResource(R.string.settings_lock_desktop_subtitles),
+                        summary = stringResource(R.string.settings_lock_desktop_subtitles_summary),
                         checked = desktop.locked,
                         onChange = viewModel.subtitleDisplay::lockDesktop,
                     )
@@ -154,15 +173,45 @@ fun SettingsScreen(
             }
         }
         item(key = "app-title") {
-            Text("应用", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 20.dp, bottom = 8.dp))
+            Text(stringResource(R.string.settings_section_app), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 20.dp, bottom = 8.dp))
         }
         item(key = "about") {
             SettingsGroup {
-                SettingsRow(icon = { Icon(Icons.Default.Info, contentDescription = null) }, title = "关于",
-                    summary = "版本 ${viewModel.version.display} · 检查更新", onClick = onOpenAbout)
+                SettingsRow(icon = { Icon(Icons.Default.Info, contentDescription = null) }, title = stringResource(R.string.settings_about_title),
+                    summary = stringResource(
+                        R.string.settings_about_summary,
+                        viewModel.version.display.ifBlank { stringResource(R.string.about_unknown_version) },
+                    ), onClick = onOpenAbout)
             }
             Spacer(Modifier.height(24.dp))
         }
+    }
+    if (choosingDownloadConcurrency) {
+        AlertDialog(
+            onDismissRequest = { choosingDownloadConcurrency = false },
+            title = { Text(stringResource(R.string.settings_concurrent_downloads)) },
+            text = {
+                Column {
+                    DOWNLOAD_CONCURRENCY_OPTIONS.forEach { count ->
+                        Row(
+                            Modifier.fillMaxWidth().selectable(
+                                selected = count == downloadConcurrency,
+                                role = Role.RadioButton,
+                                onClick = {
+                                    viewModel.downloadPreferences.setMaxConcurrentDownloads(count)
+                                    choosingDownloadConcurrency = false
+                                },
+                            ).padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(selected = count == downloadConcurrency, onClick = null)
+                            Text(stringResource(R.string.settings_concurrency_option, count), Modifier.padding(start = 12.dp))
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { choosingDownloadConcurrency = false }) { Text(stringResource(R.string.common_close)) } },
+        )
     }
 }
 
@@ -214,17 +263,21 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     private val graph = app.graph()
     val limitBytes = graph.cache.limitBytes
     val appearance = graph.appearance.state
+    val downloadPreferences = graph.downloads.preferences
     internal val subtitleDisplay = graph.subtitleDisplay
     internal val version = installedAppVersion(app)
     var usedBytes by mutableStateOf<Long?>(null)
         private set
 
-    fun whisperLabel(): String = whisperModelLabel(graph.credentials.resolvedWhisperModel())
+    fun whisperLabel(): String = whisperModelLabel(getApplication<Application>(), graph.credentials.resolvedWhisperModel())
 
-    fun translateLabel(): String = if (graph.credentials.hasTranslate()) "翻译已配置" else "翻译未配置"
+    fun translateLabel(): String = getApplication<Application>().getString(
+        if (graph.credentials.hasTranslate()) R.string.settings_translate_configured
+        else R.string.settings_translate_unconfigured,
+    )
 
     internal fun reportOverlaySettingsUnavailable() {
-        graph.messages.value = "无法打开悬浮窗设置，可在系统设置中允许显示在其他应用上层"
+        graph.show(R.string.settings_overlay_permission_failed)
     }
 
     fun refreshUsage() {

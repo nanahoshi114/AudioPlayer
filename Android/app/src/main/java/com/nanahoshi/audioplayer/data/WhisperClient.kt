@@ -13,9 +13,17 @@ import org.json.JSONObject
 import kotlinx.coroutines.CancellationException
 import java.io.File
 import java.io.IOException
+import com.nanahoshi.audioplayer.R
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.text.UserFacingError
 import java.util.concurrent.TimeUnit
 
-class WhisperException(message: String) : Exception(message)
+class WhisperException(
+    override val userText: TextRef,
+    cause: Throwable? = null,
+) : Exception(userText.debugString(), cause), UserFacingError {
+    constructor(message: String) : this(TextRef.Raw(message))
+}
 
 data class WhisperCue(val startMs: Long, val endMs: Long, val text: String)
 
@@ -24,6 +32,7 @@ class WhisperClient(
     private val calls: InflightCalls,
 ) {
     private val http = OkHttpClient.Builder()
+        .eventListenerFactory(ProgressNetworkEvents.factory)
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(2, TimeUnit.MINUTES)
         .writeTimeout(30, TimeUnit.MINUTES)
@@ -39,10 +48,11 @@ class WhisperClient(
         ticket: InflightCalls.Ticket,
         credentialModel: String? = null,
     ): List<WhisperCue> {
+        ticket.progress?.phase(ProgressPhase.MODEL_INFO)
         val model = resolveQwen3Model(listedModelIds(base, ticket, credentialModel))
         val body = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
-            .addFormDataPart("file", uploadName(file), file.asRequestBody(AUDIO.toMediaType()))
+            .addFormDataPart("file", uploadName(file), file.asRequestBody(AUDIO.toMediaType()).withUploadProgress(ticket.progress, ProgressPhase.WAITING_TRANSCRIPT))
             .addFormDataPart("model", model)
             .addFormDataPart("language", "ja")
             .addFormDataPart("response_format", "json")
@@ -54,7 +64,7 @@ class WhisperClient(
             credentialModel,
         ) { response ->
             val text = response.body?.string().orEmpty()
-            if (!response.isSuccessful) throw WhisperException(readError(text, "生成失败"))
+            if (!response.isSuccessful) throw WhisperException(readError(text, TextRef.Res(R.string.whisper_error_failed)))
             parseObject(text)
         }
         return cuesFromQwen3(json, durationMs)
@@ -67,8 +77,9 @@ class WhisperClient(
         credentialModel: String? = null,
         read: (Response) -> T,
     ): T {
-        val token = credentials.whisperToken(credentialModel) ?: throw WhisperException("没有听写口令")
-        val request = builder.header("Authorization", "Bearer $token").build()
+        val token = credentials.whisperToken(credentialModel)
+            ?: throw WhisperException(TextRef.Res(R.string.whisper_error_missing_key))
+        val request = builder.header("Authorization", "Bearer $token").taskProgress(ticket.progress, false).build()
         val call = client.newCall(request)
         if (!calls.begin(ticket, call)) throw CancellationException()
         try {
@@ -77,15 +88,17 @@ class WhisperClient(
             throw error
         } catch (error: IOException) {
             if (call.isCanceled()) throw CancellationException()
-            throw WhisperException("无法连接听写服务")
+            throw WhisperException(TextRef.Res(R.string.whisper_error_connection))
         } finally {
             calls.end(ticket, call)
         }
     }
 
     private fun endpoint(base: String?, credentialModel: String?, vararg parts: String): HttpUrl {
-        val raw = base ?: credentials.whisperBaseUrl(credentialModel) ?: throw WhisperException("没有听写地址")
-        val root = raw.toHttpUrlOrNull() ?: throw WhisperException("听写地址不正确")
+        val raw = base ?: credentials.whisperBaseUrl(credentialModel)
+            ?: throw WhisperException(TextRef.Res(R.string.whisper_error_missing_base))
+        val root = raw.toHttpUrlOrNull()
+            ?: throw WhisperException(TextRef.Res(R.string.whisper_error_invalid_base))
         return root.newBuilder().apply {
             parts.forEach { addPathSegment(it) }
         }.build()
@@ -112,8 +125,11 @@ class WhisperClient(
             }
         }
     } catch (error: WhisperException) {
-        when (error.message) {
-            "无法连接听写服务", "没有听写口令", "听写地址不正确", "没有听写地址" -> throw error
+        when (error.userText) {
+            TextRef.Res(R.string.whisper_error_connection),
+            TextRef.Res(R.string.whisper_error_missing_key),
+            TextRef.Res(R.string.whisper_error_invalid_base),
+            TextRef.Res(R.string.whisper_error_missing_base) -> throw error
             else -> emptyList()
         }
     }
@@ -161,13 +177,13 @@ class WhisperClient(
     private fun parseObject(text: String): JSONObject = try {
         JSONObject(text)
     } catch (_: Exception) {
-        throw WhisperException("生成失败")
+        throw WhisperException(TextRef.Res(R.string.whisper_error_failed))
     }
 
-    private fun readError(text: String, fallback: String): String = try {
+    private fun readError(text: String, fallback: TextRef): TextRef = try {
         when (val error = JSONObject(text).opt("error")) {
-            is String -> error.takeIf { it.isNotBlank() } ?: fallback
-            is JSONObject -> error.optString("message").takeIf { it.isNotBlank() } ?: fallback
+            is String -> error.takeIf { it.isNotBlank() }?.let(TextRef::Raw) ?: fallback
+            is JSONObject -> error.optString("message").takeIf { it.isNotBlank() }?.let(TextRef::Raw) ?: fallback
             else -> fallback
         }
     } catch (_: Exception) {

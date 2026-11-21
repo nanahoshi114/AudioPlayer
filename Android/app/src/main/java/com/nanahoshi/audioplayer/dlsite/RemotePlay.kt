@@ -13,6 +13,8 @@ data class RemotePlayable(
     val durationMs: Long = 0,
     val workno: String? = null,
     val fileKey: String? = null,
+    val mediaKind: String? = null,
+    val mediaPathHash: String? = null,
 )
 
 data class RemotePreview(

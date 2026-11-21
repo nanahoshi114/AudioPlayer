@@ -59,6 +59,10 @@ fun sanitizeEntryName(name: String): String =
         .take(120)
         .ifBlank { "未命名" }
 
+/** 下载文件按稳定曲目身份分目录，保留文件名并避免同名曲目覆盖。 */
+internal fun trackDownloadRelativePath(source: TrackSource, trackId: Long, filename: String): String =
+    "${source.name.lowercase()}-$trackId/$filename"
+
 /** fileKey 的 8 位短哈希，用于把撞名的文件分到不同子目录。 */
 internal fun shortKeyHash(raw: String): String =
     java.security.MessageDigest.getInstance("SHA-256")

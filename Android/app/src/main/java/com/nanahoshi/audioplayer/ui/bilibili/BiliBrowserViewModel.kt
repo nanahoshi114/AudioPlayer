@@ -1,18 +1,23 @@
 package com.nanahoshi.audioplayer.ui.bilibili
 
+import com.nanahoshi.audioplayer.text.resolveNoUrl
 import android.app.Application
 import androidx.compose.runtime.*
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.bilibili.*
 import com.nanahoshi.audioplayer.data.TrackSource
 import com.nanahoshi.audioplayer.data.readyBiliAudio
 import com.nanahoshi.audioplayer.dlsite.RemotePlayable
 import com.nanahoshi.audioplayer.graph
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.text.resolve
 import kotlinx.coroutines.*
 
 class BiliBrowserViewModel(app: Application) : AndroidViewModel(app) {
     private val graph = app.graph()
+    private val appContext = app.applicationContext
     var mode by mutableStateOf(BiliSearchMode.VIDEO); private set
     private var videoQuery by mutableStateOf("")
     private var upQuery by mutableStateOf("")
@@ -74,13 +79,13 @@ class BiliBrowserViewModel(app: Application) : AndroidViewModel(app) {
         cancelSearch(); cancelParts(); selected = emptySet()
         try {
             when (val input = biliInput(query, mode)) {
-                is BiliSearchInput.Uploader -> openUploader(BiliUploader(input.mid, "UP 主 ${input.mid}"))
+                is BiliSearchInput.Uploader -> openUploader(BiliUploader(input.mid, appContext.getString(R.string.bilibili_uploader_default, input.mid)))
                 is BiliSearchInput.Video -> {
                     videoQuery = query
                     uploader = null; mode = BiliSearchMode.VIDEO
                     videos.start {
                         val parts = graph.bilibili.lookup(input.bvid)
-                        val first = parts.firstOrNull() ?: throw BilibiliException(0, "这个视频没有可播放的分 P")
+                        val first = parts.firstOrNull() ?: throw BilibiliException(0, appContext.getString(R.string.bilibili_no_parts))
                         BiliPage(listOf(BiliVideoHit(first.bvid, first.title, first.artist, first.coverUrl, parts.sumOf { it.durationMs })), false)
                     }
                 }
@@ -91,7 +96,7 @@ class BiliBrowserViewModel(app: Application) : AndroidViewModel(app) {
                     videos.start { graph.bilibili.searchVideos(input.text, it, order, duration) }
                 } else uploaders.start { graph.bilibili.searchUploaders(input.text, it) }
             }
-        } catch (error: BilibiliException) { graph.messages.value = error.message }
+        } catch (error: BilibiliException) { graph.showRaw(appContext.resolveNoUrl(error.userText, R.string.bilibili_error_read_failed)) }
     }
     fun openUploader(value: BiliUploader) {
         cancelSearch(); cancelParts(); selected = emptySet(); uploader = value; showingCollections = false
@@ -124,11 +129,16 @@ class BiliBrowserViewModel(app: Application) : AndroidViewModel(app) {
                         val details = graph.bilibili.videoDetails(video.bvid)
                         val parts = details.parts.distinctBy { it.bvid to it.cid }
                         ensureActive()
-                        if (parts.isEmpty()) throw BilibiliException(0, "没有可播放的分 P")
+                        if (parts.isEmpty()) throw BilibiliException(0, appContext.getString(R.string.bilibili_no_playable_parts))
                         groups += BiliPartGroup(details.video, parts)
                     } catch (cancelled: CancellationException) { throw cancelled }
                     catch (error: Exception) {
-                        failed += "${video.title}：${if (error is BilibiliException) error.message else "分 P 读取失败"}"
+                        failed += appContext.getString(
+                            R.string.bilibili_item_failure,
+                            video.title,
+                            if (error is BilibiliException) appContext.resolveNoUrl(error.userText, R.string.bilibili_error_read_failed)
+                            else appContext.getString(R.string.bilibili_part_read_failed_short),
+                        )
                     }
                 }
                 if (token != partGeneration) return@launch
@@ -138,7 +148,10 @@ class BiliBrowserViewModel(app: Application) : AndroidViewModel(app) {
                     working = true
                     try {
                         requests.forEach { graph.library.importBili(it) }
-                        graph.messages.value = "已加入音频库" + if (failed.isEmpty()) "" else "，${failed.size} 个视频读取失败"
+                        graph.show(
+                        if (failed.isEmpty()) TextRef.Res(R.string.online_added_to_library)
+                        else TextRef.Res(R.string.bilibili_added_with_failures, listOf(failed.size)),
+                    )
                         selected = emptySet()
                     } finally { working = false }
                     return@launch
@@ -149,7 +162,7 @@ class BiliBrowserViewModel(app: Application) : AndroidViewModel(app) {
                     choice = BiliPartChoice.create(action, groups, failed)
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (failure: Exception) { graph.messages.value = failure.message ?: "B 站操作失败，请稍后重试" }
+            catch (failure: Exception) { graph.showError(failure, R.string.bilibili_operation_failed) }
             finally { if (token == partGeneration) resolving = false }
         }
     }
@@ -183,11 +196,11 @@ class BiliBrowserViewModel(app: Application) : AndroidViewModel(app) {
                             )))
                         }
                     }
-                    BiliAction.SAVE -> error("请先选择导入方式")
+                    BiliAction.SAVE -> error(appContext.getString(R.string.bilibili_choose_import_mode))
                 }
                 selected = emptySet()
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { graph.messages.value = "B 站操作失败，请稍后重试" }
+            catch (_: Exception) { graph.show(R.string.bilibili_operation_failed) }
             finally { working = false }
         }
     }

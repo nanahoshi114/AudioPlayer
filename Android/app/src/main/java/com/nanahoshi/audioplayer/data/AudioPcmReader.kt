@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.R
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
@@ -79,7 +81,7 @@ class AudioPcmReader(file: File, private val keepStereo: Boolean = false) : Clos
                     break
                 }
             }
-            if (trackIndex < 0 || format == null) throw WhisperException("音频解码失败")
+            if (trackIndex < 0 || format == null) throw WhisperException(TextRef.Res(R.string.whisper_error_audio_decode))
             extractor.selectTrack(trackIndex)
             val mime = format.getString(MediaFormat.KEY_MIME)!!
             channels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT).coerceAtLeast(1)
@@ -92,7 +94,7 @@ class AudioPcmReader(file: File, private val keepStereo: Boolean = false) : Clos
             runCatching { decoder?.stop() }
             runCatching { decoder?.release() }
             runCatching { extractor.release() }
-            throw if (error is WhisperException) error else WhisperException("音频解码失败")
+            throw if (error is WhisperException) error else WhisperException(TextRef.Res(R.string.whisper_error_audio_decode))
         }
     }
 

@@ -1,8 +1,9 @@
 package com.nanahoshi.audioplayer.playback
 
+import com.nanahoshi.audioplayer.R
+import com.nanahoshi.audioplayer.text.resolve
 import android.content.ComponentName
 import android.content.Context
-import android.net.Uri
 import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
@@ -13,6 +14,8 @@ import com.nanahoshi.audioplayer.data.LibraryRepository
 import com.nanahoshi.audioplayer.data.db.QueuedTrack
 import com.nanahoshi.audioplayer.data.db.TrackEntity
 import com.nanahoshi.audioplayer.dlsite.RemotePlayable
+import com.nanahoshi.audioplayer.japaneseasmr.JaArticle
+import com.nanahoshi.audioplayer.japaneseasmr.JaFailure
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -38,6 +41,13 @@ data class PlayerUiState(
     val hasMedia: Boolean = false,
 )
 
+internal data class JaPlaybackFailure(val queueId: Long, val reason: JaFailure, val postId: String?, val mediaKey: String?) {
+    val messageRes: Int get() = when (reason) {
+        JaFailure.MEDIA_VERIFY, JaFailure.WORK_FILE_MISSING, JaFailure.UNSAFE -> reason.messageRes
+        else -> R.string.player_ja_playback_failed
+    }
+}
+
 class PlayerClient(
     context: Context,
     private val library: LibraryRepository,
@@ -49,6 +59,58 @@ class PlayerClient(
     private val queueMutex = Mutex()
     private val _state = MutableStateFlow(PlayerUiState())
     val state: StateFlow<PlayerUiState> = _state
+    private val _jaPlaybackFailure = MutableStateFlow<JaPlaybackFailure?>(null)
+    internal val jaPlaybackFailure: StateFlow<JaPlaybackFailure?> = _jaPlaybackFailure
+
+    internal fun reportJaPlaybackFailure(failure: JaPlaybackFailure) {
+        _jaPlaybackFailure.value = failure
+    }
+
+    internal fun dismissJaPlaybackFailure(failure: JaPlaybackFailure) {
+        _jaPlaybackFailure.compareAndSet(failure, null)
+    }
+
+    internal fun clearJaPlaybackFailure() {
+        _jaPlaybackFailure.value = null
+    }
+
+    internal suspend fun recoverJaLocalCopy(player: Player, failed: MediaItem): Boolean {
+        var recovered = false
+        withRevalidatedQueue { items, _ ->
+            val current = player.currentMediaItem
+            if (current?.mediaId != failed.mediaId || current.localConfiguration?.uri != failed.localConfiguration?.uri) {
+                return@withRevalidatedQueue
+            }
+            val replacement = items.firstOrNull { it.mediaId == failed.mediaId } ?: return@withRevalidatedQueue
+            val uri = replacement.localConfiguration?.uri
+            if (uri?.scheme != "japaneseasmr" || uri.host != "audio") return@withRevalidatedQueue
+            val index = player.currentMediaItemIndex
+            val position = player.currentPosition.coerceAtLeast(0L)
+            val shouldPlay = player.playWhenReady
+            player.replaceMediaItem(index, replacement)
+            player.seekTo(index, position)
+            player.prepare()
+            player.playWhenReady = shouldPlay
+            recovered = true
+        }
+        return recovered
+    }
+
+    internal suspend fun refreshJaArticle(article: JaArticle, rootId: Long, cleanup: Boolean): LibraryRepository.JaRefreshResult =
+        queueMutex.withLock {
+            val result = library.refreshJapaneseAsmrPost(article.post.postId, rootId, cleanup, article) {
+                state.value.queueItemId
+            }
+            if (result.queueIds.isNotEmpty()) withController { removeQueueMedia(result.queueIds) }
+            result
+        }
+
+    private fun Player.removeQueueMedia(queueIds: List<Long>) {
+        for (index in mediaItemCount - 1 downTo 0) {
+            if (getMediaItemAt(index).mediaId.toLongOrNull() in queueIds) removeMediaItem(index)
+        }
+    }
+
     private var sleepJob: Job? = null
     private val _sleepRemainingMs = MutableStateFlow<Long?>(null)
     val sleepRemainingMs: StateFlow<Long?> = _sleepRemainingMs
@@ -130,6 +192,17 @@ class PlayerClient(
         if (!found) playQueueItemFallback(queueItemId)
     }
 
+    internal fun resumeVerifiedTrack(queueItemId: Long, mediaKey: String?, article: JaArticle) = scope.launch {
+        queueMutex.withLock {
+            if (state.value.queueItemId != queueItemId || !library.jaQueueMatches(article, queueItemId, mediaKey)) return@withLock
+            withController {
+                if (currentMediaItem?.mediaId != queueItemId.toString()) return@withController
+                if (playbackState == Player.STATE_IDLE) prepare()
+                play()
+            }
+        }
+    }
+
     /** 播放器优先尝试；调用方持有 queueMutex。 */
     private suspend fun tryPlayFromPlayer(queueItemId: Long): Boolean {
         var found = false
@@ -197,7 +270,7 @@ class PlayerClient(
 
     private fun enqueueItems(items: List<QueuePlayable>, replace: Boolean) = scope.launch {
         if (items.isEmpty()) return@launch
-        val caches = withContext(Dispatchers.IO) { items.map { it.biliLocalCache(appContext) } }
+        val caches = withContext(Dispatchers.IO) { items.map { it.playbackTarget(appContext) } }
         var committed = false
         try {
             queueMutex.withLock {
@@ -236,14 +309,22 @@ class PlayerClient(
             } catch (_: Exception) {
                 false
             }
-            if (!recovered) onRemovalRejected("播放队列准备失败，请重试")
+            if (!recovered) onRemovalRejected(appContext.getString(R.string.player_error_queue_prepare))
         }
     }
 
     fun replaceAndPlayRemote(items: List<RemotePlayable>, startIndex: Int = 0) = scope.launch {
         queueMutex.withLock {
             val ids = library.replaceRemoteQueue(items)
-            val media = withContext(Dispatchers.IO) { ids.zip(items).map { (queueId, item) -> item.toMediaItem(queueId) } }
+            val media = withContext(Dispatchers.IO) {
+                val jaRows = if (items.any { it.source == com.nanahoshi.audioplayer.data.TrackSource.JAPANESE_ASMR }) {
+                    library.queueSnapshot().associateBy { it.queueItemId }
+                } else emptyMap()
+                ids.zip(items).map { (queueId, item) ->
+                    jaRows[queueId]?.takeIf { it.source == com.nanahoshi.audioplayer.data.TrackSource.JAPANESE_ASMR }
+                        ?.toMediaItem(appContext) ?: item.toMediaItem(queueId)
+                }
+            }
             val index = if (media.isEmpty()) 0 else startIndex.coerceIn(0, media.lastIndex)
             withController {
                 if (media.isEmpty()) {
@@ -292,8 +373,12 @@ class PlayerClient(
         queueMutex.withLock {
             library.removeQueueItem(queueItemId)
             withController {
-                if (index in 0 until mediaItemCount && getMediaItemAt(index).mediaId == queueItemId.toString()) {
-                    removeMediaItem(index)
+                val playerIndex = index.takeIf { it in 0 until mediaItemCount && getMediaItemAt(it).mediaId == queueItemId.toString() }
+                    ?: indexOfQueueItem(queueItemId)
+                if (playerIndex >= 0) {
+                    val removedCurrent = playerIndex == currentMediaItemIndex
+                    removeMediaItem(playerIndex)
+                    if (removedCurrent && mediaItemCount > 0 && playbackState == Player.STATE_IDLE) prepare()
                 }
             }
         }
@@ -310,7 +395,7 @@ class PlayerClient(
             }
             if (affected) rebuildPlayerFromQueue()
         } catch (error: com.nanahoshi.audioplayer.data.LibraryRemovalRejected) {
-            onRemovalRejected(error.message.orEmpty())
+            onRemovalRejected(appContext.resolve(error.userText))
         }
     }
 
@@ -325,23 +410,23 @@ class PlayerClient(
             }
             if (affected) rebuildPlayerFromQueue()
         } catch (error: com.nanahoshi.audioplayer.data.LibraryRemovalRejected) {
-            onRemovalRejected(error.message.orEmpty())
+            onRemovalRejected(appContext.resolve(error.userText))
         }
     }
 
 
     /** 锁外探测（唯一 binder IPC）；pair 保持曲目↔缓存对齐，供子集切片。 */
-    private suspend fun probeTracks(tracks: List<TrackEntity>): List<Pair<TrackEntity, Uri?>> =
-        withContext(Dispatchers.IO) { tracks.map { it to it.biliLocalCache(appContext) } }
+    private suspend fun probeTracks(tracks: List<TrackEntity>): List<Pair<TrackEntity, PlaybackTarget>> =
+        withContext(Dispatchers.IO) { tracks.map { it to it.playbackTarget(appContext) } }
 
     /** 锁内纯组装，无 IPC。 */
-    private fun assemble(ids: List<Long>, probed: List<Pair<TrackEntity, Uri?>>): List<MediaItem> =
+    private fun assemble(ids: List<Long>, probed: List<Pair<TrackEntity, PlaybackTarget>>): List<MediaItem> =
         ids.zip(probed).map { (id, pair) -> pair.first.toPlayableItem(id, pair.second) }
 
     /** 锁外快照+探测，锁内重读比对（全字段相等，连 localUri 更新与改序也捕获）后应用。 */
     private suspend fun withRevalidatedQueue(apply: MediaController.(List<MediaItem>, List<QueuedTrack>) -> Unit) {
         val rows = library.queueSnapshot()
-        val caches = withContext(Dispatchers.IO) { rows.map { it.biliLocalCache(appContext) } }
+        val caches = withContext(Dispatchers.IO) { rows.map { it.playbackTarget(appContext) } }
         queueMutex.withLock {
             val fresh = library.queueSnapshot()
             val items = if (fresh == rows) {
@@ -378,7 +463,7 @@ class PlayerClient(
         }
     }
 
-    private suspend fun appendLocked(probed: List<Pair<TrackEntity, Uri?>>, startPlaying: Boolean) {
+    private suspend fun appendLocked(probed: List<Pair<TrackEntity, PlaybackTarget>>, startPlaying: Boolean) {
         if (probed.isEmpty()) return
         val ids = library.appendQueue(probed.map { it.first.id })
         val items = assemble(ids, probed)

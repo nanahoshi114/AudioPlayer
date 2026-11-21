@@ -1,5 +1,8 @@
 package com.nanahoshi.audioplayer.playback
 
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.text.UserFacingIOException
+import com.nanahoshi.audioplayer.R
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -107,7 +110,7 @@ internal inline fun <T> File.withStagedSubtitle(text: String, commit: (() -> Uni
     return try {
         temp.writeText(text)
         commit {
-            if (!temp.renameTo(this)) throw IOException("无法保存字幕文件")
+            if (!temp.renameTo(this)) throw UserFacingIOException(TextRef.Res(R.string.player_error_subtitle_save))
         }
     } finally {
         temp.delete()

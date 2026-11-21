@@ -1,9 +1,17 @@
 package com.nanahoshi.audioplayer.data
 
+import androidx.annotation.StringRes
+import com.nanahoshi.audioplayer.R
+import com.nanahoshi.audioplayer.japaneseasmr.jaPostId
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.security.MessageDigest
 
-internal enum class ClipboardSource(val label: String) { BILIBILI("B 站"), ASMR("asmr.one"), YOUTUBE("YouTube") }
+internal enum class ClipboardSource(@param:StringRes val labelRes: Int) {
+    BILIBILI(R.string.clipboard_source_bilibili),
+    ASMR(R.string.clipboard_source_asmr),
+    YOUTUBE(R.string.clipboard_source_youtube),
+    JAPANESE_ASMR(R.string.clipboard_source_japanese_asmr),
+}
 internal data class ClipboardTarget(val source: ClipboardSource, val id: String)
 internal data class ClipboardImportCandidate(
     val target: ClipboardTarget,
@@ -29,9 +37,11 @@ private val youtubeId = Regex("[A-Za-z0-9_-]{11}")
 /** 分享文字中的明确链接优先于标题里附带的编号；一次只处理一个条目。 */
 internal fun clipboardImportTarget(raw: String): ClipboardTarget? {
     val text = raw.take(MAX_IMPORT_CLIPBOARD_LENGTH)
+    var jaPost: String? = null
     for (match in clipboardUrl.findAll(text)) {
         val address = match.value.trimEnd('.', ',', '，', '。', ';', '；', ')', ']', '}')
         val url = (if (address.startsWith("http", true)) address else "https://$address").toHttpUrlOrNull() ?: continue
+        if (jaPost == null) jaPost = jaPostId(url.toString())
         val host = url.host
         if (host == "bilibili.com" || host.endsWith(".bilibili.com")) {
             val path = url.pathSegments
@@ -53,6 +63,7 @@ internal fun clipboardImportTarget(raw: String): ClipboardTarget? {
         }
         if (video != null && youtubeId.matches(video)) return ClipboardTarget(ClipboardSource.YOUTUBE, video)
     }
+    jaPost?.let { return ClipboardTarget(ClipboardSource.JAPANESE_ASMR, it) }
     var firstBv: String? = null
     for (match in clipboardExplicitId.findAll(text)) {
         val digits = match.groups[1]?.value

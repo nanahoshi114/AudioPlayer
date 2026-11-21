@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.ui.components
 
+import com.nanahoshi.audioplayer.R
+import androidx.compose.ui.res.stringResource
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -51,7 +53,7 @@ fun AppTopBar(
         navigationIcon = {
             if (onBack != null) {
                 IconButton(onClick = onBack) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.a11y_back))
                 }
             }
         },
@@ -72,10 +74,10 @@ fun SelectionTopBar(
     val overflow = actions.filter { it !in pinned }
     var menu by rememberSaveable { mutableStateOf(false) }
     TopAppBar(
-        title = { Text("已选 $count") },
+        title = { Text(stringResource(R.string.common_selected_count, count), maxLines = 1, overflow = TextOverflow.Ellipsis) },
         navigationIcon = {
             IconButton(onClick = onClose) {
-                Icon(Icons.Default.Close, contentDescription = "取消选择")
+                Icon(Icons.Default.Close, contentDescription = stringResource(R.string.a11y_cancel_selection))
             }
         },
         actions = {
@@ -86,7 +88,7 @@ fun SelectionTopBar(
             }
             if (overflow.isNotEmpty()) {
                 IconButton(onClick = { menu = true }) {
-                    Icon(Icons.Default.MoreVert, contentDescription = "更多")
+                    Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.common_more_actions))
                 }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     overflow.forEach { action ->

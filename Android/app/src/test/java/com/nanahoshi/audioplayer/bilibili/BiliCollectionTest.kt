@@ -22,6 +22,24 @@ class BiliCollectionTest {
         assertTrue(first.hasMore); assertFalse(api.catalogue(123, 2).hasMore)
     }
 
+    @Test fun missingRemoteTitlesKeepTheCollectionFallbackAndAnExistingTitle() = runBlocking {
+        val api = BiliCollectionApi { path, _, _ ->
+            val body = when {
+                path.endsWith("seasons_series_list") -> """{"items_lists":{"page":{"total":2},
+                    "seasons_list":[{"meta":{"season_id":7}}],"series_list":[{"meta":{"series_id":8}}]}}"""
+                path.endsWith("/series/series") -> """{"meta":{"name":" "}}"""
+                else -> """{"meta":{},"page":{"total":0},"archives":[]}"""
+            }
+            Json.parseToJsonElement(body)
+        }
+        val items = api.catalogue(123, 1).items
+        assertEquals(listOf("B 站合集", "B 站系列"), items.map { it.title })
+        for (item in items) {
+            assertEquals(item.title, api.videos(item, 1).collection.title)
+            assertEquals("stored name", api.videos(item.copy(title = "stored name"), 1).collection.title)
+        }
+    }
+
     @Test fun contentsUseDistinctPaginationAndSecondsAreNotParsedAsMinutes() = runBlocking {
         val paths = mutableListOf<String>()
         val api = BiliCollectionApi { path, params, _ ->

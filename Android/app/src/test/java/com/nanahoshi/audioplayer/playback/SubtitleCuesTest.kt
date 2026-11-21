@@ -1,5 +1,9 @@
 package com.nanahoshi.audioplayer.playback
 
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.text.UserFacingIOException
+import com.nanahoshi.audioplayer.R
+import org.junit.Assert.assertTrue
 import java.io.File
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
@@ -64,7 +68,8 @@ class SubtitleCuesTest {
         val target = File(directory, "subtitle.json").apply { mkdir() }
         val original = File(target, "original").apply { writeText("旧字幕") }
         val failure = runCatching { target.writeTextAtomically("新字幕") }.exceptionOrNull()
-        assertEquals(IOException::class.java, failure?.javaClass)
+        assertTrue(failure is IOException)
+        assertEquals(TextRef.Res(R.string.player_error_subtitle_save), (failure as UserFacingIOException).userText)
         assertEquals("旧字幕", original.readText())
         assertEquals(listOf("subtitle.json"), directory.list()?.toList())
     }

@@ -1,11 +1,18 @@
 package com.nanahoshi.audioplayer.bilibili
 
+import androidx.annotation.StringRes
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.R
 import kotlinx.coroutines.ensureActive
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.*
 import kotlin.coroutines.coroutineContext
 
-@Serializable enum class BiliCollectionKind { SEASON, SERIES }
+@Serializable
+enum class BiliCollectionKind(@param:StringRes val labelRes: Int, internal val fallbackTitle: String) {
+    SEASON(R.string.bilibili_collection_title, "B 站合集"),
+    SERIES(R.string.bilibili_collection_series, "B 站系列"),
+}
 
 @Serializable
 data class BiliCollection(
@@ -20,7 +27,6 @@ data class BiliCollection(
     val coverIsFallback: Boolean = false,
 ) {
     val key: String get() = "${kind.name}:$remoteId"
-    val label: String get() = if (kind == BiliCollectionKind.SEASON) "B 站合集" else "B 站系列"
 }
 
 data class BiliCollectionPage(
@@ -31,12 +37,12 @@ data class BiliCollectionPage(
     val complete: Boolean = false,
 )
 
-private fun JsonElement.obj() = this as? JsonObject ?: throw BilibiliException(0, "B 站没有返回合集数据")
+private fun JsonElement.obj() = this as? JsonObject ?: throw BilibiliException(0, TextRef.Res(R.string.bilibili_error_collection_data_missing))
 private fun JsonElement.value(key: String) = obj()[key] ?: JsonNull
 private fun JsonElement.string(key: String) = (value(key) as? JsonPrimitive)?.contentOrNull.orEmpty()
 private fun JsonElement.long(key: String) = string(key).toLongOrNull()
 private fun JsonElement.array(key: String) = value(key) as? JsonArray
-    ?: throw BilibiliException(0, "B 站没有返回合集列表，请重试")
+    ?: throw BilibiliException(0, TextRef.Res(R.string.bilibili_error_collection_list_missing))
 private fun https(value: String) = when {
     value.startsWith("//") -> "https:$value"
     value.startsWith("http://") -> value.replaceFirst("http://", "https://")
@@ -58,12 +64,12 @@ class BiliCollectionApi(private val data: suspend (String, Map<String, String>, 
             lists.array(name).map { entry ->
                 val meta = entry.value("meta")
                 val id = meta.long(if (kind == BiliCollectionKind.SEASON) "season_id" else "series_id")
-                    ?.takeIf { it > 0 } ?: throw BilibiliException(0, "合集编号无效")
+                    ?.takeIf { it > 0 } ?: throw BilibiliException(0, TextRef.Res(R.string.bilibili_error_collection_id))
                 val first = (entry.value("archives") as? JsonArray)?.firstOrNull() as? JsonObject
                 metadata(meta, BiliCollection(kind, id, mid, "")).withFirstVideoCover(first?.string("pic"))
             }
         }.distinctBy { it.key }
-        val total = lists.value("page").long("total") ?: throw BilibiliException(0, "合集分页信息缺失")
+        val total = lists.value("page").long("total") ?: throw BilibiliException(0, TextRef.Res(R.string.bilibili_error_collection_pagination))
         return BiliPage(items, page * 20L < total)
     }
 
@@ -75,10 +81,10 @@ class BiliCollectionApi(private val data: suspend (String, Map<String, String>, 
             "page_num" to "$page", "page_size" to "30", "sort_reverse" to "false")
         else mapOf("mid" to "${collection.mid}", "series_id" to "${collection.remoteId}", "pn" to "$page", "ps" to "30", "sort" to "asc")
         val body = data(path, params, "https://space.bilibili.com/${collection.mid}")
-        val total = body.value("page").long("total") ?: throw BilibiliException(0, "合集分页信息缺失")
+        val total = body.value("page").long("total") ?: throw BilibiliException(0, TextRef.Res(R.string.bilibili_error_collection_pagination))
         val items = body.array("archives").map { item ->
             val bv = item.string("bvid").takeIf { Regex("BV[0-9A-Za-z]{10}").matches(it) }
-                ?: throw BilibiliException(0, "合集视频身份缺失，请重试")
+                ?: throw BilibiliException(0, TextRef.Res(R.string.bilibili_error_collection_video_identity))
             BiliVideoHit(bv, biliPlainText(item.string("title")), "", https(item.string("pic")),
                 (item.long("duration") ?: 0).coerceAtLeast(0) * 1000, collection.mid)
         }.distinctBy { it.bvid }
@@ -91,7 +97,7 @@ class BiliCollectionApi(private val data: suspend (String, Map<String, String>, 
     }
 
     private fun metadata(meta: JsonElement, fallback: BiliCollection) = fallback.withFirstVideoCover(null).copy(
-        title = biliPlainText(meta.string("name")).ifBlank { fallback.title.ifBlank { fallback.label } },
+        title = biliPlainText(meta.string("name")).ifBlank { fallback.title.ifBlank { fallback.kind.fallbackTitle } },
         description = biliPlainText(meta.string("description")),
         total = (meta.long("total") ?: fallback.total.toLong()).toInt(),
     )

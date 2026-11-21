@@ -1,5 +1,8 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.text.UserFacingException
+import com.nanahoshi.audioplayer.R
 import android.content.Context
 import android.media.MediaMetadataRetriever
 import androidx.room.withTransaction
@@ -56,14 +59,17 @@ class DlsiteOriginalStore(
         beforeCommit: suspend () -> Unit = {},
         onPublish: suspend () -> Unit = {},
         onCommitted: () -> Unit = {},
+        onProgress: (Int, Int) -> Unit = { _, _ -> },
     ): DlsiteOriginalImportResult = withContext(Dispatchers.IO) {
         val code = DlsiteClient.canonicalWorkno(workno)
         val rootDirectory = directory.canonicalFile
-        require(rootDirectory.isDirectory && rootDirectory.path.startsWith(filesDir.path + File.separator)) {
-            "找不到已解压的完整原始包文件"
+        if (!rootDirectory.isDirectory || !rootDirectory.path.startsWith(filesDir.path + File.separator)) {
+            throw UserFacingException(TextRef.Res(R.string.dlsite_archive_error_unpacked_missing))
         }
         val disk = scanOriginalDirectory(rootDirectory)
-        require(disk.any { it.kind != DlsiteOriginalKind.FOLDER }) { "完整原始包里没有文件" }
+        if (disk.none { it.kind != DlsiteOriginalKind.FOLDER }) {
+            throw UserFacingException(TextRef.Res(R.string.dlsite_archive_error_empty_contents))
+        }
         val originalLeaves = disk.filter { it.kind != DlsiteOriginalKind.FOLDER }.map { it.path }
         val previousRoot = library.folderBySource(code)
         val shown = if (previousRoot == null) optional { dlsite.showcase(code) } else null
@@ -123,6 +129,10 @@ class DlsiteOriginalStore(
                 val tracksByPath = trackPaths.groupBy({ it.first }, { it.second })
                 val filesByPath = filePaths.groupBy({ it.first }, { it.second })
                 val tracksByPlay = oldTracks.filter { !it.fileHash.isNullOrBlank() }.groupBy { rawFileKey(it.fileHash) }
+                // Android 的 /data/user/0 与 /data/data 可指向同一文件；不能只按原路径字符串查重。
+                val ownersByPath = db.tracks().withAbsoluteLocalPaths().mapNotNull { track ->
+                    absolutePathKey(track.localUri)?.let { it to track }
+                }.groupBy({ it.first }, { it.second }).mapValues { it.value.toMutableList() }.toMutableMap()
                 val directoryIds = mutableMapOf("" to root.id)
                 val usedFolderIds = mutableSetOf(root.id)
                 val usedTrackIds = mutableSetOf<Long>()
@@ -130,7 +140,9 @@ class DlsiteOriginalStore(
                 val entries = mutableListOf<DlsiteOriginalEntryEntity>()
                 var linked = 0
                 val skipped = mutableListOf<String>()
+                var processed = 0
                 for (item in disk) {
+                    onProgress(processed++, disk.size)
                     currentCoroutineContext().ensureActive()
                     val parentPath = item.path.substringBeforeLast('/', "")
                     val parentId = directoryIds.getValue(parentPath)
@@ -178,7 +190,8 @@ class DlsiteOriginalStore(
                             remoteUrl = remote?.audio?.remoteUrl, asmrWorkId = workId,
                             fileHash = playKey?.let { scopedFileHash(TrackSource.DLSITE, it) },
                         )
-                        val owner = db.tracks().findByLocalUri(item.file.absolutePath)
+                        val owners = ownersByPath[item.file.absolutePath].orEmpty()
+                        val owner = owners.firstOrNull { it.id != track.id } ?: owners.firstOrNull()
                         if (owner != null && owner.id != track.id) {
                             // 文件已被别的曲目占用：保留原关联并跳过本条，不让整个发布回滚。
                             skipped += item.path
@@ -192,6 +205,8 @@ class DlsiteOriginalStore(
                             linked++
                             track.id
                         } else db.tracks().insert(track)
+                        absolutePathKey(old?.localUri)?.let { path -> ownersByPath[path]?.removeAll { it.id == id } }
+                        ownersByPath.getOrPut(item.file.absolutePath) { mutableListOf() }.add(track.copy(id = id))
                         usedTrackIds += id
                         entries += item.entry(code, trackId = id, playFileKey = playKey
                             ?: rawFileKey(track.fileHash) ?: previous?.playFileKey)
@@ -217,6 +232,7 @@ class DlsiteOriginalStore(
                         entries += item.entry(code, fileId = id)
                     }
                 }
+                onProgress(disk.size, disk.size)
                 db.dlsiteOriginals().deleteEntries(code)
                 db.dlsiteOriginals().upsertEntries(entries)
                 db.dlsiteOriginals().upsertWork(DlsiteOriginalWorkEntity(code, root.id, rootDirectory.absolutePath, generation))
@@ -244,9 +260,13 @@ private data class OriginalDiskEntry(val path: String, val file: File, val kind:
     )
 }
 
+private fun absolutePathKey(path: String?): String? = path?.takeIf { it.startsWith('/') }?.let {
+    runCatching { File(it).canonicalPath }.getOrDefault(it)
+}
+
 private fun scanOriginalDirectory(root: File): List<OriginalDiskEntry> = root.walkTopDown().drop(1).map { file ->
-    require(file.canonicalPath == file.absolutePath && file.canonicalPath.startsWith(root.path + File.separator)) {
-        "完整原始包目录包含不安全的路径"
+    if (file.canonicalPath != file.absolutePath || !file.canonicalPath.startsWith(root.path + File.separator)) {
+        throw UserFacingException(TextRef.Res(R.string.dlsite_archive_error_unpacked_unsafe))
     }
     val path = file.relativeTo(root).invariantSeparatorsPath
     val kind = when {

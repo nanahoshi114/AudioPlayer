@@ -1,5 +1,8 @@
 package com.nanahoshi.audioplayer.youtube
 
+import com.nanahoshi.audioplayer.R
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.text.UserFacingError
 import kotlinx.serialization.json.*
 import java.net.URLDecoder
 import java.security.MessageDigest
@@ -7,10 +10,13 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.io.File
 
 class YouTubeException(
-    message: String,
+    override val userText: TextRef,
     cause: Throwable? = null,
     internal val statusCode: Int? = null,
-) : java.io.IOException(message, cause)
+) : java.io.IOException(userText.debugString(), cause), UserFacingError {
+    constructor(message: String, cause: Throwable? = null, statusCode: Int? = null) :
+        this(TextRef.Raw(message), cause, statusCode)
+}
 
 /** 仅记录阶段、错误类型和计数；不包含网址、请求头、凭证或异常原文。 */
 data class YouTubeDiagnostic(
@@ -43,7 +49,7 @@ internal fun form(value: String): Map<String, String> = value.split('&').filter 
 }
 internal fun inputOf(raw: String): YouTubeInput {
     val text = raw.trim()
-    if (text.isEmpty()) throw YouTubeException("请输入关键词、视频或播放列表链接")
+    if (text.isEmpty()) throw YouTubeException(TextRef.Res(R.string.youtube_error_blank_search))
     Regex("[?&]search_query=([^&]+)", RegexOption.IGNORE_CASE).find(text)?.let {
         val query = decode(it.groupValues[1]).trim()
         if (query.isNotEmpty()) return YouTubeInput(InputKind.SEARCH, query)
@@ -125,15 +131,15 @@ internal fun audioStreams(root: JsonElement): List<AudioStream> = listOf("adapti
 
 internal data class Solved(val sig: Map<String, String>, val n: Map<String, String>)
 internal fun solvedResults(value: String, hasSig: Boolean, hasN: Boolean): Solved {
-    val root = try { Json.parseToJsonElement(value) } catch (_: Exception) { throw YouTubeException("YouTube 签名解析失败") }
-    val responses = root.child("responses") as? JsonArray ?: throw YouTubeException("YouTube 签名解析失败")
+    val root = try { Json.parseToJsonElement(value) } catch (_: Exception) { throw YouTubeException(TextRef.Res(R.string.youtube_error_signature)) }
+    val responses = root.child("responses") as? JsonArray ?: throw YouTubeException(TextRef.Res(R.string.youtube_error_signature))
     var index = 0
     fun next(): Map<String, String> {
-        val result = responses.getOrNull(index++) ?: throw YouTubeException("YouTube 签名解析失败")
-        if (result.text("type") != "result") throw YouTubeException("YouTube 签名解析失败")
+        val result = responses.getOrNull(index++) ?: throw YouTubeException(TextRef.Res(R.string.youtube_error_signature))
+        if (result.text("type") != "result") throw YouTubeException(TextRef.Res(R.string.youtube_error_signature))
         return (result.child("data") as? JsonObject)?.mapNotNull { (key, value) ->
             (value as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }?.let { key to it }
-        }?.toMap() ?: throw YouTubeException("YouTube 签名解析失败")
+        }?.toMap() ?: throw YouTubeException(TextRef.Res(R.string.youtube_error_signature))
     }
     return Solved(if (hasSig) next() else emptyMap(), if (hasN) next() else emptyMap())
 }

@@ -1,5 +1,9 @@
 package com.nanahoshi.audioplayer.dlsite
 
+import java.io.IOException
+import com.nanahoshi.audioplayer.text.PersistedErrors
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.R
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import okhttp3.Interceptor
@@ -79,7 +83,7 @@ class DlsiteArchiveTest {
         File(staging, "RJ123.zip.part").writeBytes(ByteArray(5))
         val error = runCatching { client.download("RJ123", staging) }.exceptionOrNull()
         assertTrue(error is DlsiteArchiveException)
-        assertTrue(error!!.message.orEmpty().contains("续传位置"))
+        assertEquals(TextRef.Res(R.string.dlsite_archive_error_wrong_range), (error as DlsiteArchiveException).userText)
         assertFalse(error.message.orEmpty().contains("http"))
         assertFalse(File(staging, "RJ123.zip").exists())
     }
@@ -95,7 +99,7 @@ class DlsiteArchiveTest {
         val partial = File(staging, "RJ123.zip.part").apply { writeBytes(prefix) }
         val error = runCatching { client.download("RJ123", staging) }.exceptionOrNull()
         assertTrue(error is DlsiteArchiveException)
-        assertTrue(error!!.message.orEmpty().contains("在下载过程中发生变化"))
+        assertEquals(TextRef.Res(R.string.dlsite_archive_error_changed), (error as DlsiteArchiveException).userText)
         assertArrayEquals(prefix, partial.readBytes())
         assertFalse(File(staging, "RJ123.zip").exists())
     }
@@ -114,10 +118,31 @@ class DlsiteArchiveTest {
             val partial = File(staging, "RJ123.part1.rar.part").apply { writeBytes(prefix) }
             val error = runCatching { client.download("RJ123", staging) }.exceptionOrNull()
             assertTrue(error is DlsiteArchiveException)
-            assertTrue(error!!.message.orEmpty().contains("文件不完整"))
+            assertEquals(TextRef.Res(R.string.dlsite_archive_error_incomplete_response), (error as DlsiteArchiveException).userText)
             assertArrayEquals(prefix, partial.readBytes())
             assertFalse(File(staging, "RJ123.part1.rar").exists())
         }
+    }
+
+    @Test fun exhaustedTransferRetriesPreserveThePartialAndReportAnInterruption() = runBlocking {
+        var attempts = 0
+        val client = fakeClient { chain ->
+            if (chain.request().header("Range") == null) {
+                binary(chain, ByteArray(20), 200, "Content-Disposition" to "attachment; filename=RJ123.zip")
+            } else {
+                attempts++
+                throw IOException("https://example.test/private")
+            }
+        }
+        val staging = temp.newFolder()
+        val partial = File(staging, "RJ123.zip.part").apply { writeBytes(ByteArray(5)) }
+        val failure = runCatching { client.download("RJ123", staging) }.exceptionOrNull() as DlsiteArchiveException
+        assertEquals(3, attempts)
+        assertEquals(5L, partial.length())
+        assertEquals(DlsiteArchiveFailureKind.INTERRUPTED, failure.archiveKind)
+        assertEquals(TextRef.Res(R.string.dlsite_archive_error_interrupted), failure.userText)
+        assertTrue(PersistedErrors.isInterrupted(PersistedErrors.DLSITE_ARCHIVE_INTERRUPTED))
+        assertFalse(failure.message.orEmpty().contains("example.test"))
     }
 
     @Test fun reusesUnknownLengthOnlyAfterWritingCompletionMarker() = runBlocking {

@@ -1,5 +1,8 @@
 package com.nanahoshi.audioplayer.ui.library
 
+import com.nanahoshi.audioplayer.R
+import com.nanahoshi.audioplayer.text.TextRef
+import androidx.compose.ui.res.stringResource
 import android.app.Application
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
@@ -53,14 +56,19 @@ class FavoriteViewModel(app: Application) : AndroidViewModel(app) {
     private var pagingJob: Job? = null
     private var generation = 0L
 
-    init {
+    init { reloadFolders() }
+
+    fun reloadFolders() {
+        if (loading.value || opened.value != null) return
+        loading.value = true
         viewModelScope.launch {
-            loading.value = true
             try {
                 folders.value = graph.bilibili.favoriteFolders()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (error: Exception) {
                 Log.w("Favorites", "folders ${error.javaClass.simpleName}")
-                graph.messages.value = error.message?.takeIf { it.isNotBlank() } ?: "无法读取收藏夹"
+                graph.showError(error, R.string.bilibili_favorites_read_failed)
             } finally {
                 loading.value = false
             }
@@ -114,7 +122,7 @@ class FavoriteViewModel(app: Application) : AndroidViewModel(app) {
                 if (token != generation) return@launch
                 hasMore.value = false
                 Log.w("Favorites", "videos ${error.javaClass.simpleName}")
-                graph.messages.value = error.message?.takeIf { it.isNotBlank() } ?: "无法读取收藏夹"
+                graph.showError(error, R.string.bilibili_favorites_read_failed)
             } finally {
                 if (token == generation) {
                     paging = false
@@ -132,7 +140,7 @@ class FavoriteViewModel(app: Application) : AndroidViewModel(app) {
     fun importSelected(folderId: Long?, onDone: () -> Unit) {
         val bvids = selected.value.toList()
         if (bvids.isEmpty()) {
-            graph.messages.value = "请至少选择一个视频"
+            graph.show(R.string.bilibili_select_video)
             return
         }
         viewModelScope.launch {
@@ -143,15 +151,18 @@ class FavoriteViewModel(app: Application) : AndroidViewModel(app) {
                 for (bvid in bvids) {
                     try { details += graph.bilibili.videoDetails(bvid) }
                     catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
-                    catch (_: Exception) { failed += "$bvid：分 P 读取失败" }
+                    catch (_: Exception) { failed += getApplication<Application>().getString(R.string.bilibili_part_read_failed, bvid) }
                 }
-                if (details.isEmpty()) { graph.messages.value = "没有可导入的视频"; return@launch }
+                if (details.isEmpty()) { graph.show(R.string.bilibili_no_importable_videos); return@launch }
                 val requests = graph.biliImportRequests.choose(details, failed) ?: return@launch
                 requests.forEach { graph.library.importBili(it) }
-                graph.messages.value = "已加入音频库" + if (failed.isNotEmpty()) "，失败 ${failed.size} 个视频" else ""
+                graph.show(
+                    if (failed.isEmpty()) TextRef.Res(R.string.online_added_to_library)
+                    else TextRef.Res(R.string.bilibili_added_with_failures, listOf(failed.size)),
+                )
                 onDone()
             } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
-            catch (failure: Exception) { graph.messages.value = failure.message ?: "导入失败，请重试" }
+            catch (failure: Exception) { graph.showError(failure, R.string.bilibili_add_failed) }
             finally { importing.value = false }
         }
     }
@@ -184,26 +195,29 @@ fun FavoriteScreen(onBack: () -> Unit, folderId: Long? = null, viewModel: Favori
 
     Column(Modifier.fillMaxSize()) {
         AppTopBar(
-            title = folder?.title ?: "B 站收藏夹",
+            title = folder?.title ?: stringResource(R.string.bilibili_favorites_title),
             onBack = { if (folder != null) viewModel.closeFolder() else onBack() },
         )
         when {
             folder == null && folders.isEmpty() && !loading -> EmptyState(
-                title = "没有 B 站收藏夹",
-                message = "登录信息可能还没生效，请返回后重新进入收藏夹。",
+                title = stringResource(R.string.bilibili_favorites_empty_title),
+                message = stringResource(R.string.bilibili_favorites_empty_message),
+                actionLabel = stringResource(R.string.common_retry),
+                onAction = viewModel::reloadFolders,
                 modifier = Modifier.weight(1f),
             )
             folder == null -> LazyColumn(Modifier.weight(1f)) {
                 items(folders, key = { it.id }) { item ->
                     ListItem(
                         headlineContent = { Text(item.title) },
-                        supportingContent = { Text("${item.mediaCount} 个视频") },
+                        supportingContent = { Text(stringResource(R.string.bilibili_media_count, item.mediaCount)) },
                         modifier = Modifier.clickable { viewModel.open(item) },
                     )
                 }
             }
             videos.isEmpty() && !loading -> EmptyState(
-                title = "这个收藏夹里没有可导入的视频",
+                title = stringResource(R.string.bilibili_favorite_detail_empty_title),
+                message = stringResource(R.string.bilibili_favorite_detail_empty_message),
                 modifier = Modifier.weight(1f),
             )
             else -> LazyColumn(state = listState, modifier = Modifier.weight(1f)) {
@@ -227,7 +241,7 @@ fun FavoriteScreen(onBack: () -> Unit, folderId: Long? = null, viewModel: Favori
                 onClick = { viewModel.importSelected(folderId, onBack) },
                 enabled = !importing && selected.isNotEmpty(),
                 modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
-            ) { Text("加入音频库") }
+            ) { Text(stringResource(R.string.common_add_to_library)) }
         }
     }
 }

@@ -1,5 +1,9 @@
 package com.nanahoshi.audioplayer.playback
 
+import com.nanahoshi.audioplayer.text.resolve
+import com.nanahoshi.audioplayer.text.UserFacingError
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.R
 import android.content.res.Configuration
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -7,6 +11,8 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
+import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import com.nanahoshi.audioplayer.AudioPlayerApplication
@@ -19,6 +25,14 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import com.nanahoshi.audioplayer.data.TrackSource
+import com.nanahoshi.audioplayer.japaneseasmr.JaFailure
+import com.nanahoshi.audioplayer.japaneseasmr.JapaneseAsmrException
+import com.nanahoshi.audioplayer.japaneseasmr.JaMediaKind
+import com.nanahoshi.audioplayer.japaneseasmr.JaMediaKindChanged
+import androidx.media3.common.MimeTypes
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -29,6 +43,7 @@ class PlaybackService : MediaSessionService() {
     private var session: MediaSession? = null
     private var subtitles: PlaybackSubtitles? = null
     private var retriedMediaId: String? = null
+    private var selectedMediaId: String? = null
     private var lastSaved: PlaybackStateEntity? = null
     private var restorePending = true
     private var restoreJob: Job? = null
@@ -41,8 +56,12 @@ class PlaybackService : MediaSessionService() {
         val exoPlayer = ExoPlayer.Builder(this)
             .setMediaSourceFactory(
                 DefaultMediaSourceFactory(
-                    BiliPlaybackDataSource.Factory(this, graph.bilibili, graph.asmr, graph.dlsite, graph.db, graph.youtube),
-                ),
+                    BiliPlaybackDataSource.Factory(this, graph.bilibili, graph.asmr, graph.dlsite, graph.db, graph.youtube, graph.japaneseAsmr),
+                ).setLoadErrorHandlingPolicy(object : DefaultLoadErrorHandlingPolicy() {
+                    override fun getRetryDelayMsFor(loadErrorInfo: LoadErrorHandlingPolicy.LoadErrorInfo): Long =
+                        if (loadErrorInfo.exception.isJapaneseTerminalError()) C.TIME_UNSET
+                        else super.getRetryDelayMsFor(loadErrorInfo)
+                }),
             )
             .setAudioAttributes(AudioAttributes.DEFAULT, true)
             .setHandleAudioBecomingNoisy(true)
@@ -50,23 +69,86 @@ class PlaybackService : MediaSessionService() {
             .build()
         exoPlayer.addListener(object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: androidx.media3.common.MediaItem?, reason: Int) {
-                retriedMediaId = null
+                val mediaId = mediaItem?.mediaId
+                if (selectedMediaId != mediaId) {
+                    selectedMediaId = mediaId
+                    retriedMediaId = null
+                    graph.player.clearJaPlaybackFailure()
+                }
                 saveProgress(exoPlayer)
+            }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState != Player.STATE_READY) return
+                graph.player.clearJaPlaybackFailure()
+                if (exoPlayer.duration <= 0) return
+                val trackId = exoPlayer.currentMediaItem?.mediaMetadata?.extras?.getLong(EXTRA_TRACK_ID) ?: return
+                if (trackId <= 0) return
+                val duration = exoPlayer.duration
+                scope.launch {
+                    if (graph.db.japaneseAsmr().mediaForTrack(trackId) != null) {
+                        graph.db.tracks().fillDuration(trackId, duration)
+                        graph.db.japaneseAsmr().fillDuration(trackId, duration)
+                    }
+                }
             }
 
             override fun onPlayerError(error: PlaybackException) {
                 val item = exoPlayer.currentMediaItem ?: return
                 val uri = item.localConfiguration?.uri
                 val scheme = uri?.scheme
-                if ((scheme == "bilibili" || scheme == "asmr" || scheme == "dlsite" || scheme == "remote") &&
+                fun reportJaFailure(reason: JaFailure) {
+                    val queueId = item.mediaId.toLongOrNull() ?: return
+                    val postId = uri?.getQueryParameter("post")?.takeIf { it.isNotEmpty() && it.all { char -> char in '0'..'9' } }
+                    graph.player.reportJaPlaybackFailure(JaPlaybackFailure(queueId, reason, postId, uri?.getQueryParameter("media")))
+                }
+                if (item.mediaMetadata.extras?.getBoolean(EXTRA_JA_LOCAL_COPY) == true &&
+                    generateSequence<Throwable>(error) { it.cause }.any { it is JaLocalCopyLost }
+                ) {
+                    if (retriedMediaId == item.mediaId) {
+                        reportJaFailure(JaFailure.MEDIA)
+                    } else {
+                        retriedMediaId = item.mediaId
+                        scope.launch {
+                            if (!graph.player.recoverJaLocalCopy(exoPlayer, item) &&
+                                exoPlayer.currentMediaItem?.let { it.mediaId == item.mediaId && it.localConfiguration?.uri == uri } == true
+                            ) reportJaFailure(JaFailure.MEDIA)
+                        }
+                    }
+                    return
+                }
+                val changed = generateSequence<Throwable>(error) { it.cause }.filterIsInstance<JaMediaKindChanged>().firstOrNull()
+                if (changed != null && uri != null) {
+                    val index = exoPlayer.currentMediaItemIndex
+                    val position = exoPlayer.currentPosition.coerceAtLeast(0L)
+                    val address = uri.buildUpon().clearQuery().apply {
+                        for (key in uri.queryParameterNames - "kind") appendQueryParameter(key, uri.getQueryParameter(key))
+                        appendQueryParameter("kind", changed.kind.name)
+                    }.build()
+                    exoPlayer.replaceMediaItem(index, item.buildUpon().setUri(address)
+                        .setMimeType(MimeTypes.APPLICATION_M3U8.takeIf { changed.kind == JaMediaKind.HLS }).build())
+                    exoPlayer.seekTo(index, position)
+                    exoPlayer.prepare()
+                    return
+                }
+                val jaError = generateSequence<Throwable>(error) { it.cause }.filterIsInstance<JapaneseAsmrException>().firstOrNull()
+                val invalid = jaError?.failure
+                if (jaError?.isJapaneseTerminalError() == true) {
+                    reportJaFailure(jaError.failure)
+                    return
+                }
+                if ((scheme == "bilibili" || scheme == "asmr" || scheme == "dlsite" || scheme == "remote" || scheme == "japaneseasmr") &&
                     retriedMediaId != item.mediaId
                 ) {
                     retriedMediaId = item.mediaId
+                    if (scheme == "japaneseasmr") uri?.getQueryParameter("post")?.let(graph.japaneseAsmr::invalidate)
                     val index = exoPlayer.currentMediaItemIndex
                     val position = exoPlayer.currentPosition.coerceAtLeast(0L)
                     exoPlayer.seekTo(index, position)
                     exoPlayer.prepare()
                     exoPlayer.playWhenReady = true
+                } else if (scheme == "japaneseasmr" || invalid != null) {
+                    reportJaFailure(invalid ?: JaFailure.MEDIA)
                 } else {
                     graph.messages.value = playbackErrorMessage(error)
                 }
@@ -77,7 +159,7 @@ class PlaybackService : MediaSessionService() {
         session = MediaSession.Builder(this, exoPlayer).build()
         subtitles = PlaybackSubtitles(
             this, scope, exoPlayer, graph.currentSubtitles, graph.subtitleDisplay,
-            onDesktopUnavailable = { graph.messages.value = "无法显示桌面字幕，请检查悬浮窗权限" },
+            onDesktopUnavailable = { graph.show(R.string.player_error_desktop_overlay) },
         )
         // 恢复异步化：DB 读取与逐条 content: 探测不再阻塞主线程。
         // 应用与 PlayerClient 共用 queueMutex，并在锁内重读快照，避免覆盖抢先的队列操作。
@@ -93,7 +175,7 @@ class PlaybackService : MediaSessionService() {
                 withContext(Dispatchers.IO) { rows.map { it.toMediaItem(this@PlaybackService) } }
             } catch (error: Exception) {
                 restorePending = false
-                graph.messages.value = error.message ?: "无法恢复上次播放"
+                graph.showRaw(playbackErrorDetail(error, ::resolve) ?: getString(R.string.player_error_restore))
                 return@launch
             }
             try {
@@ -121,7 +203,34 @@ class PlaybackService : MediaSessionService() {
                 throw cancelled
             } catch (error: Exception) {
                 restorePending = false
-                graph.messages.value = error.message ?: "无法恢复上次播放"
+                graph.showRaw(playbackErrorDetail(error, ::resolve) ?: getString(R.string.player_error_restore))
+            }
+        }
+        scope.launch {
+            combine(graph.db.queue().observe(), graph.downloads.observe()) { rows, _ ->
+                withContext(Dispatchers.IO) {
+                    rows.filter { it.source == TrackSource.JAPANESE_ASMR }
+                        .associate { it.queueItemId to it.toMediaItem(this@PlaybackService) }
+                }
+            }.distinctUntilChanged().collect { replacements ->
+                graph.player.withQueueLock {
+                    for (index in 0 until exoPlayer.mediaItemCount) {
+                        val old = exoPlayer.getMediaItemAt(index)
+                        val item = replacements[old.mediaId.toLongOrNull()] ?: continue
+                        if (old.localConfiguration?.uri == item.localConfiguration?.uri &&
+                            old.localConfiguration?.mimeType == item.localConfiguration?.mimeType
+                        ) continue
+                        val current = index == exoPlayer.currentMediaItemIndex
+                        val position = exoPlayer.currentPosition
+                        val requestedPlay = exoPlayer.playWhenReady
+                        exoPlayer.replaceMediaItem(index, item)
+                        if (current) {
+                            exoPlayer.seekTo(index, position)
+                            if (exoPlayer.playbackState == Player.STATE_IDLE) exoPlayer.prepare()
+                            exoPlayer.playWhenReady = requestedPlay
+                        }
+                    }
+                }
             }
         }
         scope.launch {
@@ -165,12 +274,15 @@ class PlaybackService : MediaSessionService() {
         super.onDestroy()
     }
 
-    private fun playbackErrorMessage(error: PlaybackException): String {
-        val detail = generateSequence<Throwable>(error) { it.cause }
-            .mapNotNull { it.message?.trim() }
-            .lastOrNull { it.isNotBlank() && !it.contains("Source error") && !it.startsWith("androidx.media3") }
-        return detail ?: "播放失败，请检查网络或作品是否还能打开"
+    private fun Throwable.isJapaneseTerminalError() = generateSequence(this) { it.cause }.any {
+        it is JaMediaKindChanged || it is JapaneseAsmrException && it.failure in setOf(
+            JaFailure.VERIFY, JaFailure.MEDIA_VERIFY, JaFailure.MISSING, JaFailure.GONE,
+            JaFailure.MEDIA_GONE, JaFailure.WORK_FILE_MISSING, JaFailure.REOPEN, JaFailure.UNSAFE,
+        )
     }
+
+    private fun playbackErrorMessage(error: PlaybackException): String =
+        playbackErrorDetail(error, ::resolve) ?: getString(R.string.player_error_playback)
 
     private fun saveProgress(exoPlayer: ExoPlayer) {
         // 恢复未应用前播放器为空，(-1, 0) 复位信号不能覆盖库里的上次播放状态。
@@ -185,3 +297,12 @@ class PlaybackService : MediaSessionService() {
         scope.launch(saveDispatcher) { db.queue().savePlayback(state) }
     }
 }
+
+internal fun playbackErrorDetail(error: Throwable, resolve: (TextRef) -> String): String? =
+    generateSequence(error) { it.cause }
+        .mapNotNull { (it as? UserFacingError)?.userText ?: it.message?.let(TextRef::Raw) }
+        .map { resolve(it).trim() }
+        .lastOrNull {
+            it.isNotEmpty() && "://" !in it && "res:#" !in it &&
+                "Source error" !in it && !it.startsWith("androidx.media3")
+        }

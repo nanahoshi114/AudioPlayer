@@ -1,5 +1,8 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.R
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.text.UserFacingError
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.json.*
 import okhttp3.*
@@ -18,7 +21,12 @@ internal data class AppRelease(val tag: String, val versionName: String?) {
     // 发布页由固定仓库和 tag 生成，不使用附件下载地址。
     val pageUrl: String get() = APP_RELEASES_URL.toHttpUrl().newBuilder().addPathSegment("tag").addPathSegment(tag).build().toString()
 }
-internal class AppUpdateException(message: String) : IOException(message)
+internal class AppUpdateException(
+    override val userText: TextRef,
+    cause: Throwable? = null,
+) : IOException(userText.debugString(), cause), UserFacingError {
+    constructor(message: String) : this(TextRef.Raw(message))
+}
 internal enum class UpdateRelation { AVAILABLE, CURRENT, LOCAL_NEWER, UNKNOWN }
 
 /** 按数字段比较，省略的段按 0，支持 v 前缀、预发布和构建标识。 */
@@ -67,20 +75,20 @@ internal fun updateRelation(currentVersion: String, release: AppRelease): Update
 
 internal fun parseAndroidRelease(raw: String): AppRelease {
     val releases = try { Json.parseToJsonElement(raw) as? JsonArray } catch (_: Exception) { null }
-        ?: throw AppUpdateException("发布信息无法读取，请稍后重试或打开发布页")
+        ?: throw AppUpdateException(TextRef.Res(R.string.update_read_failed))
     val root = releases.mapNotNull { it as? JsonObject }.firstOrNull { release ->
         val tag = (release["tag_name"] as? JsonPrimitive)?.contentOrNull.orEmpty()
         tag.startsWith(ANDROID_RELEASE_PREFIX) &&
             (release["draft"] as? JsonPrimitive)?.contentOrNull != "true" &&
             (release["prerelease"] as? JsonPrimitive)?.contentOrNull != "true"
-    } ?: throw AppUpdateException("没有找到 Android 发布，请打开发布页查看")
+    } ?: throw AppUpdateException(TextRef.Res(R.string.update_no_android_release))
     fun value(key: String) = (root[key] as? JsonPrimitive)?.contentOrNull.orEmpty()
     val apk = (root["assets"] as? JsonArray).orEmpty().any { item ->
         val asset = item as? JsonObject ?: return@any false
         (asset["name"] as? JsonPrimitive)?.contentOrNull?.endsWith(".apk", true) == true &&
             (asset["state"] as? JsonPrimitive)?.contentOrNull == "uploaded"
     }
-    if (!apk) throw AppUpdateException("最新 Android 发布尚未提供 APK，请打开发布页查看")
+    if (!apk) throw AppUpdateException(TextRef.Res(R.string.update_no_apk))
     val tag = value("tag_name").trim()
     val version = listOf(tag.removePrefix(ANDROID_RELEASE_PREFIX), value("name"))
         .firstOrNull { AppVersionNumber.parse(it) != null }
@@ -100,22 +108,22 @@ internal class AppUpdateClient(http: OkHttpClient = OkHttpClient()) {
         continuation.invokeOnCancellation { call.cancel() }
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                if (continuation.isActive) continuation.resumeWithException(AppUpdateException("检查更新失败，请检查网络后重试"))
+                if (continuation.isActive) continuation.resumeWithException(AppUpdateException(TextRef.Res(R.string.update_check_network_failed)))
             }
             override fun onResponse(call: Call, response: Response) {
                 try {
                     val release = response.use {
-                        if (!it.isSuccessful) throw AppUpdateException(when {
-                            it.code == 429 || (it.code == 403 && it.header("X-RateLimit-Remaining") == "0") -> "检查更新次数过多，请稍后重试"
-                            it.code == 404 -> "未找到发布信息，请打开发布页查看"
-                            else -> "检查更新失败，请稍后重试或打开发布页"
-                        })
+                        if (!it.isSuccessful) throw AppUpdateException(TextRef.Res(when {
+                            it.code == 429 || (it.code == 403 && it.header("X-RateLimit-Remaining") == "0") -> R.string.update_rate_limited
+                            it.code == 404 -> R.string.update_not_found
+                            else -> R.string.update_check_failed
+                        }))
                         parseAndroidRelease(it.body?.string().orEmpty())
                     }
                     if (continuation.isActive) continuation.resume(release)
                 } catch (error: Exception) {
                     if (continuation.isActive) continuation.resumeWithException(
-                        if (error is AppUpdateException) error else AppUpdateException("发布信息无法读取，请稍后重试或打开发布页"))
+                        if (error is AppUpdateException) error else AppUpdateException(TextRef.Res(R.string.update_read_failed)))
                 }
             }
         })

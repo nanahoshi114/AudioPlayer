@@ -1,6 +1,13 @@
 package com.nanahoshi.audioplayer.ui.components
 
+import com.nanahoshi.audioplayer.R
+import androidx.compose.ui.res.stringResource
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -18,29 +25,47 @@ internal fun DeleteAudioDialog(
     val withSubtitles = subtitleCount > 0
     val mixed = associationCount > 0
     val message = buildList {
-        if (mixed) add("将删除 ${itemCount} 个下载副本，并取消 ${associationCount} 首曲目的本地关联。手机上的原文件会保留。")
+        if (mixed) {
+            add(stringResource(R.string.delete_dialog_message_downloads, itemCount, associationCount))
+        }
         if (withSubtitles) {
-            add("待删除的 ${itemCount} 个文件中，${subtitleCount} 个音频带有生成字幕。保留字幕后，重新下载同一音频时会自动匹配。")
-            add("生成的字幕文件也可在「设置 → 下载管理 → 字幕」中单独删除。")
+            add(
+                    if (mixed) stringResource(R.string.delete_dialog_subtitles_note, subtitleCount)
+                    else stringResource(R.string.delete_dialog_subtitles_note_with_files, itemCount, subtitleCount),
+                )
+            add(stringResource(R.string.delete_dialog_subtitles_only))
         } else if (!mixed) {
-            add("删除选中的 ${itemCount} 个文件？")
+            add(stringResource(R.string.delete_dialog_files_confirm, itemCount))
         }
     }.joinToString("\n\n")
     AlertDialog(
         onDismissRequest = onCancel,
-        title = { Text(if (mixed) "删除副本并取消本地关联" else if (withSubtitles) "音频带有生成字幕" else "删除文件") },
-        text = { Text(message) },
+        title = { Text(stringResource(
+            if (mixed) R.string.delete_dialog_title_mixed
+            else if (withSubtitles) R.string.delete_dialog_title_subtitles
+            else R.string.delete_dialog_title_files,
+        )) },
+        text = {
+            Text(
+                message,
+                modifier = Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState()),
+            )
+        },
         confirmButton = {
             TextButton(onClick = { onConfirm(true) }) {
-                Text(if (withSubtitles) "删除音频和字幕" else if (mixed) "确认" else "删除")
+                Text(stringResource(
+                    if (withSubtitles) R.string.delete_dialog_confirm_all
+                    else if (mixed) R.string.delete_dialog_confirm_copy
+                    else R.string.delete_dialog_confirm_delete,
+                ))
             }
         },
         dismissButton = {
             Row {
                 if (withSubtitles) TextButton(onClick = { onConfirm(false) }) {
-                    Text(if (mixed) "保留生成字幕" else "只删除音频")
+                    Text(stringResource(R.string.delete_dialog_keep_subtitles))
                 }
-                TextButton(onClick = onCancel) { Text("取消") }
+                TextButton(onClick = onCancel) { Text(stringResource(R.string.common_cancel)) }
             }
         },
     )

@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.ui.settings
 
+import com.nanahoshi.audioplayer.R
+import androidx.compose.ui.res.stringResource
 import android.app.Application
 import android.os.Build
 import androidx.compose.foundation.background
@@ -53,12 +55,14 @@ import com.nanahoshi.audioplayer.ui.theme.accentPreset
 
 private val supportsSystemAccent = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
 
+@Composable
 fun appearanceSummary(appearance: Appearance): String {
-    val mode = appearance.themeMode.label
+    val mode = stringResource(appearance.themeMode.labelRes)
     val accent = when (appearance.accentMode) {
-        AccentMode.SYSTEM -> if (supportsSystemAccent) "系统取色" else accentPreset("indigo").name
-        AccentMode.COVER -> "跟随封面"
-        AccentMode.PRESET -> accentPreset(appearance.presetId).name
+        AccentMode.SYSTEM -> if (supportsSystemAccent) stringResource(R.string.appearance_system_color)
+        else stringResource(accentPreset("indigo").nameRes)
+        AccentMode.COVER -> stringResource(R.string.appearance_follow_cover)
+        AccentMode.PRESET -> stringResource(accentPreset(appearance.presetId).nameRes)
     }
     return "$mode，$accent"
 }
@@ -71,9 +75,9 @@ fun AppearanceScreen(
 ) {
     val appearance by viewModel.state.collectAsStateWithLifecycle()
     Column(Modifier.fillMaxSize()) {
-        AppTopBar(title = "外观", onBack = onBack)
+        AppTopBar(title = stringResource(R.string.appearance_title), onBack = onBack)
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-            SectionHeader("主题模式")
+            SectionHeader(stringResource(R.string.appearance_theme_mode))
             SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
                 val modes = ThemeMode.entries
                 modes.forEachIndexed { index, mode ->
@@ -81,10 +85,10 @@ fun AppearanceScreen(
                         selected = appearance.themeMode == mode,
                         onClick = { viewModel.setThemeMode(mode) },
                         shape = SegmentedButtonDefaults.itemShape(index = index, count = modes.size),
-                    ) { Text(mode.label) }
+                    ) { Text(stringResource(mode.labelRes)) }
                 }
             }
-            SectionHeader("主题色")
+            SectionHeader(stringResource(R.string.appearance_theme_color))
             Surface(
                 shape = MaterialTheme.shapes.large,
                 color = MaterialTheme.colorScheme.surfaceContainer,
@@ -92,16 +96,19 @@ fun AppearanceScreen(
             ) {
                 Column {
                     AccentRow(
-                        title = "跟随系统取色",
-                        summary = if (supportsSystemAccent) "使用系统壁纸生成的颜色" else "当前系统不支持，暂用默认靛蓝（需要 Android 12 及以上）",
+                        title = stringResource(R.string.appearance_system_accent),
+                        summary = stringResource(
+                            if (supportsSystemAccent) R.string.appearance_system_accent_supported
+                            else R.string.appearance_system_accent_unsupported,
+                        ),
                         selected = appearance.accentMode == AccentMode.SYSTEM,
                         enabled = supportsSystemAccent,
                         onClick = viewModel::useSystemAccent,
                     )
                     HorizontalDivider()
                     AccentRow(
-                        title = "跟随当前播放封面",
-                        summary = "播放时随封面变化；封面没有明显颜色时保持上一次的颜色",
+                        title = stringResource(R.string.appearance_cover_accent),
+                        summary = stringResource(R.string.appearance_cover_accent_summary),
                         selected = appearance.accentMode == AccentMode.COVER,
                         enabled = true,
                         onClick = viewModel::useCoverAccent,
@@ -109,7 +116,7 @@ fun AppearanceScreen(
                 }
             }
             Text(
-                "自选颜色",
+                stringResource(R.string.appearance_custom_color),
                 style = MaterialTheme.typography.titleSmall,
                 modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 12.dp),
             )
@@ -121,7 +128,7 @@ fun AppearanceScreen(
                 AccentPresets.forEach { preset ->
                     Swatch(
                         color = preset.color,
-                        name = preset.name,
+                        name = stringResource(preset.nameRes),
                         selected = appearance.accentMode == AccentMode.PRESET && appearance.presetId == preset.id,
                         onClick = { viewModel.usePreset(preset.id) },
                     )
@@ -161,7 +168,7 @@ private fun Swatch(color: Color, name: String, selected: Boolean, onClick: () ->
             if (selected) {
                 Icon(
                     Icons.Default.Check,
-                    contentDescription = "已选择",
+                    contentDescription = stringResource(R.string.a11y_checked),
                     tint = if (color.luminance() > 0.5f) Color.Black else Color.White,
                 )
             }

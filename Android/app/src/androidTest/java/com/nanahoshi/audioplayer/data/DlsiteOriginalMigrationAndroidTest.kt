@@ -42,7 +42,7 @@ class DlsiteOriginalMigrationAndroidTest {
             old.version = 14
         }
         val migrated = Room.databaseBuilder(context, AppDatabase::class.java, name)
-            .addMigrations(AppDatabase.MIGRATION_14_15, AppDatabase.MIGRATION_15_16, AppDatabase.MIGRATION_16_17, AppDatabase.MIGRATION_17_18, AppDatabase.MIGRATION_18_19).build()
+            .addMigrations(AppDatabase.MIGRATION_14_15, AppDatabase.MIGRATION_15_16, AppDatabase.MIGRATION_16_17, AppDatabase.MIGRATION_17_18, AppDatabase.MIGRATION_18_19, AppDatabase.MIGRATION_19_20, AppDatabase.MIGRATION_20_21, AppDatabase.MIGRATION_21_22).build()
         val fresh = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
         try {
             val track = migrated.tracks().getById(1)!!
@@ -65,7 +65,7 @@ class DlsiteOriginalMigrationAndroidTest {
             assertNull(whisper.awaitFileKey)
             fun structure(db: AppDatabase): List<String> {
                 val sql = db.openHelper.writableDatabase
-                assertEquals(19, sql.version)
+                assertEquals(22, sql.version)
                 return buildList {
                     for (table in listOf("folders", "downloads", "library_files", "whisper_jobs", "dlsite_original_works", "dlsite_original_entries")) {
                         for (pragma in listOf("table_info", "index_list")) {

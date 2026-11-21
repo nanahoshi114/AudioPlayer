@@ -31,11 +31,21 @@ class BiliCollectionMigrationAndroidTest {
         seed.close()
         // Reconstruct the schema from before the collection and subtitle task migrations.
         SQLiteDatabase.openDatabase(context.getDatabasePath(name).path, null, SQLiteDatabase.OPEN_READWRITE).use {
+            it.execSQL("ALTER TABLE queue_items DROP COLUMN mediaKind")
+            it.execSQL("ALTER TABLE queue_items DROP COLUMN mediaPathHash")
+            it.execSQL("DROP TABLE japaneseasmr_download_entries")
+            it.execSQL("DROP TABLE japaneseasmr_download_packages")
+            it.execSQL("DROP TABLE japaneseasmr_download_works")
+            it.execSQL("ALTER TABLE downloads DROP COLUMN jaEntryKey")
+            it.execSQL("ALTER TABLE downloads DROP COLUMN jaReplace")
+            it.execSQL("ALTER TABLE downloads DROP COLUMN jaForce")
+            it.execSQL("DROP TABLE japaneseasmr_media")
+            it.execSQL("DROP TABLE japaneseasmr_posts")
             it.execSQL("DROP TABLE subtitle_publications")
             val addedColumns = mapOf(
-                "downloads" to listOf("workFolderId", "pendingBiliSubtitle"),
-                "whisper_jobs" to listOf("remoteSubmittedAt"),
-                "translation_jobs" to listOf("kind", "generatedFingerprint", "sourceFingerprint", "bvid", "cid", "localUri"),
+                "downloads" to listOf("workFolderId", "pendingBiliSubtitle", "progressSummary"),
+                "whisper_jobs" to listOf("remoteSubmittedAt", "progressSummary"),
+                "translation_jobs" to listOf("kind", "generatedFingerprint", "sourceFingerprint", "bvid", "cid", "localUri", "progressSummary"),
             )
             for ((table, columns) in addedColumns) {
                 for (column in columns) it.execSQL("ALTER TABLE $table DROP COLUMN $column")
@@ -47,7 +57,7 @@ class BiliCollectionMigrationAndroidTest {
             it.execSQL("CREATE UNIQUE INDEX index_bili_import_intents_batchId ON bili_import_intents (batchId)")
             it.version = 16
         }
-        val migrated = Room.databaseBuilder(context, AppDatabase::class.java, name).addMigrations(AppDatabase.MIGRATION_16_17, AppDatabase.MIGRATION_17_18, AppDatabase.MIGRATION_18_19).build()
+        val migrated = Room.databaseBuilder(context, AppDatabase::class.java, name).addMigrations(AppDatabase.MIGRATION_16_17, AppDatabase.MIGRATION_17_18, AppDatabase.MIGRATION_18_19, AppDatabase.MIGRATION_19_20, AppDatabase.MIGRATION_20_21, AppDatabase.MIGRATION_21_22).build()
         val fresh = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
         try {
             assertEquals(track, migrated.playlists().items(playlist).single().trackId)
@@ -57,7 +67,7 @@ class BiliCollectionMigrationAndroidTest {
             assertNull(migrated.translations().get(translation)?.kind)
             fun schema(database: AppDatabase): List<String> {
                 val sql = database.openHelper.writableDatabase
-                assertEquals(19, sql.version)
+                assertEquals(22, sql.version)
                 return buildList {
                     for (table in listOf("playlists", "playlist_items", "bili_collections", "bili_collection_videos",
                         "downloads", "whisper_jobs", "translation_jobs", "subtitle_publications")) {

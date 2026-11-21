@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.R
 import android.content.Context
 import com.k2fsa.sherpa.onnx.OfflineModelConfig
 import com.k2fsa.sherpa.onnx.OfflineNemoEncDecCtcModelConfig
@@ -165,6 +167,8 @@ internal fun selectStereoSpeech(
     return (if (leftEnergy >= rightEnergy) left else right).copyOfRange(startIndex, endIndex)
 }
 
+internal data class OfflineTranscriptionProgress(val processedMs: Long, val totalMs: Long?, val detail: TextRef)
+
 /** 本机转写：PCM 解码 → Silero VAD 按静音分段 → 逐段识别 → 拼回整首时间轴。 */
 internal class OfflineWhisperTranscriber(context: Context) {
     private val appContext = context.applicationContext
@@ -173,7 +177,7 @@ internal class OfflineWhisperTranscriber(context: Context) {
         manager: OfflineWhisperModelManager,
         file: File,
         totalDurationMs: Long,
-        onProgress: suspend (Float) -> Unit,
+        onProgress: suspend (OfflineTranscriptionProgress) -> Unit,
     ): List<WhisperCue> = withContext(Dispatchers.Default) {
         manager.useModel { modelFile, tokensFile ->
             val modelConfig = OfflineModelConfig(tokens = tokensFile.absolutePath, numThreads = 2, provider = "cpu")
@@ -204,9 +208,10 @@ internal class OfflineWhisperTranscriber(context: Context) {
         model: OfflineWhisperModel,
         file: File,
         totalDurationMs: Long,
-        onProgress: suspend (Float) -> Unit,
+        onProgress: suspend (OfflineTranscriptionProgress) -> Unit,
     ): List<WhisperCue> {
-        val totalSamples = (totalDurationMs * SAMPLE_RATE / 1000).coerceAtLeast(1L)
+        val totalSamples = (totalDurationMs * SAMPLE_RATE / 1000).coerceAtLeast(0L)
+        onProgress(OfflineTranscriptionProgress(0, totalDurationMs.takeIf { it > 0 }, TextRef.Res(R.string.progress_detail_decode)))
         val reader = AudioPcmReader(file, keepStereo = model == OfflineWhisperModel.Parakeet)
         try {
             return when (model) {
@@ -222,10 +227,11 @@ internal class OfflineWhisperTranscriber(context: Context) {
         reader: AudioPcmReader,
         recognizer: OfflineRecognizer,
         totalSamples: Long,
-        onProgress: suspend (Float) -> Unit,
+        onProgress: suspend (OfflineTranscriptionProgress) -> Unit,
     ): List<WhisperCue> {
         val vad = createVad()
         val cues = mutableListOf<WhisperCue>()
+        var processed = 0L
         try {
             suspend fun drain() {
                 while (!vad.empty()) {
@@ -233,6 +239,8 @@ internal class OfflineWhisperTranscriber(context: Context) {
                     vad.pop()
                     for ((startSample, samples) in splitLongSegment(segment.start, segment.samples, MAX_SEGMENT_SAMPLES)) {
                         coroutineContext.ensureActive()
+                        onProgress(OfflineTranscriptionProgress(processed * 1000 / SAMPLE_RATE,
+                            (totalSamples * 1000 / SAMPLE_RATE).takeIf { it > 0 }, TextRef.Res(R.string.progress_detail_recognize_segment)))
                         val result = recognize(recognizer, samples)
                         coroutineContext.ensureActive()
                         val startMs = startSample * 1000L / SAMPLE_RATE
@@ -246,7 +254,7 @@ internal class OfflineWhisperTranscriber(context: Context) {
                             }
                             cues += pieces.ifEmpty { listOf(WhisperCue(startMs, endMs, text)) }
                         }
-                        onProgress(((startSample + samples.size).toFloat() / totalSamples).coerceIn(0f, 1f))
+
                     }
                 }
             }
@@ -254,6 +262,9 @@ internal class OfflineWhisperTranscriber(context: Context) {
                 coroutineContext.ensureActive()
                 val chunk = reader.readChunk() ?: break
                 vad.acceptWaveform(chunk)
+                processed += chunk.size
+                onProgress(OfflineTranscriptionProgress(processed * 1000 / SAMPLE_RATE,
+                    (totalSamples * 1000 / SAMPLE_RATE).takeIf { it > 0 }, TextRef.Res(R.string.progress_detail_decode_voice)))
                 drain()
             }
             vad.flush()
@@ -283,7 +294,7 @@ internal class OfflineWhisperTranscriber(context: Context) {
         reader: AudioPcmReader,
         recognizer: OfflineRecognizer,
         totalSamples: Long,
-        onProgress: suspend (Float) -> Unit,
+        onProgress: suspend (OfflineTranscriptionProgress) -> Unit,
     ): List<WhisperCue> {
         val detectors = mutableListOf<Vad>()
         try {
@@ -316,14 +327,15 @@ internal class OfflineWhisperTranscriber(context: Context) {
                         channels[channel].copyInto(frame, endIndex = offset + count, startIndex = offset)
                         frame.fill(0f, fromIndex = count)
                         detectors[channel].compute(frame).also {
-                            if (!it.isFinite() || it !in 0f..1f) throw WhisperException("人声检测失败")
+                            if (!it.isFinite() || it !in 0f..1f) throw WhisperException(TextRef.Res(R.string.whisper_error_voice_detection))
                         }
                     }
                     segments.accept(probability, count, ready::addLast)
                     drain()
                 }
                 processed += channels[0].size
-                onProgress((processed.toFloat() / totalSamples).coerceIn(0f, 0.99f))
+                onProgress(OfflineTranscriptionProgress(processed * 1000 / SAMPLE_RATE,
+                    (totalSamples * 1000 / SAMPLE_RATE).takeIf { it > 0 }, TextRef.Res(R.string.progress_detail_decode_recognize)))
             }
             segments.finish(ready::addLast)
             drain()

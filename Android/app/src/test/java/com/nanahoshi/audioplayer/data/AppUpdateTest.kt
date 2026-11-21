@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.R
+import com.nanahoshi.audioplayer.text.TextRef
 import kotlinx.coroutines.*
 import okhttp3.*
 import okhttp3.ResponseBody.Companion.toResponseBody
@@ -118,14 +120,20 @@ class AppUpdateTest {
     }
 
     @Test fun httpErrorsKeepActionableMessagesWithoutLeakingResponseBody() = runBlocking {
-        for ((code, limited, word) in listOf(Triple(403, true, "次数过多"), Triple(429, false, "次数过多"), Triple(404, false, "未找到"), Triple(500, false, "失败"))) {
+        for ((code, limited, expected) in listOf(
+            Triple(403, true, R.string.update_rate_limited),
+            Triple(429, false, R.string.update_rate_limited),
+            Triple(404, false, R.string.update_not_found),
+            Triple(500, false, R.string.update_check_failed),
+        )) {
             val http = OkHttpClient.Builder().addInterceptor { chain ->
                 response(chain.request(), code, "Cookie=private-fixture".toResponseBody()).apply {
                     if (limited) header("X-RateLimit-Remaining", "0")
                 }.build()
             }.build()
             try { AppUpdateClient(http).latest(); fail() } catch (error: AppUpdateException) {
-                assertTrue(error.message!!.contains(word)); assertFalse(error.message!!.contains("private-fixture"))
+                assertEquals(TextRef.Res(expected), error.userText)
+                assertFalse(error.message!!.contains("private-fixture"))
             }
         }
     }

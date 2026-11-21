@@ -14,19 +14,24 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.content.pm.PackageInfoCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.data.*
 import com.nanahoshi.audioplayer.graph
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.text.asString
+import com.nanahoshi.audioplayer.text.userTextOr
 import com.nanahoshi.audioplayer.ui.components.AppTopBar
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 internal data class InstalledAppVersion(val name: String, val code: Long) {
-    val display get() = if (name.isBlank()) "未知版本" else name
+    val display get() = name
 }
 
 @Suppress("DEPRECATION")
@@ -40,7 +45,7 @@ internal sealed interface UpdateStatus {
     data object Idle : UpdateStatus
     data object Checking : UpdateStatus
     data class Ready(val release: AppRelease, val relation: UpdateRelation) : UpdateStatus
-    data class Failed(val message: String) : UpdateStatus
+    data class Failed(val message: TextRef) : UpdateStatus
 }
 
 class AboutViewModel(app: Application) : AndroidViewModel(app) {
@@ -57,7 +62,7 @@ class AboutViewModel(app: Application) : AndroidViewModel(app) {
                 status = UpdateStatus.Ready(release, updateRelation(current.name, release))
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (error: Exception) {
-                status = UpdateStatus.Failed(if (error is AppUpdateException) error.message.orEmpty() else "检查更新失败，请稍后重试")
+                status = UpdateStatus.Failed(error.userTextOr(R.string.about_check_failed))
             }
         }
     }
@@ -68,43 +73,43 @@ fun AboutScreen(onBack: () -> Unit, viewModel: AboutViewModel = viewModel()) {
     val context = LocalContext.current
     AboutContent(viewModel.current, viewModel.status, onBack, viewModel::checkUpdates) { page ->
         try { openReleaseInBrowser(context, page) }
-        catch (_: ActivityNotFoundException) { (context.applicationContext as Application).graph().messages.value = "没有可用的浏览器" }
-        catch (_: SecurityException) { (context.applicationContext as Application).graph().messages.value = "无法打开浏览器，请稍后重试" }
+        catch (_: ActivityNotFoundException) { (context.applicationContext as Application).graph().show(R.string.about_no_browser) }
+        catch (_: SecurityException) { (context.applicationContext as Application).graph().show(R.string.about_open_browser_failed) }
     }
 }
 
 @Composable
 internal fun AboutContent(current: InstalledAppVersion, status: UpdateStatus, onBack: () -> Unit, onCheck: () -> Unit, onOpenPage: (String) -> Unit) {
     Column(Modifier.fillMaxSize()) {
-        AppTopBar(title = "关于", onBack = onBack)
+        AppTopBar(title = stringResource(R.string.about_title), onBack = onBack)
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("音频播放器", style = MaterialTheme.typography.headlineSmall)
-                    Text("版本 ${current.display}（构建 ${current.code}）", style = MaterialTheme.typography.bodyLarge)
+                    Text(stringResource(R.string.about_app_name), style = MaterialTheme.typography.headlineSmall)
+                    Text(stringResource(R.string.about_version, current.display.ifBlank { stringResource(R.string.about_unknown_version) }, current.code), style = MaterialTheme.typography.bodyLarge)
                 }
             }
             Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("版本更新", style = MaterialTheme.typography.titleMedium)
+                    Text(stringResource(R.string.about_update_section), style = MaterialTheme.typography.titleMedium)
                     when (status) {
-                        UpdateStatus.Idle -> Text("从 GitHub 检查最新正式版本")
-                        UpdateStatus.Checking -> { Text("正在检查更新…"); LinearProgressIndicator(Modifier.fillMaxWidth()) }
-                        is UpdateStatus.Failed -> Text(status.message, color = MaterialTheme.colorScheme.error)
+                        UpdateStatus.Idle -> Text(stringResource(R.string.about_update_idle))
+                        UpdateStatus.Checking -> { Text(stringResource(R.string.about_checking)); LinearProgressIndicator(Modifier.fillMaxWidth()) }
+                        is UpdateStatus.Failed -> Text(status.message.asString(), color = MaterialTheme.colorScheme.error)
                         is UpdateStatus.Ready -> {
                             Text(when (status.relation) {
-                                UpdateRelation.AVAILABLE -> "发现新版本 ${status.release.versionName}"
-                                UpdateRelation.CURRENT -> "当前已是最新版本"
-                                UpdateRelation.LOCAL_NEWER -> "本机版本比发布版本新"
-                                UpdateRelation.UNKNOWN -> "无法自动比较版本，请在发布页确认"
+                                UpdateRelation.AVAILABLE -> stringResource(R.string.about_available, status.release.versionName ?: "")
+                                UpdateRelation.CURRENT -> stringResource(R.string.about_current)
+                                UpdateRelation.LOCAL_NEWER -> stringResource(R.string.about_local_newer)
+                                UpdateRelation.UNKNOWN -> stringResource(R.string.about_unknown_relation)
                             }, style = MaterialTheme.typography.titleSmall)
-                            Text("最新发布：${status.release.versionName ?: status.release.tag}")
+                            Text(stringResource(R.string.about_latest_release, status.release.versionName ?: status.release.tag ?: ""))
                         }
                     }
-                    Button(onClick = onCheck, enabled = status != UpdateStatus.Checking, modifier = Modifier.fillMaxWidth()) { Text("检查更新") }
+                    Button(onClick = onCheck, enabled = status != UpdateStatus.Checking, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.about_check_action)) }
                     val page = (status as? UpdateStatus.Ready)?.release?.pageUrl ?: APP_RELEASES_URL
-                    OutlinedButton(onClick = { onOpenPage(page) }, modifier = Modifier.fillMaxWidth()) { Text("在浏览器打开发布页") }
-                    Text("请在浏览器的发布页下载 APK 并安装。", style = MaterialTheme.typography.bodySmall)
+                    OutlinedButton(onClick = { onOpenPage(page) }, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.about_open_page)) }
+                    Text(stringResource(R.string.about_install_note), style = MaterialTheme.typography.bodySmall)
                 }
             }
         }
@@ -122,7 +127,7 @@ private fun openReleaseInBrowser(context: Context, page: String) {
     fun intent(pkg: String) = Intent(Intent.ACTION_VIEW, Uri.parse(page)).addCategory(Intent.CATEGORY_BROWSABLE).setPackage(pkg)
     if (preferred != null || browsers.size == 1) context.startActivity(intent(preferred ?: browsers.single()))
     else {
-        val chooser = Intent.createChooser(intent(browsers.first()), "选择浏览器")
+        val chooser = Intent.createChooser(intent(browsers.first()), context.getString(R.string.about_browser_chooser))
             .putExtra(Intent.EXTRA_INITIAL_INTENTS, browsers.drop(1).map(::intent).toTypedArray())
         context.startActivity(chooser)
     }

@@ -59,7 +59,8 @@ internal suspend fun deleteLocalCopies(
                         LocalRemoval.DOWNLOAD -> {
                             if (!File(path).delete()) return@withTransaction
                             if (deleteSubtitles) subtitles.discardStoredLocked(track.id, path, track.remoteUrl)
-                            db.downloads().deleteFinishedForPath(path)
+                            if (db.jaDownloads().entryForTrack(track.id) != null) db.jaDownloads().clearPath(path)
+                            else db.downloads().deleteFinishedForPath(path)
                             if (track.source == TrackSource.BILIBILI) deleteBiliSubtitle(filesDir, track.bvid, track.cid)
                             deleted++
                         }
@@ -67,7 +68,7 @@ internal suspend fun deleteLocalCopies(
                         null -> return@withTransaction
                     }
                     db.tracks().clearLocalUri(track.id)
-                    db.downloads().deleteFinishedForTrack(track.id)
+                    if (db.jaDownloads().entryForTrack(track.id) == null) db.downloads().deleteFinishedForTrack(track.id)
                 }
             }
         }

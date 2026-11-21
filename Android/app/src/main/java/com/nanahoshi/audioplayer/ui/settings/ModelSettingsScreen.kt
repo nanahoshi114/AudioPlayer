@@ -1,5 +1,9 @@
 package com.nanahoshi.audioplayer.ui.settings
 
+import com.nanahoshi.audioplayer.text.asString
+import com.nanahoshi.audioplayer.data.whisperModelLabelRes
+import com.nanahoshi.audioplayer.R
+import androidx.compose.ui.res.stringResource
 import android.app.Application
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -81,16 +85,16 @@ fun ModelSettingsScreen(
         TranslateHelpDialog(onDismiss = { translateHelp = false })
     }
     Column(Modifier.fillMaxSize()) {
-        AppTopBar(title = "听写和翻译", onBack = onBack)
+        AppTopBar(title = stringResource(R.string.settings_whisper_translate_title), onBack = onBack)
         LazyColumn(Modifier.fillMaxSize().imePadding().padding(horizontal = 16.dp), contentPadding = PaddingValues(bottom = 24.dp)) {
             item(key = "whisper") {
                 Row(
                     Modifier.padding(top = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("听写", style = MaterialTheme.typography.titleMedium)
+                    Text(stringResource(R.string.settings_whisper_section), style = MaterialTheme.typography.titleMedium)
                     IconButton(onClick = { whisperHelp = true }) {
-                        Icon(Icons.AutoMirrored.Outlined.HelpOutline, contentDescription = "听写说明")
+                        Icon(Icons.AutoMirrored.Outlined.HelpOutline, contentDescription = stringResource(R.string.a11y_whisper_help))
                     }
                 }
                 WhisperModelField(
@@ -111,13 +115,13 @@ fun ModelSettingsScreen(
                     Button(
                         onClick = viewModel::saveWhisper,
                         modifier = Modifier.padding(top = 8.dp),
-                    ) { Text("保存") }
+                    ) { Text(stringResource(R.string.common_save)) }
                 } else {
                     if (!isCloudWhisperModel(viewModel.whisperModel)) {
                         OutlinedTextField(
                             value = viewModel.whisperBase,
                             onValueChange = { viewModel.whisperBase = it },
-                            label = { Text("地址") },
+                            label = { Text(stringResource(R.string.settings_address_label)) },
                             singleLine = true,
                             supportingText = whisperAddressHint(viewModel.whisperModel),
                             modifier = Modifier.fillMaxWidth(),
@@ -135,8 +139,8 @@ fun ModelSettingsScreen(
                         Modifier.fillMaxWidth().padding(top = 8.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        Button(onClick = viewModel::saveWhisper) { Text("保存") }
-                        TextButton(onClick = viewModel::clearWhisper) { Text("清除") }
+                        Button(onClick = viewModel::saveWhisper) { Text(stringResource(R.string.common_save)) }
+                        TextButton(onClick = viewModel::clearWhisper) { Text(stringResource(R.string.settings_clear)) }
                     }
                     SaveStatus(viewModel.whisperModified, viewModel.whisperSaved)
                 }
@@ -146,9 +150,9 @@ fun ModelSettingsScreen(
                     Modifier.padding(top = 20.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("翻译", style = MaterialTheme.typography.titleMedium)
+                    Text(stringResource(R.string.settings_translate_section), style = MaterialTheme.typography.titleMedium)
                     IconButton(onClick = { translateHelp = true }) {
-                        Icon(Icons.AutoMirrored.Outlined.HelpOutline, contentDescription = "翻译说明")
+                        Icon(Icons.AutoMirrored.Outlined.HelpOutline, contentDescription = stringResource(R.string.a11y_translate_help))
                     }
                 }
                 TranslatePlatformField(
@@ -166,8 +170,8 @@ fun ModelSettingsScreen(
                 OutlinedTextField(
                     value = viewModel.translateModel,
                     onValueChange = { viewModel.translateModel = it },
-                    label = { Text("模型名（可选）") },
-                    supportingText = { Text("留空使用 ${viewModel.translatePlatform.defaultModel}") },
+                    label = { Text(stringResource(R.string.settings_model_name_optional)) },
+                    supportingText = { Text(stringResource(R.string.settings_model_default_hint, viewModel.translatePlatform.defaultModel)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                 )
@@ -175,14 +179,14 @@ fun ModelSettingsScreen(
                     Modifier.fillMaxWidth().padding(top = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("深度思考", modifier = Modifier.weight(1f))
+                    Text(stringResource(R.string.settings_deep_thinking), modifier = Modifier.weight(1f))
                     Switch(
                         checked = viewModel.translateThinking,
                         onCheckedChange = viewModel::setThinking,
                     )
                 }
                 if (viewModel.translateThinking) {
-                    Text("思考强度", modifier = Modifier.padding(top = 4.dp))
+                    Text(stringResource(R.string.settings_thinking_effort), modifier = Modifier.padding(top = 4.dp))
                     viewModel.translatePlatform.efforts.forEach { effort ->
                         Row(
                             Modifier
@@ -199,7 +203,7 @@ fun ModelSettingsScreen(
                                 selected = effort.value == viewModel.translateEffort,
                                 onClick = null,
                             )
-                            Text(effort.label, modifier = Modifier.padding(start = 8.dp))
+                            Text(stringResource(effort.labelRes), modifier = Modifier.padding(start = 8.dp))
                         }
                     }
                 }
@@ -207,7 +211,7 @@ fun ModelSettingsScreen(
                     Modifier.fillMaxWidth().padding(top = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("翻译后自动润色", modifier = Modifier.weight(1f))
+                    Text(stringResource(R.string.settings_auto_polish), modifier = Modifier.weight(1f))
                     Switch(
                         checked = viewModel.translateAutoPolish,
                         onCheckedChange = viewModel::setAutoPolish,
@@ -217,14 +221,14 @@ fun ModelSettingsScreen(
                     Modifier.fillMaxWidth().padding(top = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("翻译调优", modifier = Modifier.weight(1f))
+                    Text(stringResource(R.string.settings_translate_tuning), modifier = Modifier.weight(1f))
                     Switch(
                         checked = viewModel.translateAutoCorrect,
                         onCheckedChange = viewModel::setAutoCorrect,
                     )
                 }
                 Text(
-                    "打开后，日文合并超出条数、时长或字数限制时，会让模型修正一次再交付；关闭则直接交付。每批最多两次请求。",
+                    stringResource(R.string.settings_translate_tuning_help),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -232,8 +236,8 @@ fun ModelSettingsScreen(
                     Modifier.fillMaxWidth().padding(top = 8.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Button(onClick = viewModel::saveTranslate) { Text("保存") }
-                    TextButton(onClick = viewModel::clearTranslate) { Text("清除") }
+                    Button(onClick = viewModel::saveTranslate) { Text(stringResource(R.string.common_save)) }
+                    TextButton(onClick = viewModel::clearTranslate) { Text(stringResource(R.string.settings_clear)) }
                 }
                 SaveStatus(viewModel.translateModified, viewModel.translateSaved)
             }
@@ -245,9 +249,9 @@ fun ModelSettingsScreen(
 private fun SaveStatus(modified: Boolean, configured: Boolean) {
     Text(
         when {
-            modified -> "有未保存的修改"
-            configured -> "已保存"
-            else -> "未配置"
+            modified -> stringResource(R.string.settings_unsaved)
+            configured -> stringResource(R.string.settings_saved)
+            else -> stringResource(R.string.settings_unconfigured)
         },
         style = MaterialTheme.typography.bodySmall,
         color = if (modified) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -318,17 +322,17 @@ class ModelSettingsViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 if (!graph.whisper.deleteOfflineModel(model)) {
-                    graph.messages.value = "${whisperModelLabel(model.id)} 正在使用，请先中止对应任务，等当前片段结束后再删除"
+                    graph.show(R.string.settings_model_in_use, whisperModelLabel(getApplication<Application>(), model.id))
                 }
             } catch (error: com.nanahoshi.audioplayer.data.WhisperException) {
-                graph.messages.value = error.message
+                graph.show(error.userText)
             }
         }
     }
 
     internal fun downloadOfflineModel(model: OfflineWhisperModel, source: ModelDownloadSource) {
         if (!OfflineModelDownloadService.start(getApplication(), model, source)) {
-            graph.messages.value = "无法启动后台模型下载，请回到设置页重试"
+            graph.show(R.string.settings_model_start_failed)
         }
     }
 
@@ -397,10 +401,10 @@ private fun WhisperModelField(model: String, onModel: (String) -> Unit) {
         modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
     ) {
         OutlinedTextField(
-            value = whisperModelLabel(model),
+            value = stringResource(whisperModelLabelRes(model) ?: R.string.settings_model_sensevoice),
             onValueChange = {},
             readOnly = true,
-            label = { Text("模型") },
+            label = { Text(stringResource(R.string.settings_model_label)) },
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
             modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable).fillMaxWidth(),
         )
@@ -415,7 +419,7 @@ private fun WhisperModelField(model: String, onModel: (String) -> Unit) {
                 PARAKEET_MODEL,
             ).forEach { id ->
                 DropdownMenuItem(
-                    text = { Text(whisperModelLabel(id)) },
+                    text = { Text(stringResource(whisperModelLabelRes(id) ?: R.string.settings_model_sensevoice)) },
                     onClick = {
                         onModel(id)
                         expanded = false
@@ -437,10 +441,10 @@ private fun TranslatePlatformField(platform: TranslatePlatform, onPlatform: (Tra
         modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
     ) {
         OutlinedTextField(
-            value = platform.label,
+            value = stringResource(platform.labelRes),
             onValueChange = {},
             readOnly = true,
-            label = { Text("平台") },
+            label = { Text(stringResource(R.string.settings_platform_label)) },
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
             modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable).fillMaxWidth(),
         )
@@ -450,7 +454,7 @@ private fun TranslatePlatformField(platform: TranslatePlatform, onPlatform: (Tra
         ) {
             TranslatePlatform.entries.forEach { item ->
                 DropdownMenuItem(
-                    text = { Text(item.label) },
+                    text = { Text(stringResource(item.labelRes)) },
                     onClick = {
                         onPlatform(item)
                         expanded = false
@@ -464,7 +468,7 @@ private fun TranslatePlatformField(platform: TranslatePlatform, onPlatform: (Tra
 
 private fun whisperAddressHint(model: String): (@Composable () -> Unit)? = when (model) {
     WHISPER_MODEL_QWEN3 -> {
-        { Text("需要填写服务地址") }
+        { Text(stringResource(R.string.settings_base_required)) }
     }
     else -> null
 }
@@ -491,12 +495,12 @@ private fun OfflineModelPanel(
     when (state) {
         OfflineWhisperModelState.NotDownloaded -> Column {
             Text(
-                "模型未下载。安装占用约 ${model.installedMiB} MiB，安装后可离线听写。",
+                stringResource(R.string.settings_model_not_downloaded, model.installedMiB),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Button(onClick = { sourceDialog = true }, modifier = Modifier.padding(top = 8.dp)) {
-                Text("下载模型")
+                Text(stringResource(R.string.settings_download_model))
             }
         }
         is OfflineWhisperModelState.Downloading -> Column {
@@ -510,13 +514,13 @@ private fun OfflineModelPanel(
                 modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
             )
             Text(
-                "${state.source.label}　${(fraction * 100).toInt()}%　${state.bytesDone / 1024 / 1024} / ${state.bytesTotal / 1024 / 1024} MiB",
+                "${state.source.label} · ${(fraction * 100).toInt()}% · ${state.bytesDone / 1024 / 1024} / ${state.bytesTotal / 1024 / 1024} MiB",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 4.dp),
             )
             TextButton(onClick = onCancel, modifier = Modifier.padding(top = 4.dp)) {
-                Text("取消下载")
+                Text(stringResource(R.string.settings_cancel_download))
             }
         }
         OfflineWhisperModelState.Ready -> {
@@ -526,18 +530,18 @@ private fun OfflineModelPanel(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    "模型已下载，在本机运行，不需要填写地址和口令。",
+                    stringResource(R.string.settings_model_downloaded),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.weight(1f),
                 )
-                TextButton(onClick = { confirmDelete = true }) { Text("删除模型") }
+                TextButton(onClick = { confirmDelete = true }) { Text(stringResource(R.string.settings_delete_model)) }
             }
             if (confirmDelete) {
                 ConfirmActionDialog(
-                    title = "删除本机模型",
-                    message = "删除 ${whisperModelLabel(model.id)} 后，需要重新下载才能用它离线听写。",
-                    confirmLabel = "删除",
+                    title = stringResource(R.string.settings_delete_model_title),
+                    message = stringResource(R.string.settings_delete_model_message, stringResource(whisperModelLabelRes(model.id) ?: R.string.settings_model_sensevoice)),
+                    confirmLabel = stringResource(R.string.common_delete),
                     onConfirm = { confirmDelete = false; onDelete() },
                     onDismiss = { confirmDelete = false },
                 )
@@ -545,12 +549,12 @@ private fun OfflineModelPanel(
         }
         is OfflineWhisperModelState.Failed -> Column {
             Text(
-                "下载失败：${state.message}",
+                stringResource(R.string.settings_download_failed, state.message.asString()),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.error,
             )
             Button(onClick = { sourceDialog = true }, modifier = Modifier.padding(top = 8.dp)) {
-                Text("重试")
+                Text(stringResource(R.string.common_retry))
             }
         }
     }
@@ -565,7 +569,7 @@ private fun ModelDownloadDialog(
     var source by rememberSaveable(model.id) { mutableStateOf(ModelDownloadSource.GitHub) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("选择模型下载来源") },
+        title = { Text(stringResource(R.string.settings_choose_model_source)) },
         text = {
             Column {
                 ModelDownloadSource.entries.forEach { option ->
@@ -581,7 +585,7 @@ private fun ModelDownloadDialog(
                         Column(Modifier.padding(start = 12.dp)) {
                             Text(option.label)
                             Text(
-                                "下载约 ${model.downloadMiB(option)} MiB · 安装约 ${model.installedMiB} MiB",
+                                stringResource(R.string.settings_model_size_summary, model.downloadMiB(option), model.installedMiB),
                                 style = MaterialTheme.typography.bodySmall,
                             )
                         }
@@ -589,8 +593,8 @@ private fun ModelDownloadDialog(
                 }
             }
         },
-        confirmButton = { TextButton(onClick = { onDownload(source) }) { Text("下载") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        confirmButton = { TextButton(onClick = { onDownload(source) }) { Text(stringResource(R.string.common_download)) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) } },
     )
 }
 
@@ -598,30 +602,30 @@ private fun ModelDownloadDialog(
 private fun WhisperHelpDialog(onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("听写") },
+        title = { Text(stringResource(R.string.settings_whisper_section)) },
         text = {
             Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
-                Text("选一个听写模型，填写对应内容后点「保存」。")
+                Text(stringResource(R.string.settings_whisper_help_intro))
                 Text(
-                    "qwen-audio-3.1-asr：线上模型，只填 API Key，地址固定不用管。",
+                    stringResource(R.string.settings_whisper_help_qwen_audio),
                     modifier = Modifier.padding(top = 8.dp),
                 )
                 Text(
-                    "Qwen3-ASR：自己部署的服务，填地址和 API Key（服务不校验时可随便填）。地址在局域网时，首次访问要允许本地网络。",
+                    stringResource(R.string.settings_whisper_help_qwen3),
                     modifier = Modifier.padding(top = 8.dp),
                 )
                 Text(
-                    "SenseVoiceSmall 和 Parakeet 0.6B 日语（CTC）：从 GitHub 或 Hugging Face 下载模型后，可在本机离线听写。",
+                    stringResource(R.string.settings_whisper_help_offline),
                     modifier = Modifier.padding(top = 8.dp),
                 )
                 Text(
-                    "用法：播放时点「生成字幕」只生成日文字幕，「生成字幕和翻译」会接着翻成中文。同一首用同一模型不会重复生成；换模型或地址会重新生成。",
+                    stringResource(R.string.settings_whisper_help_usage),
                     modifier = Modifier.padding(top = 8.dp),
                 )
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("关闭") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_close)) }
         },
     )
 }
@@ -630,22 +634,22 @@ private fun WhisperHelpDialog(onDismiss: () -> Unit) {
 private fun TranslateHelpDialog(onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("翻译") },
+        title = { Text(stringResource(R.string.settings_translate_section)) },
         text = {
             Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
-                Text("选一个平台，填入 API Key 后点「保存」。模型名可以留空：千问 AI 平台默认 qwen3.8-flash，DeepSeek 默认 deepseek-flash。")
+                Text(stringResource(R.string.settings_translate_help_intro))
                 Text(
-                    "深度思考一般不用打开；想要更细的译文时再打开，并选择思考强度。",
+                    stringResource(R.string.settings_translate_help_thinking),
                     modifier = Modifier.padding(top = 8.dp),
                 )
                 Text(
-                    "用法：在字幕全文里点「生成翻译」，已有译文时可以点「润色」。打开「翻译后自动润色」后，每次翻译完成会自动润色一遍。润色失败会保留原来的译文。",
+                    stringResource(R.string.settings_translate_help_usage),
                     modifier = Modifier.padding(top = 8.dp),
                 )
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("关闭") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_close)) }
         },
     )
 }

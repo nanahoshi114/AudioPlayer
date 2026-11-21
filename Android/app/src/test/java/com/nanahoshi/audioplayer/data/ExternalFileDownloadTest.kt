@@ -1,8 +1,10 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.data.db.FileKind
 import com.nanahoshi.audioplayer.dlsite.RemotePreview
 import com.nanahoshi.audioplayer.dlsite.SignedPlayFile
+import com.nanahoshi.audioplayer.text.TextRef
 import kotlinx.coroutines.*
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
@@ -15,6 +17,12 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 
 class ExternalFileDownloadTest {
+    @Test fun previewReportsClippingSeparatelyFromContent() {
+        assertEquals(RemoteTextPreview("abc"), "abc".byteInputStream().readRemoteTextPreview(3))
+        assertEquals(RemoteTextPreview("abc", clipped = true), "abcd".byteInputStream().readRemoteTextPreview(3))
+        assertEquals(RemoteTextPreview(""), "".byteInputStream().readRemoteTextPreview(3))
+    }
+
     @get:Rule val temp = TemporaryFolder()
     private fun preview(authed: Boolean = false) = RemotePreview("book.pdf", "https://stale.invalid/private", FileKind.OTHER,
         "https://play.dlsite.com/", authed, "RJ123456", "book.pdf")
@@ -99,7 +107,7 @@ class ExternalFileDownloadTest {
         val downloader = ExternalFileDownloader(client) { _, _ -> error("must not sign") }
         val failure = runCatching { downloader.download(preview(true).copy(workno = null), temp.newFile()) { _, _ -> } }.exceptionOrNull()
         assertTrue(failure is ExternalFileException)
-        assertEquals("请重新打开作品以获取文件授权", failure?.message)
+        assertEquals(TextRef.Res(R.string.external_file_reopen_work), (failure as ExternalFileException).userText)
         assertEquals(0, calls)
     }
 }

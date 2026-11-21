@@ -7,7 +7,7 @@ import kotlinx.coroutines.launch
 import okhttp3.Call
 
 class InflightCalls {
-    class Ticket internal constructor(val key: String, val token: Int)
+    class Ticket internal constructor(val key: String, val token: Int, val progress: TaskReporter? = null)
 
     private class Slot {
         var token: Int = 0
@@ -16,13 +16,13 @@ class InflightCalls {
 
     private val slots = HashMap<String, Slot>()
 
-    fun prepare(key: String): Ticket {
+    fun prepare(key: String, progress: TaskReporter? = null): Ticket {
         val (ticket, previous) = synchronized(slots) {
             val slot = slots.getOrPut(key) { Slot() }
             slot.token += 1
             val current = slot.call
             slot.call = null
-            Ticket(key, slot.token) to current
+            Ticket(key, slot.token, progress) to current
         }
         previous?.cancel()
         return ticket

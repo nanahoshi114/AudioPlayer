@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.R
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -150,14 +152,14 @@ class OfflineWhisperModelManagerTest {
         val message = "后台下载中断，请重试"
         try {
             assertTrue(entered.await(10, TimeUnit.SECONDS))
-            manager.cancelDownload(first, message)
-            manager.cancelDownload(second, "后台下载超时，请重试")
+            manager.cancelDownload(first, TextRef.Raw(message))
+            manager.cancelDownload(second, TextRef.Res(R.string.download_error_timeout))
             assertTrue(manager.state.value is OfflineWhisperModelState.Downloading)
         } finally {
             unblock.countDown()
         }
         withTimeout(10_000) { second.join() }
-        assertEquals(OfflineWhisperModelState.Failed("后台下载超时，请重试"), manager.state.value)
+        assertEquals(OfflineWhisperModelState.Failed(TextRef.Res(R.string.download_error_timeout)), manager.state.value)
         assertFalse(File(root.root, "${model.directory}-tmp").exists())
     }
 

@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.R
+import com.nanahoshi.audioplayer.text.TextRef
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -23,6 +25,7 @@ internal class QwenFileTranscriber(
     private val calls: InflightCalls,
 ) {
     private val http = OkHttpClient.Builder()
+        .eventListenerFactory(ProgressNetworkEvents.factory)
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(2, TimeUnit.MINUTES)
         .writeTimeout(30, TimeUnit.MINUTES)
@@ -37,21 +40,25 @@ internal class QwenFileTranscriber(
         submittedAt: Long?,
         onSubmitted: suspend (String, Long) -> Unit,
     ): List<WhisperCue> {
-        val origin = qwenHttpOrigin(base)?.toHttpUrlOrNull() ?: throw WhisperException("听写地址不正确")
+        val origin = qwenHttpOrigin(base)?.toHttpUrlOrNull() ?: throw WhisperException(TextRef.Res(R.string.whisper_error_invalid_base))
         val taskId = remoteId ?: run {
-            if (file.length() > QWEN_TEMP_BYTES) throw WhisperException("这首超过 1GB，千问接不了")
+            if (file.length() > QWEN_TEMP_BYTES) throw WhisperException(TextRef.Res(R.string.whisper_error_too_large))
+            ticket.progress?.phase(ProgressPhase.UPLOAD_POLICY)
             val key = upload(policy(origin, ticket, token), file, ticket)
+            ticket.progress?.phase(ProgressPhase.SUBMITTING)
             submit(origin, "oss://$key", ticket, token).also { id ->
                 onSubmitted(id, System.currentTimeMillis())
             }
         }
+        if (remoteId != null) ticket.progress?.phase(ProgressPhase.RESTORING_REMOTE)
         val now = System.currentTimeMillis()
         val remaining = QWEN_POLL_TIMEOUT_MS - (now - (submittedAt ?: now)).coerceAtLeast(0L)
         val resultUrl = if (remaining > 0) {
             withTimeoutOrNull(remaining) { poll(origin, taskId, ticket, token, singleQuery = false) }
         } else {
             withTimeoutOrNull(15_000L) { poll(origin, taskId, ticket, token, singleQuery = true) }
-        } ?: throw WhisperException("听写超时，请重试")
+        } ?: throw WhisperException(TextRef.Res(R.string.whisper_error_timeout))
+        ticket.progress?.phase(ProgressPhase.FETCHING_RESULT)
         val payload = download(resultUrl, ticket)
         return cuesFromQwenPayload(payload)
     }
@@ -65,13 +72,13 @@ internal class QwenFileTranscriber(
             .addQueryParameter("model", QWEN_FILE_MODEL)
             .build()
         val json = get(url, ticket, token)
-        return json.optJSONObject("data") ?: throw WhisperException("生成失败")
+        return json.optJSONObject("data") ?: throw WhisperException(TextRef.Res(R.string.whisper_error_failed))
     }
 
     private fun upload(policy: JSONObject, file: File, ticket: InflightCalls.Ticket): String {
-        val host = policy.optString("upload_host").toHttpUrlOrNull() ?: throw WhisperException("生成失败")
+        val host = policy.optString("upload_host").toHttpUrlOrNull() ?: throw WhisperException(TextRef.Res(R.string.whisper_error_failed))
         val dir = policy.optString("upload_dir").trim().trim('/')
-        if (dir.isEmpty()) throw WhisperException("生成失败")
+        if (dir.isEmpty()) throw WhisperException(TextRef.Res(R.string.whisper_error_failed))
         val header = file.inputStream().use { input ->
             val buffer = ByteArray(16)
             val count = input.read(buffer)
@@ -88,10 +95,10 @@ internal class QwenFileTranscriber(
             .addFormDataPart("x-oss-forbid-overwrite", policy.optString("x_oss_forbid_overwrite"))
             .addFormDataPart("key", key)
             .addFormDataPart("success_action_status", "200")
-            .addFormDataPart("file", name, file.asRequestBody(AUDIO.toMediaType()))
+            .addFormDataPart("file", name, file.asRequestBody(AUDIO.toMediaType()).withUploadProgress(ticket.progress))
             .build()
         execute(Request.Builder().url(host).post(body), ticket, authorize = false) { response ->
-            if (!response.isSuccessful) throw WhisperException("生成失败")
+            if (!response.isSuccessful) throw WhisperException(TextRef.Res(R.string.whisper_error_failed))
         }
         return key
     }
@@ -127,7 +134,7 @@ internal class QwenFileTranscriber(
         }
         val output = json.optJSONObject("output") ?: throw WhisperException(qwenErrorMessage(json.toString()))
         val id = output.optString("task_id")
-        if (id.isBlank()) throw WhisperException("生成失败")
+        if (id.isBlank()) throw WhisperException(TextRef.Res(R.string.whisper_error_failed))
         return id
     }
 
@@ -143,35 +150,44 @@ internal class QwenFileTranscriber(
         while (true) {
             val json = get(url, ticket, token)
             val output = json.optJSONObject("output") ?: throw WhisperException(qwenErrorMessage(json.toString()))
-            when (output.optString("task_status")) {
+            val status = output.optString("task_status")
+            ticket.progress?.phase(when (status) {
+                "PENDING" -> ProgressPhase.REMOTE_PENDING
+                "RUNNING" -> ProgressPhase.REMOTE_RUNNING
+                "UNKNOWN" -> ProgressPhase.REMOTE_UNKNOWN
+                "SUCCEEDED" -> ProgressPhase.FETCHING_RESULT
+                "FAILED" -> ProgressPhase.REMOTE_FAILED
+                else -> ProgressPhase.REMOTE_UNKNOWN
+            })
+            when (status) {
                 "PENDING", "RUNNING", "UNKNOWN" -> {
                     if (singleQuery) return null
                     delay(2_000)
                 }
                 "SUCCEEDED" -> {
                     val result = output.optJSONArray("results")?.optJSONObject(0)
-                        ?: throw WhisperException("生成失败")
+                        ?: throw WhisperException(TextRef.Res(R.string.whisper_error_failed))
                     if (result.optString("subtask_status") == "FAILED") {
-                        throw WhisperException(result.optString("message").takeIf { it.isNotBlank() }?.take(80) ?: "生成失败")
+                        throw WhisperException(result.optString("message").takeIf { it.isNotBlank() }?.take(80)?.let(TextRef::Raw) ?: TextRef.Res(R.string.whisper_error_failed))
                     }
                     return result.optString("transcription_url").takeIf { it.isNotBlank() }
-                        ?: throw WhisperException("生成失败")
+                        ?: throw WhisperException(TextRef.Res(R.string.whisper_error_failed))
                 }
                 else -> {
                     val result = output.optJSONArray("results")?.optJSONObject(0)
                     val message = result?.optString("message").takeIf { !it.isNullOrBlank() }
                         ?: output.optString("message").takeIf { it.isNotBlank() }
-                    throw WhisperException(message?.take(80) ?: "生成失败")
+                    throw WhisperException(message?.take(80)?.let(TextRef::Raw) ?: TextRef.Res(R.string.whisper_error_failed))
                 }
             }
         }
     }
 
     private fun download(url: String, ticket: InflightCalls.Ticket): String {
-        val parsed = url.toHttpUrlOrNull() ?: throw WhisperException("生成失败")
+        val parsed = url.toHttpUrlOrNull() ?: throw WhisperException(TextRef.Res(R.string.whisper_error_failed))
         return execute(Request.Builder().url(parsed).get(), ticket, authorize = false) { response ->
             val text = response.body?.string().orEmpty()
-            if (!response.isSuccessful) throw WhisperException("生成失败")
+            if (!response.isSuccessful) throw WhisperException(TextRef.Res(R.string.whisper_error_failed))
             text
         }
     }
@@ -188,7 +204,7 @@ internal class QwenFileTranscriber(
             }
         } catch (error: IOException) {
             kotlinx.coroutines.currentCoroutineContext().ensureActive()
-            throw WhisperException("无法连接听写服务")
+            throw WhisperException(TextRef.Res(R.string.whisper_error_connection))
         } finally {
             calls.end(ticket, call)
         }
@@ -202,10 +218,10 @@ internal class QwenFileTranscriber(
         read: (Response) -> T,
     ): T {
         if (authorize) {
-            if (token.isNullOrBlank()) throw WhisperException("没有听写口令")
+            if (token.isNullOrBlank()) throw WhisperException(TextRef.Res(R.string.whisper_error_missing_key))
             builder.header("Authorization", "Bearer $token")
         }
-        val call = http.newCall(builder.build())
+        val call = http.newCall(builder.taskProgress(ticket.progress, false).build())
         if (!calls.begin(ticket, call)) throw CancellationException()
         try {
             return call.execute().use(read)
@@ -213,7 +229,7 @@ internal class QwenFileTranscriber(
             throw error
         } catch (error: IOException) {
             if (call.isCanceled()) throw CancellationException()
-            throw WhisperException("无法连接听写服务")
+            throw WhisperException(TextRef.Res(R.string.whisper_error_connection))
         } finally {
             calls.end(ticket, call)
         }
@@ -222,7 +238,7 @@ internal class QwenFileTranscriber(
     private fun parseObject(text: String): JSONObject = try {
         JSONObject(text)
     } catch (_: Exception) {
-        throw WhisperException("生成失败")
+        throw WhisperException(TextRef.Res(R.string.whisper_error_failed))
     }
 
     private companion object {

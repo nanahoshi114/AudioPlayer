@@ -1,0 +1,25 @@
+<resources>
+    <!-- 剪贴板导入 -->
+    <string name="import_ja_verify_title">Japanese ASMR 需要验证</string>
+    <string name="import_found_title">找到作品，但没有可加入的来源</string>
+    <string name="import_confirm_title">加入音频库？</string>
+    <string name="import_already_saved_multi">已在音频库，可调整导入方式</string>
+    <string name="import_already_saved">已在音频库</string>
+    <string name="import_no_source">没有有效来源，无法加入音频库</string>
+    <string name="import_importing">正在加入音频库…</string>
+    <string name="import_view_details">查看详情页</string>
+    <string name="import_choose_mode">选择导入方式</string>
+    <string name="import_action">加入音频库</string>
+    <string name="clipboard_source_bilibili">B 站</string>
+    <string name="clipboard_source_asmr">asmr.one</string>
+    <string name="clipboard_source_youtube">YouTube</string>
+    <string name="clipboard_source_japanese_asmr">Japanese ASMR</string>
+    <string name="clipboard_no_work">没有找到这部作品</string>
+    <string name="clipboard_dlsite_login_expired">DLsite 登录已失效，请重新登录</string>
+    <string name="clipboard_ja_read_failed">Japanese ASMR 篇目读取失败，请重试</string>
+    <string name="clipboard_ja_prefix">Japanese ASMR：%1$s</string>
+    <string name="clipboard_asmr_connection_failed">无法连接 asmr.one 或 DLsite，请检查网络后重试</string>
+    <string name="clipboard_bilibili_read_failed">B 站视频读取失败，请检查网络后重试</string>
+    <string name="clipboard_source_read_failed">%1$s 视频读取失败，请检查网络后重试</string>
+    <string name="clipboard_add_failed">无法加入音频库，请稍后重试</string>
+</resources>

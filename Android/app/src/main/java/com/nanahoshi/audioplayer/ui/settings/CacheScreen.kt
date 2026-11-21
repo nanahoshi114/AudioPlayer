@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.ui.settings
 
+import com.nanahoshi.audioplayer.R
+import androidx.compose.ui.res.stringResource
 import android.app.Application
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
@@ -48,26 +50,26 @@ fun CacheScreen(
     var picking by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { viewModel.refresh() }
     Column(Modifier.fillMaxSize()) {
-        AppTopBar(title = "清理缓存", onBack = onBack)
+        AppTopBar(title = stringResource(R.string.cache_title), onBack = onBack)
         Text(
-            "当前缓存占用 ${formatCacheBytes(viewModel.usedBytes)}",
+            stringResource(R.string.cache_usage, formatCacheBytes(viewModel.usedBytes)),
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
         )
         ListItem(
-            headlineContent = { Text("缓存上限") },
-            supportingContent = { Text(cacheLimitLabel(limit)) },
+            headlineContent = { Text(stringResource(R.string.cache_limit_title)) },
+            supportingContent = { Text(stringResource(R.string.cache_limit_summary, cacheLimitLabel(limit))) },
             modifier = Modifier.clickable { picking = true },
         )
         Button(
             onClick = viewModel::clear,
             enabled = !viewModel.clearing,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-        ) { Text("清理缓存") }
+        ) { Text(stringResource(R.string.settings_clear_cache)) }
         if (viewModel.cleared) {
-            Text("缓存已清理", modifier = Modifier.padding(horizontal = 16.dp))
+            Text(stringResource(R.string.cache_cleared), modifier = Modifier.padding(horizontal = 16.dp))
         }
         Text(
-            "只清理封面图片等临时缓存。下载的音频、B 站下载音轨和字幕请到「下载管理」处理。",
+            stringResource(R.string.cache_note),
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
         )
@@ -75,9 +77,14 @@ fun CacheScreen(
     if (picking) {
         AlertDialog(
             onDismissRequest = { picking = false },
-            title = { Text("缓存上限") },
+            title = { Text(stringResource(R.string.cache_limit_title)) },
             text = {
                 Column {
+                    Text(
+                        stringResource(R.string.cache_dialog_message),
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(bottom = 8.dp),
+                    )
                     CACHE_LIMIT_OPTIONS.forEach { bytes ->
                         Row(
                             Modifier
@@ -100,7 +107,7 @@ fun CacheScreen(
                 }
             },
             confirmButton = {
-                TextButton(onClick = { picking = false }) { Text("取消") }
+                TextButton(onClick = { picking = false }) { Text(stringResource(R.string.common_close)) }
             },
         )
     }
@@ -142,7 +149,7 @@ class CacheViewModel(app: Application) : AndroidViewModel(app) {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                graph.messages.value = failure.message?.takeIf { it.isNotBlank() } ?: "清理缓存失败，请重试"
+                graph.showError(failure, R.string.cache_clear_failed)
             } finally {
                 clearing = false
             }

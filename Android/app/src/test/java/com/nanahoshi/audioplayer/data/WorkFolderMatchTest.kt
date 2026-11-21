@@ -1,10 +1,12 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.asmr.AsmrNode
 import com.nanahoshi.audioplayer.data.db.FileKind
 import com.nanahoshi.audioplayer.dlsite.PlayEntry
 import com.nanahoshi.audioplayer.dlsite.RemotePlayable
 import com.nanahoshi.audioplayer.dlsite.RemotePreview
+import com.nanahoshi.audioplayer.text.TextRef
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -152,20 +154,23 @@ class WorkFolderMatchTest {
 
     @Test
     fun recognizeNoticeNamesTheCatalog() {
-        assertEquals("DLsite匹配成功", recognizeNotice(CatalogSide.Matched, asmrMatched = false))
-        assertEquals("asmr.one匹配成功", recognizeNotice(CatalogSide.NotPurchased, asmrMatched = true))
-        assertEquals("asmr.one匹配成功", recognizeNotice(CatalogSide.Unreachable, asmrMatched = true))
-        assertEquals("asmr.one匹配成功", recognizeNotice(CatalogSide.Missed, asmrMatched = true))
+        assertEquals(TextRef.Res(R.string.library_notice_dlsite), recognizeNotice(CatalogSide.Matched, asmrMatched = false))
+        assertEquals(TextRef.Res(R.string.library_notice_asmr), recognizeNotice(CatalogSide.NotPurchased, asmrMatched = true))
+        assertEquals(TextRef.Res(R.string.library_notice_asmr), recognizeNotice(CatalogSide.Unreachable, asmrMatched = true))
+        assertEquals(TextRef.Res(R.string.library_notice_asmr), recognizeNotice(CatalogSide.Missed, asmrMatched = true))
         assertEquals(
-            "DLsite未连接且asmr.one匹配失败",
+            TextRef.Res(R.string.library_notice_unreachable),
             recognizeNotice(CatalogSide.Unreachable, asmrMatched = false),
         )
         assertEquals(
-            "DLsite/asmr.one均匹配失败：多出来的内容：bonus.mp3",
+            TextRef.Res(
+                R.string.library_notice_with_extra,
+                listOf(TextRef.Res(R.string.library_notice_not_found), "bonus.mp3"),
+            ),
             recognizeNotice(CatalogSide.Missed, asmrMatched = false, extraPath = "bonus.mp3"),
         )
         assertEquals(
-            "DLsite/asmr.one均匹配失败",
+            TextRef.Res(R.string.library_notice_not_found),
             recognizeNotice(CatalogSide.NotPurchased, asmrMatched = false),
         )
     }

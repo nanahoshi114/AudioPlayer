@@ -1,9 +1,11 @@
 package com.nanahoshi.audioplayer
 
+import com.nanahoshi.audioplayer.text.resolveUserError
 import com.nanahoshi.audioplayer.youtube.WebViewYouTubeSolver
 import com.nanahoshi.audioplayer.youtube.YouTubeClient
 
 import android.app.Application
+import androidx.annotation.StringRes
 import androidx.room.withTransaction
 import coil.EventListener
 import coil.ImageLoader
@@ -36,6 +38,8 @@ import com.nanahoshi.audioplayer.playback.CurrentSubtitles
 import com.nanahoshi.audioplayer.playback.PlayerClient
 import com.nanahoshi.audioplayer.playback.SubtitleDisplayPreferences
 import com.nanahoshi.audioplayer.playback.SubtitleSource
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.text.resolve
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -47,9 +51,29 @@ import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 
 class AppGraph(app: Application) {
+    private val appContext = app.applicationContext
     val messages = MutableStateFlow<String?>(null)
+
+    /** 资源化提示入口；解析后仍走现有的 Snackbar 通道。 */
+    fun show(@StringRes id: Int, vararg args: Any) {
+        messages.value = appContext.getString(id, *args)
+    }
+
+    fun show(text: TextRef) {
+        messages.value = appContext.resolve(text)
+    }
+
+    internal fun showError(error: Throwable, @StringRes fallback: Int) {
+        messages.value = appContext.resolveUserError(error, fallback)
+    }
+
+    /** 迁移期保留原字符串，不改变现有行为。 */
+    fun showRaw(text: String?) {
+        messages.value = text
+    }
     val remotePreview = MutableStateFlow<RemotePreview?>(null)
     val db = AppDatabase.create(app)
+    val taskProgress = com.nanahoshi.audioplayer.data.TaskProgressCenter(db)
     val credentials = CredentialStore(app)
     val bilibili = BilibiliClient(credentials)
     val youtube = YouTubeClient(
@@ -59,19 +83,26 @@ class AppGraph(app: Application) {
         },
     )
     val asmr = AsmrClient()
+    internal val jaRefreshRequests = com.nanahoshi.audioplayer.japaneseasmr.JaRefreshRequests()
+    val japaneseAsmr = com.nanahoshi.audioplayer.japaneseasmr.JapaneseAsmrClient()
     val dlsite = DlsiteClient(credentials)
     val librarySort = LibraryPreferences(app)
     val appearance = AppearancePreferences(app)
     val cache = CacheStore(app) { app.imageLoader }
-    val library = LibraryRepository(app, db, bilibili, asmr, dlsite)
+    val library = LibraryRepository(app, db, bilibili, asmr, dlsite, japaneseAsmr)
+    init {
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            db.japaneseAsmr().covers().forEach(japaneseAsmr::registerImage)
+        }
+    }
     val biliCollections = com.nanahoshi.audioplayer.data.BiliCollectionRepository(app, db, bilibili)
     val biliImportRequests = com.nanahoshi.audioplayer.data.BiliImportRequests(
         { library.biliLibrary.mode(it) },
-        { messages.value = "请先完成当前的入库选择" },
+        { show(R.string.bili_import_choice_pending) },
     )
     val dlsiteDownloadRequests = com.nanahoshi.audioplayer.data.DlsiteDownloadRequests()
     val subtitles = SubtitleSource(app, db, bilibili, asmr)
-    val downloads = DownloadCenter(app, db, asmr, dlsite, bilibili, youtube, library, subtitles) { messages.value = it }
+    val downloads = DownloadCenter(app, db, asmr, dlsite, bilibili, youtube, library, subtitles, progress = taskProgress) { messages.value = it }
     internal val subtitleTaskRequests = SubtitleTaskRequests { SubtitleTaskService.start(app, it) }
     private val subtitleRecovery = CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
         // 恢复失败不得使启动崩溃或让 recovery.join() 重抛；两段各自捕获，恢复失败不跳过中断登记。
@@ -83,9 +114,15 @@ class AppGraph(app: Application) {
             android.util.Log.w("SubtitleRecovery", "recover publications failed", error)
         }
         try {
+            val automatic = db.whisper().pendingWork().filter { it.translateStatus == com.nanahoshi.audioplayer.data.db.TranslateMark.RUNNING }
+            val independent = db.translations().active()
             db.withTransaction {
                 db.whisper().failInterruptedTranslations(SUBTITLE_INTERRUPTED)
                 db.translations().failInterrupted(SUBTITLE_INTERRUPTED)
+            }
+            automatic.forEach { taskProgress.interrupted(com.nanahoshi.audioplayer.data.TaskKey(com.nanahoshi.audioplayer.data.TaskKind.WHISPER, it.id), com.nanahoshi.audioplayer.data.ProgressPart.TRANSLATION) }
+            independent.filter { db.translations().get(it.id)?.status == DownloadStatus.FAILED }.forEach {
+                taskProgress.interrupted(com.nanahoshi.audioplayer.data.TaskKey(com.nanahoshi.audioplayer.data.TaskKind.TRANSLATION, it.id), com.nanahoshi.audioplayer.data.ProgressPart.TRANSLATION)
             }
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
@@ -93,7 +130,7 @@ class AppGraph(app: Application) {
             android.util.Log.w("SubtitleRecovery", "fail interrupted failed", error)
         }
     }
-    val translator = TranslateCenter(app, db, credentials, subtitles, subtitleTaskRequests, subtitleRecovery)
+    val translator = TranslateCenter(app, db, credentials, subtitles, subtitleTaskRequests, subtitleRecovery, progress = taskProgress) { messages.value = it }
     internal val offlineWhisperModels = OfflineWhisperModel.entries.associateWith {
         OfflineWhisperModelManager(app.filesDir, it)
     }
@@ -132,6 +169,9 @@ class AudioPlayerApplication : Application(), ImageLoaderFactory {
             val request = chain.request()
             val host = request.url.host
             val updated = when {
+                ::graph.isInitialized && graph.japaneseAsmr.handlesImage(host) -> request.newBuilder()
+                    .header("User-Agent", com.nanahoshi.audioplayer.japaneseasmr.JapaneseAsmrClient.USER_AGENT)
+                    .header("Referer", com.nanahoshi.audioplayer.japaneseasmr.JapaneseAsmrClient.REFERER).build()
                 host == "i.ytimg.com" || host.endsWith(".ytimg.com") -> request.newBuilder()
                     .header("User-Agent", YouTubeClient.WEB_AGENT)
                     .header("Referer", "https://www.youtube.com/").build()

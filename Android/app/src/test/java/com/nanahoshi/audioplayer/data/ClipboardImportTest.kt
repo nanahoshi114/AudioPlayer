@@ -1,9 +1,11 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.asmr.AsmrCatalogItem
 import com.nanahoshi.audioplayer.asmr.CatalogLookup
 import com.nanahoshi.audioplayer.bilibili.BiliPart
 import com.nanahoshi.audioplayer.dlsite.DlsiteShowcase
+import com.nanahoshi.audioplayer.text.TextRef
 import kotlinx.coroutines.*
 import org.junit.Assert.*
 import org.junit.Test
@@ -18,6 +20,25 @@ class ClipboardImportTest {
     private val parts = listOf(BiliPart(bv.id, 42, 1, "part one", "UP", 1000, ""), BiliPart(bv.id, 43, 2, "part two", "UP", 1000, ""))
     private fun preview(target: ClipboardTarget) = ClipboardImportPreview(target, "title", "https://example.org/cover.jpg",
         parts = if (target.source == ClipboardSource.BILIBILI) parts else emptyList())
+
+    @Test
+    fun japaneseArticleLinkHasItsOwnIdentityAndVideoLinkTakesPrecedence() {
+        val url = "https://www.japaneseasmr.com/00135575/?share=1#part"
+        val target = ClipboardTarget(ClipboardSource.JAPANESE_ASMR, "00135575")
+        assertEquals(target, clipboardImportTarget("RJ01258546 $url"))
+        assertEquals(yt, clipboardImportTarget("$url https://youtu.be/jNQXAC9IVRw"))
+        assertEquals(ClipboardImportCandidate(target, 3).fingerprint,
+            ClipboardImportCandidate(checkNotNull(clipboardImportTarget(url)), 3).fingerprint)
+    }
+
+    @Test
+    fun japaneseArticleChallengeCanOpenInBrowserBeforeImport() {
+        val page = "https://japaneseasmr.com/135575/"
+        val target = ClipboardTarget(ClipboardSource.JAPANESE_ASMR, "135575")
+        val preview = preview(target).copy(jaVerificationPage = page)
+        assertEquals(page, preview.jaBrowserUrl)
+        assertFalse(ClipboardImportState(preview).canImport)
+    }
 
     @Test fun recognizesIdsAndSharingTextWithoutTreatingOrdinaryTextAsIds() {
         assertEquals(bv, clipboardImportTarget("复制了 ${bv.id} 来听"))
@@ -100,7 +121,7 @@ class ClipboardImportTest {
         assertNotEquals(same.fingerprint, ClipboardImportCandidate(bv, 123).fingerprint)
     }
 
-    private class Memory { var last: String? = null; val messages = mutableListOf<String>() }
+    private class Memory { var last: String? = null; val messages = mutableListOf<TextRef>() }
     private fun controller(scope: CoroutineScope, memory: Memory,
         read: suspend (ClipboardTarget) -> ClipboardImportPreview?,
         save: suspend (ClipboardImportPreview, List<BiliPart>) -> String = { _, _ -> error("must not import") },
@@ -198,7 +219,7 @@ class ClipboardImportTest {
             c.offer(ClipboardImportCandidate(bv));assertEquals(setOf(42L, 43L), c.state!!.selected);assertTrue(imported.isEmpty())
             c.toggleAllParts();assertFalse(c.state!!.canImport);c.confirm();assertTrue(imported.isEmpty())
             c.togglePart(43);assertTrue(c.state!!.canImport);c.confirm()
-            assertEquals(listOf(listOf(parts[1])), imported);assertEquals(listOf("done"), memory.messages);assertNull(c.state)
+            assertEquals(listOf(listOf(parts[1])), imported);assertEquals(listOf(TextRef.Raw("done")), memory.messages);assertNull(c.state)
         } finally { scope.cancel() }
     }
     @Test fun pendingImportCannotBeDismissedOrDoubleSubmittedOrReplaced() = runBlocking {
@@ -219,7 +240,7 @@ class ClipboardImportTest {
             c.offer(candidate)
             assertNull(c.state)
             assertNull(memory.last)
-            assertEquals(listOf("asmr.one/DLsite连接失败，请检查网络"), memory.messages)
+            assertEquals(listOf(TextRef.Res(R.string.clipboard_asmr_connection_failed)), memory.messages)
             c.offer(candidate)
             assertTrue(c.state!!.canImport)
         } finally { scope.cancel() }
@@ -233,7 +254,7 @@ class ClipboardImportTest {
             })
             c.offer(ClipboardImportCandidate(bv));c.togglePart(43);c.confirm()
             assertNotNull(c.state!!.preview);assertEquals(setOf(42L), c.state!!.selected);assertFalse(c.state!!.saving)
-            assertEquals("导入失败，请重试", c.state!!.error);c.confirm();assertEquals(2, writes);assertNull(c.state)
+            assertEquals(TextRef.Res(R.string.clipboard_add_failed), c.state!!.error);c.confirm();assertEquals(2, writes);assertNull(c.state)
         } finally { scope.cancel() }
     }
     @Test fun lateMetadataCannotRestoreADismissedOrReplacedDialog() = runBlocking {
@@ -276,7 +297,7 @@ class ClipboardImportTest {
             assertTrue(memory.messages.isEmpty())
 
             c.resolveLookup(candidate, confirmed = true)
-            assertEquals(listOf("没有找到这部作品"), memory.messages)
+            assertEquals(listOf(TextRef.Res(R.string.clipboard_no_work)), memory.messages)
             assertEquals(candidate.fingerprint, memory.last)
             assertNull(c.state)
         } finally { scope.cancel() }

@@ -1,5 +1,6 @@
 package com.nanahoshi.audioplayer.playback
 
+import com.nanahoshi.audioplayer.R
 import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.Color
@@ -62,7 +63,7 @@ internal class DesktopSubtitleWindow(
     private val params = WindowManager.LayoutParams(
         0, WindowManager.LayoutParams.WRAP_CONTENT, windowType, 0, PixelFormat.TRANSLUCENT,
     ).apply {
-        setTitle("桌面字幕")
+        setTitle(context.getString(R.string.settings_desktop_subtitles_title))
         gravity = Gravity.TOP or Gravity.LEFT
         if (Build.VERSION.SDK_INT >= 30) setFitInsetsTypes(0)
     }
@@ -78,13 +79,13 @@ internal class DesktopSubtitleWindow(
         }
         label.setOnTouchListener(CaptionDrag())
     }
-    private val previous = button(android.R.drawable.ic_media_previous, "上一首", onPrevious)
-    private val toggle = button(android.R.drawable.ic_media_pause, "暂停", onToggle)
-    private val next = button(android.R.drawable.ic_media_next, "下一首", onNext)
-    private val lock = button(android.R.drawable.ic_lock_lock, "锁定桌面字幕") {
+    private val previous = button(android.R.drawable.ic_media_previous, context.getString(R.string.a11y_previous), onPrevious)
+    private val toggle = button(android.R.drawable.ic_media_pause, context.getString(R.string.a11y_pause), onToggle)
+    private val next = button(android.R.drawable.ic_media_next, context.getString(R.string.a11y_next), onNext)
+    private val lock = button(android.R.drawable.ic_lock_lock, context.getString(R.string.desktop_subtitle_lock)) {
         preferences.lockDesktop(true)
     }
-    private val close = button(android.R.drawable.ic_menu_close_clear_cancel, "关闭桌面字幕") {
+    private val close = button(android.R.drawable.ic_menu_close_clear_cancel, context.getString(R.string.desktop_subtitle_close)) {
         preferences.enableDesktop(false)
     }
     private val controls = LinearLayout(context).apply {
@@ -127,13 +128,13 @@ internal class DesktopSubtitleWindow(
             return
         }
         if (!attached && SystemClock.uptimeMillis() < retryWindowAt) return
-        val text = value.line.ifBlank { "桌面字幕" }
+        val text = value.line.ifBlank { context.getString(R.string.settings_desktop_subtitles_title) }
         if (!caption.label.text.contentEquals(text)) caption.label.text = text
         controls.visibility = if (expanded) View.VISIBLE else View.GONE
         previous.isEnabled = value.hasPrevious
         next.isEnabled = value.hasNext
         toggle.setImageResource(if (value.playWhenReady) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play)
-        toggle.contentDescription = if (value.playWhenReady) "暂停" else "播放"
+        toggle.contentDescription = if (value.playWhenReady) context.getString(R.string.a11y_pause) else context.getString(R.string.a11y_play)
         params.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
         if (Build.VERSION.SDK_INT >= 30) {
             params.flags = params.flags or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN

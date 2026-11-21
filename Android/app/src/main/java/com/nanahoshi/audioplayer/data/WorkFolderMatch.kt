@@ -1,7 +1,9 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.asmr.AsmrNode
 import com.nanahoshi.audioplayer.dlsite.PlayEntry
+import com.nanahoshi.audioplayer.text.TextRef
 import java.text.Normalizer
 
 internal data class WorkFile(
@@ -57,16 +59,16 @@ internal enum class CatalogSide {
     NotPurchased,
 }
 
-internal fun recognizeNotice(dlsite: CatalogSide, asmrMatched: Boolean, extraPath: String? = null): String {
+internal fun recognizeNotice(dlsite: CatalogSide, asmrMatched: Boolean, extraPath: String? = null): TextRef {
     val base = when {
-        dlsite == CatalogSide.Matched -> "DLsite匹配成功"
-        asmrMatched -> "asmr.one匹配成功"
-        dlsite == CatalogSide.Unreachable -> "DLsite未连接且asmr.one匹配失败"
-        else -> "DLsite/asmr.one均匹配失败"
+        dlsite == CatalogSide.Matched -> TextRef.Res(R.string.library_notice_dlsite)
+        asmrMatched -> TextRef.Res(R.string.library_notice_asmr)
+        dlsite == CatalogSide.Unreachable -> TextRef.Res(R.string.library_notice_unreachable)
+        else -> TextRef.Res(R.string.library_notice_not_found)
     }
     val extra = extraPath?.trim().orEmpty()
     if (extra.isEmpty() || dlsite == CatalogSide.Matched || asmrMatched) return base
-    return "$base：多出来的内容：$extra"
+    return TextRef.Res(R.string.library_notice_with_extra, listOf(base, extra))
 }
 
 internal fun asmrMatchTree(nodes: List<AsmrNode>, parentPath: String = ""): WorkLevel {

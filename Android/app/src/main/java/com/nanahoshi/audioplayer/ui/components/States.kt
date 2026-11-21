@@ -1,5 +1,8 @@
 package com.nanahoshi.audioplayer.ui.components
 
+import com.nanahoshi.audioplayer.R
+import androidx.compose.ui.res.stringResource
+
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -80,7 +83,7 @@ fun EmptyState(
 }
 
 @Composable
-fun LoadingState(message: String = "正在加载", modifier: Modifier = Modifier) {
+fun LoadingState(message: String = stringResource(R.string.common_loading), modifier: Modifier = Modifier) {
     Column(
         modifier.fillMaxWidth().padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -98,10 +101,10 @@ fun LoadingState(message: String = "正在加载", modifier: Modifier = Modifier
 @Composable
 fun ErrorState(message: String, onRetry: () -> Unit, modifier: Modifier = Modifier) {
     EmptyState(
-        title = "暂时无法加载",
+        title = stringResource(R.string.common_load_failed),
         message = message,
         icon = Icons.Outlined.ErrorOutline,
-        actionLabel = "重试",
+        actionLabel = stringResource(R.string.common_retry),
         onAction = onRetry,
         modifier = modifier,
     )

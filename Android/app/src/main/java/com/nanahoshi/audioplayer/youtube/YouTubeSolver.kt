@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.youtube
 
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.R
 import android.annotation.SuppressLint
 import android.content.Context
 import android.webkit.WebView
@@ -53,7 +55,7 @@ class WebViewYouTubeSolver(context: Context) : YouTubeSolver {
                             override fun shouldInterceptRequest(v: WebView?, request: WebResourceRequest?): WebResourceResponse =
                                 WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
                             override fun onRenderProcessGone(v: WebView?, detail: RenderProcessGoneDetail?): Boolean {
-                                if (continuation.isActive) continuation.resumeWithException(YouTubeException("YouTube 脚本运行环境已停止"))
+                                if (continuation.isActive) continuation.resumeWithException(YouTubeException(TextRef.Res(R.string.youtube_error_solver_stopped)))
                                 return true
                             }
                             override fun onPageFinished(v: WebView?, url: String?) {
@@ -93,7 +95,7 @@ class WebViewYouTubeSolver(context: Context) : YouTubeSolver {
                                 runtime.evaluateJavascript(code) { result ->
                                     if (!continuation.isActive) return@evaluateJavascript
                                     val output = runCatching { (Json.parseToJsonElement(result) as? JsonPrimitive)?.contentOrNull }.getOrNull()
-                                    if (output == null) continuation.resumeWithException(YouTubeException("YouTube 签名解析失败，请更新系统 WebView 后重试"))
+                                    if (output == null) continuation.resumeWithException(YouTubeException(TextRef.Res(R.string.youtube_error_signature_webview)))
                                     else continuation.resume(output)
                                 }
                             }
@@ -102,13 +104,13 @@ class WebViewYouTubeSolver(context: Context) : YouTubeSolver {
                     }
                 }
             } catch (_: TimeoutCancellationException) {
-                throw YouTubeException("YouTube 签名解析超时")
+                throw YouTubeException(TextRef.Res(R.string.youtube_error_signature_timeout))
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: YouTubeException) {
                 throw error
             } catch (_: Exception) {
-                throw YouTubeException("YouTube 脚本运行失败，请更新系统 WebView 后重试")
+                throw YouTubeException(TextRef.Res(R.string.youtube_error_solver_webview))
             } finally {
                 view?.stopLoading()
                 view?.destroy()

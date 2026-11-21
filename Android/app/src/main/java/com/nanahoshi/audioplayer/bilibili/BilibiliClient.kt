@@ -1,8 +1,11 @@
 package com.nanahoshi.audioplayer.bilibili
 
+import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.data.CredentialStore
 import com.nanahoshi.audioplayer.data.toHttps
 import com.nanahoshi.audioplayer.data.withResponse
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.text.UserFacingError
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -43,7 +46,13 @@ data class BiliPart(
 
 data class BiliVideoDetails(val video: BiliVideoHit, val parts: List<BiliPart>, val collection: BiliCollection? = null)
 
-class BilibiliException(val code: Int, message: String) : Exception(message)
+class BilibiliException(
+    val code: Int,
+    override val userText: TextRef,
+    cause: Throwable? = null,
+) : Exception(userText.debugString(), cause), UserFacingError {
+    constructor(code: Int, message: String) : this(code, TextRef.Raw(message))
+}
 
 data class QrLogin(val url: String, val key: String)
 
@@ -144,7 +153,7 @@ class BilibiliClient(
             continuation.invokeOnCancellation { call.cancel() }
             call.enqueue(object : okhttp3.Callback {
                 override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
-                    if (continuation.isActive) continuation.resumeWithException(BilibiliException(0, "连不上 B 站，请检查网络后重试"))
+                    if (continuation.isActive) continuation.resumeWithException(BilibiliException(0, TextRef.Res(R.string.bilibili_error_connection)))
                 }
                 override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
                     try {
@@ -157,7 +166,7 @@ class BilibiliClient(
                         if (continuation.isActive) continuation.resume(raw)
                     } catch (error: Exception) {
                         if (continuation.isActive) continuation.resumeWithException(
-                            if (error is BilibiliException) error else BilibiliException(0, "B 站读取失败，请重试"))
+                            if (error is BilibiliException) error else BilibiliException(0, TextRef.Res(R.string.bilibili_error_read_failed)))
                     }
                 }
             })
@@ -175,7 +184,7 @@ class BilibiliClient(
         val url = response.data?.url.orEmpty()
         val key = response.data?.qrcodeKey.orEmpty()
         if (response.code != 0 || url.isBlank() || key.isBlank()) {
-            throw BilibiliException(response.code, "没有拿到登录二维码")
+            throw BilibiliException(response.code, TextRef.Res(R.string.bilibili_error_qr_missing))
         }
         QrLogin(url, key)
     }
@@ -191,7 +200,7 @@ class BilibiliClient(
             guestOnly = true,
         )
         val response = json.decodeFromString<ApiResponse<QrPollData>>(exchange.body)
-        val data = response.data ?: throw BilibiliException(response.code, "登录状态没有返回")
+        val data = response.data ?: throw BilibiliException(response.code, TextRef.Res(R.string.bilibili_error_login_no_result))
         when (data.code) {
             QR_WAITING -> QrPoll.Waiting
             QR_SCANNED -> QrPoll.Scanned
@@ -202,12 +211,12 @@ class BilibiliClient(
                     sessionCookiesFromUrl(data.url),
                 )
                 if (cookieField(cookie, "SESSDATA") == null) {
-                    throw BilibiliException(0, "登录没有返回有效信息")
+                    throw BilibiliException(0, TextRef.Res(R.string.bilibili_error_login_no_result))
                 }
                 credentials.saveBiliSession(cookie, data.refreshToken)
                 QrPoll.Confirmed
             }
-            else -> throw BilibiliException(data.code, "扫码登录失败")
+            else -> throw BilibiliException(data.code, TextRef.Res(R.string.bilibili_error_qr_failed))
         }
     }
 
@@ -223,9 +232,9 @@ class BilibiliClient(
         if (response.code != 0 || folders == null) {
             Log.w(TAG, "favorite folders code=${response.code} message=${response.detail()}")
             val fallback = if (response.code == 0) {
-                "登录有效，但没有找到收藏夹"
+                TextRef.Res(R.string.bilibili_error_no_favorites)
             } else {
-                "无法读取收藏夹，请稍后重试"
+                TextRef.Res(R.string.bilibili_error_favorites_read)
             }
             throw BilibiliException(response.code, response.detail(fallback))
         }
@@ -243,7 +252,7 @@ class BilibiliClient(
         val response = json.decodeFromString<ApiResponse<ResourceListData>>(body)
         if (response.code != 0) {
             Log.w(TAG, "favorite videos code=${response.code} message=${response.detail()}")
-            throw BilibiliException(response.code, response.detail("无法读取收藏夹，请稍后重试"))
+            throw BilibiliException(response.code, response.detail(TextRef.Res(R.string.bilibili_error_favorites_read)))
         }
         val medias = response.data?.medias.orEmpty()
         val videos = medias.mapNotNull { media ->
@@ -379,10 +388,10 @@ class BilibiliClient(
     private fun requireSession() {
         val raw = credentials.cookie()?.trim().orEmpty()
         if (raw.isEmpty()) {
-            throw BilibiliException(-101, "请先在「我的」保存 B 站登录信息")
+            throw BilibiliException(-101, TextRef.Res(R.string.bilibili_error_login_required))
         }
         if (raw.contains("=") && !raw.contains("SESSDATA=")) {
-            throw BilibiliException(-101, "保存的内容里没有 SESSDATA，请重新粘贴")
+            throw BilibiliException(-101, TextRef.Res(R.string.bilibili_error_sessdata_missing))
         }
     }
 
@@ -391,7 +400,7 @@ class BilibiliClient(
         val response = json.decodeFromString<ApiResponse<NavData>>(body)
         val mid = response.data?.mid ?: 0L
         if (response.code != 0 || mid <= 0L) {
-            throw BilibiliException(response.code, "登录信息无效或已过期，请重新粘贴 SESSDATA")
+            throw BilibiliException(response.code, TextRef.Res(R.string.bilibili_error_login_expired))
         }
         return mid
     }
@@ -400,7 +409,7 @@ class BilibiliClient(
 
     suspend fun videoDetails(input: String): BiliVideoDetails {
         val bvid = BV_REGEX.find(input)?.value
-            ?: throw BilibiliException(0, "请输入正确的 BV 号")
+            ?: throw BilibiliException(0, TextRef.Res(R.string.bilibili_error_invalid_bv))
         val body = browseGet("https://api.bilibili.com/x/web-interface/view?bvid=$bvid", "https://www.bilibili.com/video/$bvid")
         return parseBiliVideoDetails(body, bvid).also { details ->
             videoCollections.record(details.video.bvid, details.collection)
@@ -450,12 +459,12 @@ class BilibiliClient(
             data.dash?.dolby?.audio?.let(::addAll)
             data.dash?.flac?.audio?.let(::add)
         }.filter { it.playUrl.isNotBlank() }.maxByOrNull { it.bandwidth }
-            ?: throw BilibiliException(0, "没有可播放的音轨，可能需要登录或大会员")
+            ?: throw BilibiliException(0, TextRef.Res(R.string.bilibili_error_no_audio_track))
         val segment = best.segmentBase ?: best.segmentBaseAlt
         val initRange = segment?.initialization ?: segment?.initializationAlt
         val indexRange = segment?.indexRange ?: segment?.indexRangeAlt
         if (initRange.isNullOrBlank() || indexRange.isNullOrBlank()) {
-            throw BilibiliException(0, "B 站没有返回可播放的音轨")
+            throw BilibiliException(0, TextRef.Res(R.string.bilibili_error_no_audio_track_later))
         }
         return BiliAudio(
             url = best.playUrl.toHttps(),
@@ -468,9 +477,10 @@ class BilibiliClient(
         )
     }
 
-    private fun friendly(code: Int, message: String): String {
-        val text = message.ifBlank { "B 站请求失败，请稍后重试" }
-        return if (code == -404) "找不到这个视频" else text
+    private fun friendly(code: Int, message: String): TextRef {
+        val text = message.ifBlank { null }?.let(TextRef::Raw)
+            ?: TextRef.Res(R.string.bilibili_error_request_failed)
+        return if (code == -404) TextRef.Res(R.string.bilibili_error_video_not_found) else text
     }
 
     private suspend fun mixin(force: Boolean): String {
@@ -482,7 +492,7 @@ class BilibiliClient(
         val img = response.data?.wbiImg?.imgUrl.orEmpty()
         val sub = response.data?.wbiImg?.subUrl.orEmpty()
         if (img.isBlank() || sub.isBlank()) {
-            throw BilibiliException(response.code, "暂时无法连接 B 站")
+            throw BilibiliException(response.code, TextRef.Res(R.string.bilibili_error_connection))
         }
         val key = WbiSigner.mixinKey(keyFromUrl(img), keyFromUrl(sub))
         mixinKey = key
@@ -685,10 +695,10 @@ class BilibiliClient(
     private fun readExchange(response: Response, allowHtml: Boolean): Exchange {
         val body = response.body?.string().orEmpty()
         if (!allowHtml && body.trimStart().startsWith("<")) {
-            throw BilibiliException(-412, "B 站没有返回播放数据，请检查登录信息或稍后再试")
+            throw BilibiliException(-412, TextRef.Res(R.string.bilibili_error_no_play_data))
         }
         if (response.code in 300..399 || (!response.isSuccessful && body.isBlank())) {
-            throw BilibiliException(response.code, "网络请求失败，请重试")
+            throw BilibiliException(response.code, TextRef.Res(R.string.bilibili_error_connection))
         }
         return Exchange(body, response.headers("Set-Cookie"))
     }
@@ -729,6 +739,11 @@ private data class ApiResponse<T>(
     fun detail(fallback: String = ""): String {
         val text = message.ifBlank { msg }
         return if (text.isBlank() || text == "0") fallback else text
+    }
+
+    fun detail(fallback: TextRef): TextRef {
+        val text = message.ifBlank { msg }
+        return if (text.isBlank() || text == "0") fallback else TextRef.Raw(text)
     }
 }
 
@@ -877,12 +892,12 @@ private val biliVideoJson = Json { ignoreUnknownKeys = true; coerceInputValues =
 /** 视频详情解析与 Android 请求环境分离。 */
 internal fun parseBiliVideoDetails(body: String, bvid: String): BiliVideoDetails {
     val response = try { biliVideoJson.decodeFromString<ApiResponse<ViewData>>(body) }
-    catch (_: kotlinx.serialization.SerializationException) { throw BilibiliException(0, "B 站视频详情无法读取，请重试") }
+    catch (_: kotlinx.serialization.SerializationException) { throw BilibiliException(0, TextRef.Res(R.string.bilibili_error_video_info_failed)) }
     val data = response.data
     if (response.code != 0 || data == null) {
-        throw BilibiliException(response.code, if (response.code != 0) biliSearchError(response.code) else "没有找到这个视频的信息")
+        throw BilibiliException(response.code, if (response.code != 0) biliSearchError(response.code) else TextRef.Res(R.string.bilibili_error_video_info_failed))
     }
-    if (data.bvid.isNotBlank() && data.bvid != bvid) throw BilibiliException(0, "B 站返回的视频信息不完整，请重试")
+    if (data.bvid.isNotBlank() && data.bvid != bvid) throw BilibiliException(0, TextRef.Res(R.string.bilibili_error_video_info_failed))
     val pages = data.pages.ifEmpty {
         listOf(PageInfo(cid = data.cid, page = 1, part = "", duration = data.duration))
     }

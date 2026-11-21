@@ -1,0 +1,13 @@
+<resources>
+    <!-- 听写帮助 -->
+    <string name="settings_whisper_help_intro">选一个听写模型，填写对应内容后点「保存」。</string>
+    <string name="settings_whisper_help_qwen_audio">qwen-audio-3.1-asr：线上模型，只填 API Key，地址固定不用管。</string>
+    <string name="settings_whisper_help_qwen3">Qwen3-ASR：自己部署的服务，填写地址和 API Key。服务不校验时，可以填写任意非空值。首次访问局域网地址时，请允许访问本地网络，否则无法连接。</string>
+    <string name="settings_whisper_help_offline">SenseVoiceSmall 和 Parakeet 0.6B 日语（CTC）：从 GitHub 或 Hugging Face 下载模型后，可在本机离线听写。</string>
+    <string name="settings_whisper_help_usage">用法：播放时点「生成字幕」只生成日文字幕，「生成字幕和翻译」会接着翻成中文。同一首用同一模型不会重复生成；换模型或地址会重新生成。</string>
+
+    <!-- 翻译帮助 -->
+    <string name="settings_translate_help_intro">选一个平台，填入 API Key 后点「保存」。模型名可以留空：千问 AI 平台默认 qwen3.8-flash，DeepSeek 默认 deepseek-flash。</string>
+    <string name="settings_translate_help_thinking">深度思考一般不用打开；想要更细的译文时再打开，并选择思考强度。</string>
+    <string name="settings_translate_help_usage">用法：在字幕全文里点「生成翻译」，已有译文时可以点「润色」。打开「翻译后自动润色」后，每次翻译完成会自动润色一遍。润色失败会保留原来的译文。</string>
+</resources>

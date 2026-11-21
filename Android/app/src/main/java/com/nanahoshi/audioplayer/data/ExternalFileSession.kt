@@ -1,5 +1,6 @@
 package com.nanahoshi.audioplayer.data
 
+import java.io.InputStream
 import android.content.Context
 import android.net.Uri
 import android.webkit.MimeTypeMap
@@ -27,9 +28,17 @@ import java.io.File
 import java.io.IOException
 import java.util.UUID
 import kotlin.coroutines.resume
+import com.nanahoshi.audioplayer.R
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.text.UserFacingError
 import kotlin.coroutines.resumeWithException
 
-class ExternalFileException(message: String) : IOException(message)
+class ExternalFileException(
+    override val userText: TextRef,
+    cause: Throwable? = null,
+) : IOException(userText.debugString(), cause), UserFacingError {
+    constructor(message: String) : this(TextRef.Raw(message))
+}
 
 data class ExternalFile(val uri: Uri, val mime: String)
 
@@ -56,14 +65,14 @@ class ExternalFileSession internal constructor(
             if (local != null && local.canonicalPath.startsWith(context.filesDir.canonicalPath + File.separator)) {
                 return@withContext ExternalFile(FileProvider.getUriForFile(context, "${context.packageName}.files", local), mime)
             }
-            if (local == null && request.url.isBlank()) throw ExternalFileException("这个文件还没有下载到本机，请重新下载完整原始包")
+            if (local == null && request.url.isBlank()) throw ExternalFileException(TextRef.Res(R.string.external_file_not_downloaded))
             cache.protect(directory)
-            if (!directory.isDirectory && !directory.mkdirs()) throw ExternalFileException("无法创建文件暂存目录")
+            if (!directory.isDirectory && !directory.mkdirs()) throw ExternalFileException(TextRef.Res(R.string.external_file_staging_dir_failed))
             val target = File(directory, sanitizeEntryName(request.name))
             val partial = File(directory, target.name + ".part")
             try {
                 if (local != null) {
-                    if (local.length() > directory.usableSpace) throw ExternalFileException("剩余空间不足")
+                    if (local.length() > directory.usableSpace) throw ExternalFileException(TextRef.Res(R.string.external_file_no_space))
                     currentCoroutineContext().ensureActive()
                     local.inputStream().use { input -> partial.outputStream().use { output ->
                         copyExternalBytes(input, output, local.length(), progress)
@@ -72,7 +81,7 @@ class ExternalFileSession internal constructor(
                     downloader.download(request, partial, progress)
                 }
                 currentCoroutineContext().ensureActive()
-                if (!partial.renameTo(target)) throw ExternalFileException("无法保存暂存文件")
+                if (!partial.renameTo(target)) throw ExternalFileException(TextRef.Res(R.string.external_file_save_temp_failed))
                 ExternalFile(FileProvider.getUriForFile(context, "${context.packageName}.files", target), mime)
                     .also { ready = it; readyPath = target }
             } catch (cancelled: CancellationException) {
@@ -81,7 +90,7 @@ class ExternalFileSession internal constructor(
             } catch (failure: Exception) {
                 partial.delete()
                 if (failure is ExternalFileException) throw failure
-                throw ExternalFileException("无法准备这个文件，请检查网络、登录状态或剩余空间后重试")
+                throw ExternalFileException(TextRef.Res(R.string.external_file_prepare_failed))
             }
         }
 
@@ -97,8 +106,8 @@ internal class ExternalFileDownloader(
         for (attempt in 0 until if (preview.authed) 2 else 1) {
             currentCoroutineContext().ensureActive()
             val signed = if (preview.authed) {
-                val work = preview.workno ?: throw ExternalFileException("请重新打开作品以获取文件授权")
-                val key = preview.fileKey ?: throw ExternalFileException("请重新打开作品以获取文件授权")
+                val work = preview.workno ?: throw ExternalFileException(TextRef.Res(R.string.external_file_reopen_work))
+                val key = preview.fileKey ?: throw ExternalFileException(TextRef.Res(R.string.external_file_reopen_work))
                 sign(work, key)
             } else null
             var url = (signed?.url ?: preview.url.toHttps()).toHttpUrl()
@@ -116,18 +125,18 @@ internal class ExternalFileDownloader(
                 var transferred = false
                 val retryAuthorization = call.withResponse {
                     if (it.code in 300..399) {
-                        url = it.header("Location")?.let(url::resolve) ?: error("下载跳转无效")
+                        url = it.header("Location")?.let(url::resolve) ?: throw ExternalFileException(TextRef.Res(R.string.external_file_redirect_invalid))
                         false
                     } else if (preview.authed && attempt == 0 && it.code in setOf(401, 403)) {
                         true
                     } else {
                         check(it.isSuccessful)
-                        val body = it.body ?: error("文件为空")
+                        val body = it.body ?: throw ExternalFileException(TextRef.Res(R.string.external_file_empty_body))
                         if (body.contentType()?.subtype?.contains("html") == true && fileExtension(preview.name) !in setOf("html", "htm")) {
-                            throw ExternalFileException("服务器返回了网页，请检查登录状态后重试")
+                            throw ExternalFileException(TextRef.Res(R.string.external_file_login_expired))
                         }
                         val length = body.contentLength().takeIf { n -> n >= 0 }
-                        if (length != null && length > usableSpace(partial)) throw ExternalFileException("剩余空间不足")
+                        if (length != null && length > usableSpace(partial)) throw ExternalFileException(TextRef.Res(R.string.external_file_no_space))
                         body.byteStream().use { input -> partial.outputStream().use { output -> copyExternalBytes(input, output, length, progress) } }
                         transferred = true
                         false
@@ -137,7 +146,7 @@ internal class ExternalFileDownloader(
                 if (retryAuthorization) break
             }
         }
-        throw ExternalFileException("无法读取文件或跳转次数过多")
+        throw ExternalFileException(TextRef.Res(R.string.external_file_read_failed))
     }
 
 }
@@ -179,4 +188,20 @@ internal suspend fun <T> Call.withResponse(block: suspend (Response) -> T): T = 
         try { awaitCancellation() } finally { this@withResponse.cancel() }
     }
     try { awaitHeaders().use { block(it) } } finally { watcher.cancel() }
+}
+
+internal data class RemoteTextPreview(val text: String, val clipped: Boolean = false)
+
+internal fun InputStream.readRemoteTextPreview(limit: Int): RemoteTextPreview {
+    val buffer = ByteArray(limit + 1)
+    var total = 0
+    while (total < buffer.size) {
+        val read = read(buffer, total, buffer.size - total)
+        if (read < 0) break
+        total += read
+    }
+    return RemoteTextPreview(
+        buffer.copyOf(minOf(total, limit)).toString(Charsets.UTF_8),
+        clipped = total > limit,
+    )
 }

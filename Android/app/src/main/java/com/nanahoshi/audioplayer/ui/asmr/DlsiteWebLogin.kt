@@ -1,5 +1,8 @@
 package com.nanahoshi.audioplayer.ui.asmr
 
+import com.nanahoshi.audioplayer.R
+import androidx.compose.ui.res.stringResource
+
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
 import android.view.ViewGroup
@@ -83,7 +86,7 @@ internal fun DlsiteWebLoginDialog(
                 ) {
                     if (request?.isForMainFrame == true) {
                         pageLoading = false
-                        localError = "页面加载失败，请检查网络后重试"
+                        localError = context.getString(R.string.dlsite_web_load_failed)
                     }
                 }
             }
@@ -105,7 +108,7 @@ internal fun DlsiteWebLoginDialog(
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
                 AppTopBar(
-                    title = "登录 DLsite",
+                    title = stringResource(R.string.dlsite_web_login_title),
                     onBack = onDismiss,
                     actions = {
                         TextButton(
@@ -114,16 +117,16 @@ internal fun DlsiteWebLoginDialog(
                                 localError = null
                                 val cookie = readDlsiteWebCookies()
                                 if (cookie.isBlank()) {
-                                    localError = "还没有读取到登录信息，请先在页面里完成登录"
+                                    localError = context.getString(R.string.dlsite_web_not_read)
                                 } else {
                                     onComplete(cookie)
                                 }
                             },
-                        ) { Text(if (loading) "校验中…" else "完成") }
+                        ) { Text(stringResource(if (loading) R.string.dlsite_web_verifying else R.string.dlsite_web_done)) }
                     },
                 )
                 Text(
-                    "登录完成后点右上角「完成」。保存时会去掉 Cloudflare 的验证 Cookie。",
+                    stringResource(R.string.dlsite_web_help),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),

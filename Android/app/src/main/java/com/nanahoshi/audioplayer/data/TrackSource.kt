@@ -6,4 +6,5 @@ enum class TrackSource {
     ASMR,
     DLSITE,
     YOUTUBE,
+    JAPANESE_ASMR,
 }

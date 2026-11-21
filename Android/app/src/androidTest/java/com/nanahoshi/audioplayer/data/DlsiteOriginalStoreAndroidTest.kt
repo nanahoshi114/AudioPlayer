@@ -162,6 +162,7 @@ class DlsiteOriginalStoreAndroidTest {
                 File(this, "original/bonus.flac").writeBytes(ByteArray(32))
             }
             val occupied = File(generation, "original/WAV/voice.wav").absolutePath
+            // 保留 Context 提供的路径形式，覆盖 Android 同一文件的规范路径别名。
             val owner = db.tracks().insert(TrackEntity(source = TrackSource.DLSITE, title = "kept.wav",
                 artist = "circle", durationMs = 1000, coverUri = null, localUri = occupied,
                 bvid = null, cid = null, page = null, addedAt = 0, folderId = wav, asmrWorkId = 123456,

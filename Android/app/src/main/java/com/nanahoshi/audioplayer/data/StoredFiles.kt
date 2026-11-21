@@ -2,6 +2,8 @@ package com.nanahoshi.audioplayer.data
 
 import android.content.Context
 import android.net.Uri
+import androidx.room.withTransaction
+import kotlinx.coroutines.sync.withLock
 import com.nanahoshi.audioplayer.data.db.AppDatabase
 import com.nanahoshi.audioplayer.data.db.FolderEntity
 import com.nanahoshi.audioplayer.data.db.TrackEntity
@@ -32,6 +34,9 @@ data class StoredItem(
     val queueItemId: Long? = null,
     val translationOverlay: Boolean = false,
     val bytes: Long = 0,
+    val source: TrackSource? = null,
+    val workKey: String? = null,
+    val fileKey: String? = null,
 )
 
 class StoredCatalog(
@@ -44,6 +49,8 @@ class StoredCatalog(
     private val asmrRoot = File(filesDir, "asmr")
     private val dlsiteRoot = File(filesDir, "dlsite")
     private val biliRoot = File(filesDir, "bilibili")
+    private val jaRoot = File(filesDir, "japaneseasmr")
+    private val jaWorkRoot = File(filesDir, "japaneseasmr-downloads")
 
     suspend fun list(): List<StoredItem> = withContext(Dispatchers.IO) {
         val asmr = asmrRoot.canonicalFile
@@ -68,16 +75,19 @@ class StoredCatalog(
             }
         }
         val audios = LinkedHashMap<String, AudioRef>()
+        val jaAudios = LinkedHashMap<String, Pair<String, String>>()
         val looseSubtitles = mutableListOf<ListedSubtitle>()
         for (track in db.tracks().onlineWithLocal()) {
             val stored = track.localUri ?: continue
             val file = File(stored)
             if (!file.isFile || !inside(file, asmr, dlsite, bili)) continue
+            val ja = if (track.source == TrackSource.JAPANESE_ASMR) db.japaneseAsmr().mediaForTrack(track.id) else null
+            if (ja != null) jaAudios[file.canonicalPath] = ja.postId to ja.mediaKey
             rememberFile(
                 file,
                 stored,
                 track.id,
-                track.remoteUrl,
+                ja?.let { com.nanahoshi.audioplayer.japaneseasmr.jaIdentity(it.postId, it.mediaKey) } ?: track.remoteUrl,
                 null,
                 workFolder(track.folderId, byId),
                 file.name,
@@ -117,13 +127,16 @@ class StoredCatalog(
             val stored = row.localPath ?: continue
             val file = File(stored)
             if (!file.isFile || !inside(file, asmr, dlsite, bili)) continue
-            val code = realCode(row.workKey)
+            val post = if (row.source == TrackSource.JAPANESE_ASMR.name) row.workKey?.let { db.japaneseAsmr().post(it) } else null
+            val jaKey = row.fileKey.takeIf { post != null }
+            if (jaKey != null && post != null) jaAudios[file.canonicalPath] = post.postId to jaKey
+            val code = post?.rj ?: realCode(row.workKey)
             val biliFile = under(file, bili)
             rememberFile(
                 file,
                 stored,
                 row.trackId.takeIf { it > 0L },
-                row.remoteUrl,
+                if (post != null && jaKey != null) com.nanahoshi.audioplayer.japaneseasmr.jaIdentity(post.postId, jaKey) else row.remoteUrl,
                 code,
                 if (biliFile) null else code?.let { lookupSource(it, bySource) },
                 if (biliFile) row.title.ifBlank { file.name } else file.name,
@@ -138,12 +151,23 @@ class StoredCatalog(
             )
         }
         for (entry in db.dlsiteOriginals().allEntries()) {
-            if (entry.kind != "AUDIO" && !isSubtitleFile(entry.relativePath)) continue
+            if (entry.kind != "AUDIO" && (entry.kind != "TEXT" || !isSubtitleFile(entry.relativePath))) continue
             val file = File(entry.localPath)
             if (!file.isFile || !inside(file, asmr, dlsite, bili)) continue
             rememberFile(file, entry.localPath, entry.trackId?.takeIf { db.tracks().getById(it) != null },
                 null, entry.workno, lookupSource(entry.workno, bySource), file.name, null,
                 audios, looseSubtitles, asmr, dlsite, bili, bySource, byWorkId)
+        }
+        for (entry in db.jaDownloads().storedEntries()) {
+            if (entry.kind != "AUDIO" && (entry.kind != "FILE" || !isSubtitleFile(entry.relativePath))) continue
+            val path = entry.localPath ?: continue
+            val file = File(path)
+            if (!file.isFile || !under(file, jaWorkRoot.canonicalFile)) continue
+            val trackId = entry.trackId?.takeIf { id -> db.tracks().getById(id)?.localUri == path }
+            val remote = jaWorkFileIdentity(entry.rj, entry.relativePath)
+            rememberFile(file, path, trackId, remote, entry.rj, lookupSource(entry.rj, bySource), file.name, null,
+                audios, looseSubtitles, asmr, dlsite, bili, bySource, byWorkId)
+            if (entry.kind == "AUDIO") jaAudios[file.canonicalPath] = entry.postId to entry.relativePath
         }
         val jobs = db.whisper().done().map {
             ListedJob(it.id, it.fingerprint, it.trackId, it.localPath, it.awaitRemoteUrl, it.title)
@@ -190,8 +214,11 @@ class StoredCatalog(
                 job.remoteUrl, null, job.workKey, null, sanitizeEntryName(job.title) + ".m4a"))
         }
         val built = buildStoredItems(listedAudios + youtubeAudios.values, jobs, ::cueFile, looseSubtitles) { audio ->
-            val folder = downloadWorkDirectory(audio.file, asmr, dlsite, bili)
-            if (folder == null) {
+            val folder = downloadWorkDirectory(audio.file, asmr, dlsite, bili, jaRoot, jaWorkRoot)
+            if (under(audio.file, jaWorkRoot.canonicalFile)) {
+                // 已发布字幕已从清单加入列表。
+                emptyList()
+            } else if (folder == null) {
                 audio.file.parentFile?.listFiles().orEmpty().filter { it.isFile && isSubtitleFile(it.name) }
             } else {
                 val key = runCatching { folder.canonicalPath }.getOrDefault(folder.absolutePath)
@@ -246,7 +273,13 @@ class StoredCatalog(
         ) { file, job ->
             subtitleItem(file, job?.trackId, job?.title, job?.remoteUrl, queueItemId = job?.queueItemId, translationOverlay = true)
         }
-        storedSort(built + extra + overlays)
+        val identified = built.map { item ->
+            val ja = jaAudios[canonicalPath(item.path)]
+            if (ja == null || item.kind != StoredKind.AUDIO) item else item.copy(
+                source = TrackSource.JAPANESE_ASMR, workKey = ja.first, fileKey = ja.second,
+            )
+        }
+        storedSort(identified + extra + overlays)
     }
 
     /** 选中项里带有生成字幕的音频数量；删除前据此决定要不要询问是否一并删除字幕。 */
@@ -265,6 +298,10 @@ class StoredCatalog(
     private suspend fun deleteOne(item: StoredItem, deleteSubtitles: Boolean) {
         val file = File(item.path)
         if (!owned(file)) return
+        if (under(file, jaWorkRoot.canonicalFile)) {
+            deleteJaWorkFile(item, file, deleteSubtitles)
+            return
+        }
         when (item.kind) {
             StoredKind.GENERATED -> {
                 if (item.translationOverlay) {
@@ -278,6 +315,24 @@ class StoredCatalog(
                 if (file.isFile && file.delete()) subtitles.invalidate()
             }
             StoredKind.AUDIO -> deleteAudio(item, file, deleteSubtitles)
+        }
+    }
+
+    private suspend fun deleteJaWorkFile(item: StoredItem, file: File, deleteSubtitles: Boolean) {
+        subtitles.generatedWriteLock.withLock {
+            db.withTransaction {
+                val entry = db.jaDownloads().entryForPath(item.path) ?: return@withTransaction
+                if (file.isFile && !file.delete()) return@withTransaction
+                val track = entry.trackId?.let { db.tracks().getById(it) }?.takeIf { it.localUri == item.path }
+                if (track != null) db.tracks().clearLocalUri(track.id)
+                val current = entry.fileId?.let { db.files().get(it) }?.takeIf { it.localUri == item.path }
+                if (current != null) db.files().update(current.copy(localUri = null))
+                db.jaDownloads().clearPath(item.path)
+                if (item.kind == StoredKind.AUDIO && deleteSubtitles) {
+                    subtitles.discardStoredLocked(track?.id, item.path, jaWorkFileIdentity(entry.rj, entry.relativePath))
+                }
+                if (item.kind == StoredKind.SUBTITLE) subtitles.invalidate()
+            }
         }
     }
 
@@ -429,7 +484,7 @@ class StoredCatalog(
 
     private fun inside(file: File, asmr: File, dlsite: File, bili: File): Boolean {
         val path = runCatching { file.canonicalFile }.getOrNull() ?: return false
-        return path.startsWith(asmr) || path.startsWith(dlsite) || path.startsWith(bili)
+        return path.startsWith(asmr) || path.startsWith(dlsite) || path.startsWith(bili) || path.startsWith(jaRoot.canonicalFile) || path.startsWith(jaWorkRoot.canonicalFile)
     }
 
     private fun under(file: File, root: File): Boolean {
@@ -550,15 +605,21 @@ internal fun subtitleFilesIn(root: File): List<File> {
     return found
 }
 
-internal fun downloadWorkDirectory(file: File, asmrRoot: File, dlsiteRoot: File, biliRoot: File? = null): File? {
+internal fun downloadWorkDirectory(
+    file: File, asmrRoot: File, dlsiteRoot: File, biliRoot: File? = null, jaRoot: File? = null, jaWorkRoot: File? = null,
+): File? {
     val path = runCatching { file.canonicalPath }.getOrNull() ?: return null
     val asmr = asmrRoot.canonicalPath
     val dlsite = dlsiteRoot.canonicalPath
     val bili = biliRoot?.canonicalPath
+    val ja = jaRoot?.canonicalPath
+    val jaWork = jaWorkRoot?.canonicalPath
     val root = when {
         isInsidePath(path, asmr) -> asmr
         isInsidePath(path, dlsite) -> dlsite
         bili != null && isInsidePath(path, bili) -> bili
+        ja != null && isInsidePath(path, ja) -> ja
+        jaWork != null && isInsidePath(path, jaWork) -> jaWork
         else -> return null
     }
     val parent = File(path).parent ?: return null
@@ -567,7 +628,7 @@ internal fun downloadWorkDirectory(file: File, asmrRoot: File, dlsiteRoot: File,
     if (relative.isBlank() || relative == ".") return null
     val key = relative.substringBefore('/').substringBefore('\\')
     if (key.isBlank() || key == ".") return null
-    return File(root, key)
+    return if (root == jaWork) File(root, "$key/files") else File(root, key)
 }
 
 private fun isInsidePath(path: String, root: String): Boolean {

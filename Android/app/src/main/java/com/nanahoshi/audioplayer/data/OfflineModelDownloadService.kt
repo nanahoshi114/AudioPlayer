@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.R
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -68,7 +70,7 @@ internal class OfflineModelDownloadService : Service() {
         if (foreground) return true
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             notifications.createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "模型下载", NotificationManager.IMPORTANCE_LOW),
+                NotificationChannel(CHANNEL_ID, getString(R.string.channel_model_downloads), NotificationManager.IMPORTANCE_LOW),
             )
         }
         return try {
@@ -90,7 +92,7 @@ internal class OfflineModelDownloadService : Service() {
     }
 
     private fun reportStartFailure() {
-        application.graph().messages.value = "无法启动后台模型下载，请回到设置页重试"
+        application.graph().show(R.string.notification_model_start_failed)
     }
 
     private fun download(model: OfflineWhisperModel, source: ModelDownloadSource) {
@@ -160,7 +162,7 @@ internal class OfflineModelDownloadService : Service() {
         )
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentTitle("正在下载听写模型")
+            .setContentTitle(getString(R.string.notification_model_title))
             .setContentIntent(openApp)
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
             .setOngoing(true)
@@ -172,13 +174,14 @@ internal class OfflineModelDownloadService : Service() {
         var total = 0L
         for ((model, transfer) in transfers) {
             val state = managers.getValue(model).state.value as? OfflineWhisperModelState.Downloading ?: continue
-            val label = if (model == OfflineWhisperModel.SenseVoice) "SenseVoiceSmall" else "Parakeet"
+            val label = getString(if (model == OfflineWhisperModel.SenseVoice) R.string.settings_model_sensevoice else R.string.settings_model_parakeet_short)
             val percent = state.bytesDone * 100 / state.bytesTotal
-            val status = if (state.bytesDone >= state.bytesTotal) "正在校验和安装" else "${state.source.label} · $percent%"
+            val status = if (state.bytesDone >= state.bytesTotal) getString(R.string.notification_model_installing)
+            else getString(R.string.notification_model_progress, state.source.label, percent)
             lines += "$label · $status"
             done += state.bytesDone.coerceAtMost(state.bytesTotal)
             total += state.bytesTotal
-            builder.addAction(0, "取消 $label", transfer.cancel)
+            builder.addAction(0, getString(R.string.notification_model_cancel, label), transfer.cancel)
         }
         if (lines.isNotEmpty()) {
             builder.setContentText(lines.joinToString(" / "))
@@ -189,19 +192,19 @@ internal class OfflineModelDownloadService : Service() {
     }
 
     override fun onTimeout(startId: Int, fgsType: Int) {
-        cancelTransfers("后台下载超时，请重试")
+        cancelTransfers(TextRef.Res(R.string.download_error_timeout))
         stopSelf()
     }
 
     override fun onDestroy() {
-        cancelTransfers("后台下载中断，请重试")
+        cancelTransfers(TextRef.Res(R.string.notification_model_interrupted))
         releaseWakeLock()
         scope.cancel()
         if (foreground) ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }
 
-    private fun cancelTransfers(message: String) {
+    private fun cancelTransfers(message: TextRef) {
         for ((model, transfer) in transfers) {
             managers.getValue(model).cancelDownload(transfer.job, message)
             transfer.cancel.cancel()

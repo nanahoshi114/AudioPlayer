@@ -1,5 +1,6 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.text.PersistedErrors
 import android.content.Context
 import android.content.ContextWrapper
 import androidx.room.Room
@@ -179,6 +180,7 @@ class StoredCatalogOverlayAndroidTest {
             "subtitle-registration-${UUID.randomUUID()}").apply { mkdirs() }
         val context = testContext(root)
         val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        var translatorToClose: TranslateCenter? = null
         try {
             val credentials = CredentialStore(context)
             val subtitles = SubtitleSource(context, db, BilibiliClient(credentials), AsmrClient())
@@ -186,6 +188,7 @@ class StoredCatalogOverlayAndroidTest {
             val requests = SubtitleTaskRequests { starts.trySend(it).isSuccess }
             val recovery = kotlinx.coroutines.Job().apply { complete() }
             val translate = TranslateCenter(context, db, credentials, subtitles, requests, recovery)
+            translatorToClose = translate
             val row = queueRow(77L)
             val source = com.nanahoshi.audioplayer.playback.LoadedSubtitles(
                 cues = listOf(SubtitleCue(0, 1000, "こんにちは")), generatedEmpty = false, generated = true,
@@ -201,12 +204,24 @@ class StoredCatalogOverlayAndroidTest {
                     }.first { it.operation == task }
                     assertEquals("abc", job.generatedFingerprint)
                     assertEquals(task.name, job.kind)
-                    checkNotNull(requests.take(requestId)).cancel(SubtitleTaskStopped(SUBTITLE_INTERRUPTED))
+                    val request = checkNotNull(requests.take(requestId))
+                    val expected = if (task == SubtitleTask.TRANSLATE) {
+                        translate.cancel(job.id)
+                        PersistedErrors.CANCELLED
+                    } else {
+                        request.cancel(SubtitleTaskStopped(PersistedErrors.SUBTITLE_TIMEOUT))
+                        PersistedErrors.SUBTITLE_TIMEOUT
+                    }
+                    val failed = db.translations().observe().first { rows ->
+                        rows.any { it.id == job.id && it.status == DownloadStatus.FAILED }
+                    }.first { it.id == job.id }
+                    assertEquals(expected, failed.error)
+                    request.cancel(SubtitleTaskStopped(expected))
                     assertTrue(runCatching { result.await() }.exceptionOrNull() is SubtitleTaskStopped)
-                    db.translations().observe().first { rows -> rows.any { it.id == job.id && it.status == DownloadStatus.FAILED } }
                 }
             }
         } finally {
+            translatorToClose?.close()
             db.close()
             root.deleteRecursively()
         }
@@ -439,6 +454,7 @@ class StoredCatalogOverlayAndroidTest {
             "subtitle-stale-fingerprint-${UUID.randomUUID()}").apply { mkdirs() }
         val context = testContext(root)
         val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        var translatorToClose: TranslateCenter? = null
         try {
             val credentials = CredentialStore(context)
             val subtitles = SubtitleSource(context, db, BilibiliClient(credentials), AsmrClient())
@@ -446,6 +462,7 @@ class StoredCatalogOverlayAndroidTest {
             val requests = SubtitleTaskRequests { starts.trySend(it).isSuccess }
             val recovery = kotlinx.coroutines.Job().apply { complete() }
             val translate = TranslateCenter(context, db, credentials, subtitles, requests, recovery)
+            translatorToClose = translate
             // DONE 听写记录存在但生成文件缺失：翻译目标应以用户当前看到的非生成字幕为准。
             db.whisper().insert(WhisperJobEntity(
                 title = "song", fingerprint = "stale", trackId = 77L, localPath = null, remoteJobId = null,
@@ -464,6 +481,7 @@ class StoredCatalogOverlayAndroidTest {
                 db.translations().observe().first { rows -> rows.any { it.id == job.id && it.status == DownloadStatus.FAILED } }
             }
         } finally {
+            translatorToClose?.close()
             db.close()
             root.deleteRecursively()
         }

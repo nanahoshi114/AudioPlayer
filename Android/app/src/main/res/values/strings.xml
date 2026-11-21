@@ -1,3 +1,78 @@
 <resources>
     <string name="app_name">音频播放器</string>
+
+    <!-- 通用动作与状态 -->
+    <string name="common_back">返回</string>
+    <string name="common_cancel">取消</string>
+    <string name="common_close">关闭</string>
+    <string name="common_retry">重试</string>
+    <string name="common_delete">删除</string>
+    <string name="common_remove">移除</string>
+    <string name="common_stop">中止</string>
+    <string name="common_done">完成</string>
+    <string name="common_failed">失败</string>
+    <string name="common_more">更多</string>
+    <string name="common_add_to_library">加入音频库</string>
+    <string name="common_keep">保留</string>
+    <string name="common_continue">继续</string>
+    <string name="common_confirm">确定</string>
+    <string name="common_save">保存</string>
+    <string name="common_download">下载</string>
+    <string name="common_selected_count">已选 %1$d 项</string>
+    <string name="common_more_actions">更多批量操作</string>
+    <string name="common_cancel_selection">取消选择</string>
+    <string name="common_loading">正在加载</string>
+    <string name="common_load_failed">暂时无法加载</string>
+
+    <!-- 底部导航与全局提示 -->
+    <string name="nav_library">音频库</string>
+    <string name="nav_playlists">播放列表</string>
+    <string name="nav_online">在线搜索</string>
+    <string name="nav_mine">我的</string>
+    <string name="nav_settings">设置</string>
+    <string name="clipboard_lookup_hint">可能是作品编号</string>
+    <string name="clipboard_lookup_action">查找作品</string>
+    <string name="sleep_timer_finished">定时关闭时间已到，播放已暂停</string>
+    <string name="download_cancelled">已取消下载</string>
+
+    <!-- 顶栏与任务入口 -->
+    <string name="common_download_tasks">下载与字幕任务</string>
+    <string name="common_download_tasks_active">下载与字幕任务，%1$d 项进行中</string>
+
+    <!-- 通知渠道 -->
+    <string name="channel_audio_downloads">音频下载</string>
+    <string name="channel_model_downloads">模型下载</string>
+    <string name="channel_subtitle_tasks">字幕任务</string>
+
+    <!-- 无障碍描述 -->
+    <string name="a11y_back">返回</string>
+    <string name="a11y_cancel_selection">取消选择</string>
+    <string name="a11y_sort_name">排序：按名称</string>
+    <string name="a11y_sort_added">排序：按加入时间</string>
+    <string name="a11y_delete_filter">删除这个搜索条件</string>
+    <string name="a11y_sample_image">作品样图 %1$d</string>
+    <string name="a11y_folder_actions">文件夹操作</string>
+    <string name="a11y_video_actions">视频操作</string>
+    <string name="a11y_work_actions">作品操作</string>
+    <string name="a11y_track_actions">曲目操作</string>
+    <string name="a11y_file_actions">文件操作</string>
+    <string name="a11y_subtitle_actions">字幕操作</string>
+    <string name="a11y_playlist_actions">播放列表操作</string>
+    <string name="a11y_playlist_replace_queue">用这个播放列表替换当前播放队列</string>
+    <string name="a11y_queue_remove">从队列移除</string>
+    <string name="a11y_playlist_remove">从播放列表移除</string>
+    <string name="a11y_drag_sort">拖动排序</string>
+    <string name="a11y_close">关闭</string>
+    <string name="a11y_play">播放</string>
+    <string name="a11y_pause">暂停</string>
+    <string name="a11y_next">下一首</string>
+    <string name="a11y_previous">上一首</string>
+    <string name="a11y_whisper_help">听写说明</string>
+    <string name="a11y_translate_help">翻译说明</string>
+    <string name="a11y_bili_login_help">B 站登录说明</string>
+    <string name="a11y_bili_qr">B 站登录二维码</string>
+    <string name="a11y_import_cover">导入内容封面</string>
+    <string name="a11y_selected">已选</string>
+    <string name="a11y_checked">已选择</string>
+    <string name="a11y_verify_current_post">在 App 内验证当前篇目</string>
 </resources>

@@ -3,6 +3,7 @@ package com.nanahoshi.audioplayer.ui.playlist
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.graph
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
@@ -48,7 +49,7 @@ class PlaylistViewModel(app: Application) : AndroidViewModel(app) {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                graph.messages.value = failure.message?.takeIf { it.isNotBlank() } ?: "操作失败，请重试"
+                graph.showError(failure, R.string.playlist_operation_failed)
             }
         }
     }

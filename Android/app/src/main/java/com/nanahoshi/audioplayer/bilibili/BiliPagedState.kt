@@ -1,5 +1,8 @@
 package com.nanahoshi.audioplayer.bilibili
 
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.text.userTextOr
+import com.nanahoshi.audioplayer.R
 import androidx.compose.runtime.*
 import kotlinx.coroutines.*
 
@@ -7,7 +10,7 @@ import kotlinx.coroutines.*
 internal class BiliPagedState<T, K>(private val scope: CoroutineScope, private val key: (T) -> K) {
     var items by mutableStateOf<List<T>>(emptyList()); private set
     var loading by mutableStateOf(false); private set
-    var error by mutableStateOf<String?>(null); private set
+    var error by mutableStateOf<TextRef?>(null); private set
     var hasMore by mutableStateOf(false); private set
     var searched by mutableStateOf(false); private set
     var paused by mutableStateOf(false); private set
@@ -37,7 +40,7 @@ internal class BiliPagedState<T, K>(private val scope: CoroutineScope, private v
                 items = merged.items; hasMore = merged.hasMore; nextPage = page + 1
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (failure: Exception) {
-                if (token == generation) error = if (failure is BilibiliException) failure.message else "B 站读取失败，请检查网络后重试"
+                if (token == generation) error = failure.userTextOr(R.string.bilibili_error_page_network)
             } finally { if (token == generation) loading = false }
         }
     }

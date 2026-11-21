@@ -1,7 +1,10 @@
 package com.nanahoshi.audioplayer.ui.components
 
+import com.nanahoshi.audioplayer.R
+import androidx.compose.ui.res.stringResource
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -11,6 +14,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nanahoshi.audioplayer.data.DlsiteDownloadMode
 import com.nanahoshi.audioplayer.data.DlsiteDownloadRequests
@@ -21,17 +25,16 @@ fun DlsiteDownloadDialog(requests: DlsiteDownloadRequests) {
     val prompt = pending ?: return
     AlertDialog(
         onDismissRequest = { requests.answer(prompt.id, null) },
-        title = { Text("选择下载方式") },
+        title = { Text(stringResource(R.string.dlsite_download_pick_title)) },
         text = {
-            Column(Modifier.verticalScroll(rememberScrollState())) {
+            Column(Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState())) {
                 Text(
-                    if (prompt.allowPartial) {
-                        "下载部分文件时，DLsite Play 可能会压缩音频、降低音质。是否改为下载完整原始包并自动解压？"
-                    } else {
-                        "所选内容里有无法单独下载的文件，需要下载完整原始包并自动解压。"
-                    },
+                    stringResource(
+                        if (prompt.allowPartial) R.string.dlsite_download_partial_warning
+                        else R.string.dlsite_download_archive_required,
+                    ),
                 )
-                Text("完整原始包的音质以作者提供的文件为准。", style = MaterialTheme.typography.bodySmall)
+                Text(stringResource(R.string.dlsite_download_archive_note), style = MaterialTheme.typography.bodySmall)
                 if (prompt.workNames.isNotEmpty()) {
                     Text(prompt.workNames.joinToString("\n"), style = MaterialTheme.typography.bodySmall)
                 }
@@ -40,15 +43,15 @@ fun DlsiteDownloadDialog(requests: DlsiteDownloadRequests) {
         confirmButton = {
             Column(Modifier.fillMaxWidth()) {
                 TextButton(onClick = { requests.answer(prompt.id, DlsiteDownloadMode.ARCHIVE) }, modifier = Modifier.fillMaxWidth()) {
-                    Text("下载完整原始包")
+                    Text(stringResource(R.string.dlsite_download_archive))
                 }
                 if (prompt.allowPartial) {
                     TextButton(onClick = { requests.answer(prompt.id, DlsiteDownloadMode.PARTIAL) }, modifier = Modifier.fillMaxWidth()) {
-                        Text("仅下载所选文件")
+                        Text(stringResource(R.string.dlsite_download_selected))
                     }
                 }
                 TextButton(onClick = { requests.answer(prompt.id, null) }, modifier = Modifier.fillMaxWidth()) {
-                    Text("取消")
+                    Text(stringResource(R.string.common_cancel))
                 }
             }
         },

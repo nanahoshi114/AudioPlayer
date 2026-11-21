@@ -1,11 +1,15 @@
 package com.nanahoshi.audioplayer.ui.bilibili
 
+import com.nanahoshi.audioplayer.text.resolveUserError
 import android.app.Application
+import androidx.annotation.StringRes
 import androidx.compose.runtime.*
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.bilibili.*
 import com.nanahoshi.audioplayer.graph
+import com.nanahoshi.audioplayer.text.TextRef
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.drop
 import kotlin.random.Random
@@ -16,6 +20,8 @@ internal data class CollectionPreparation(val action: CollectionAction, val deta
 
 class BiliCollectionViewModel(app: Application) : AndroidViewModel(app) {
     private val graph = app.graph()
+    private val appContext = app.applicationContext
+    private fun text(@StringRes id: Int, vararg args: Any): String = appContext.getString(id, *args)
     private val repository = graph.biliCollections
     var collection by mutableStateOf<BiliCollection?>(null); private set
     private var sourceVideos by mutableStateOf<List<BiliVideoHit>>(emptyList())
@@ -72,12 +78,12 @@ class BiliCollectionViewModel(app: Application) : AndroidViewModel(app) {
         val session = graph.credentials.biliSession.value
         return repository.refresh(value, savedId, { token == generation && session == graph.credentials.biliSession.value }) { partial ->
             if (token == generation) {
-                progress = "已读取 ${partial.size} 个视频"
+                progress = text(R.string.bilibili_read_count, partial.size)
                 if (!complete) sourceVideos = partial
             }
         }.also {
             currentCoroutineContext().ensureActive()
-            check(token == generation && session == graph.credentials.biliSession.value) { "读取已取消" }
+            check(token == generation && session == graph.credentials.biliSession.value) { text(R.string.bilibili_read_cancelled) }
             collection = it.collection
             if (it.complete) {
                 sourceVideos = it.videos
@@ -105,11 +111,11 @@ class BiliCollectionViewModel(app: Application) : AndroidViewModel(app) {
                     } else {
                         "${snapshot.videos.size}"
                     }
-                    error = "目录可能不完整：已读取 $count 个视频，可刷新重试"
+                    error = text(R.string.bilibili_catalogue_incomplete, count)
                 }
             }
             catch (cancelled: CancellationException) { throw cancelled }
-            catch (failure: Exception) { error = failure.message ?: "合集读取失败，请重试" }
+            catch (failure: Exception) { error = appContext.resolveUserError(failure, R.string.bilibili_collection_read_failed) }
             finally { if (token == generation) loading = false }
         }
     }
@@ -131,10 +137,10 @@ class BiliCollectionViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 stopRefresh()
                 savedId = repository.bookmark(value)
-                graph.messages.value = "已收藏在线列表"
+                graph.show(R.string.bilibili_bookmarked)
                 refresh()
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (failure: Exception) { error = failure.message ?: "收藏失败，请重试" }
+            catch (failure: Exception) { error = appContext.resolveUserError(failure, R.string.bilibili_bookmark_failed) }
         }
     }
 
@@ -147,7 +153,7 @@ class BiliCollectionViewModel(app: Application) : AndroidViewModel(app) {
                 repository.unbookmark(id); savedId = null
                 if (savedRoute) removed = true
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { error = "取消收藏失败，请重试" }
+            catch (_: Exception) { error = text(R.string.bilibili_unbookmark_failed) }
         }
     }
 
@@ -168,24 +174,30 @@ class BiliCollectionViewModel(app: Application) : AndroidViewModel(app) {
                     if (!complete) readDirectory()
                     videos
                 }
-                if (items.isEmpty()) { error = "这个合集没有可播放或保存的视频"; return@launch }
+                if (items.isEmpty()) { error = text(R.string.bilibili_no_videos_in_collection); return@launch }
                 val details = mutableListOf<BiliVideoDetails>()
                 val failed = mutableListOf<String>()
                 for ((index, video) in items.distinctBy { it.bvid }.withIndex()) {
-                    progress = "正在准备分 P ${index + 1}/${items.size}"
+                    progress = text(R.string.bilibili_preparing_parts, index + 1, items.size)
                     try {
                         val result = repository.details(video, savedId, allowPartialLocal = action == CollectionAction.SINGLE)
-                        check(result.parts.isNotEmpty()) { "没有可播放的分 P" }
+                        check(result.parts.isNotEmpty()) { text(R.string.bilibili_no_playable_parts) }
                         details += result.copy(parts = result.parts.distinctBy { it.cid }.sortedBy { it.page })
                     } catch (cancelled: CancellationException) { throw cancelled }
-                    catch (failure: Exception) { failed += "${video.title}：${failure.message ?: "读取失败"}" }
+                    catch (failure: Exception) {
+                        failed += text(
+                            R.string.bilibili_item_failure,
+                            video.title,
+                            appContext.resolveUserError(failure, R.string.bilibili_read_failed_short),
+                        )
+                    }
                     currentCoroutineContext().ensureActive()
                 }
                 if (token != generation) return@launch
                 val result = CollectionPreparation(action, details, failed, items)
                 if (failed.isNotEmpty()) pending = result else dispatch(result)
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (failure: Exception) { error = failure.message ?: "操作失败，请重试" }
+            catch (failure: Exception) { error = appContext.resolveUserError(failure, R.string.bilibili_prepare_collection_failed) }
             finally { if (token == generation) preparing = false }
         }
     }
@@ -200,7 +212,7 @@ class BiliCollectionViewModel(app: Application) : AndroidViewModel(app) {
             preparing = true
             try { dispatch(value) }
             catch (cancelled: CancellationException) { throw cancelled }
-            catch (failure: Exception) { error = failure.message ?: "操作失败" }
+            catch (failure: Exception) { error = appContext.resolveUserError(failure, R.string.bilibili_collection_action_failed) }
             finally { if (token == generation) preparing = false }
         }
     }
@@ -234,7 +246,7 @@ class BiliCollectionViewModel(app: Application) : AndroidViewModel(app) {
                 currentCoroutineContext().ensureActive()
                 graph.player.replaceAndPlayItems(listOf(item))
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { error = "视频准备失败，请重试" }
+            catch (_: Exception) { error = text(R.string.bilibili_video_prepare_failed) }
         }
     }
     fun dismissParts() { singleParts = emptyList() }
@@ -247,7 +259,7 @@ class BiliCollectionViewModel(app: Application) : AndroidViewModel(app) {
             preparing = true
             try { import(details, CollectionAction.COPY, name.trim()) }
             catch (cancelled: CancellationException) { throw cancelled }
-            catch (failure: Exception) { error = failure.message ?: "复制失败" }
+            catch (failure: Exception) { error = appContext.resolveUserError(failure, R.string.bilibili_copy_failed) }
             finally { if (token == generation) preparing = false }
         }
     }
@@ -261,22 +273,33 @@ class BiliCollectionViewModel(app: Application) : AndroidViewModel(app) {
             val saved = mutableListOf<Long>()
             val copiedParts = mutableListOf<BiliPart>()
             for ((index, request) in requests.withIndex()) {
-                progress = "正在处理 ${index + 1}/${requests.size}"
+                progress = text(R.string.bilibili_processing, index + 1, requests.size)
                 try {
                     graph.library.importBili(request)
                     for (part in request.parts) saved += checkNotNull(graph.db.tracks().findByBvid(part.bvid, part.cid)).id
                     copiedParts += request.parts
                 } catch (cancelled: CancellationException) { throw cancelled }
-                catch (failure: Exception) { failed += "${request.video.title}：${failure.message ?: "处理失败"}" }
+                catch (failure: Exception) {
+                    failed += text(
+                        R.string.bilibili_item_failure,
+                        request.video.title,
+                        appContext.resolveUserError(failure, R.string.bilibili_process_failed),
+                    )
+                }
             }
             if (action == CollectionAction.COPY && copiedParts.isNotEmpty()) {
                 graph.library.publishBiliPlaylist(checkNotNull(name), copiedParts)
             }
             selected = emptySet()
-            graph.messages.value = when (action) {
-                CollectionAction.COPY -> if (saved.isEmpty()) "没有可保存的音频，未创建播放列表" else "已复制为普通播放列表"
-                else -> "已加入 ${saved.distinct().size} 首到音频库"
-            }
+            graph.show(
+                when (action) {
+                    CollectionAction.COPY -> TextRef.Res(
+                        if (saved.isEmpty()) R.string.bilibili_no_audio_to_copy else R.string.bilibili_copied_playlist,
+                    )
+                    else -> if (saved.isEmpty()) TextRef.Res(R.string.bilibili_nothing_to_add)
+                    else TextRef.Res(R.string.bilibili_added_count, listOf(saved.distinct().size))
+                },
+            )
             if (failed.isNotEmpty()) error = failed.joinToString("\n")
         } finally { committing = false }
     }

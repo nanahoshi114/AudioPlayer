@@ -1,5 +1,9 @@
 package com.nanahoshi.audioplayer.ui.bilibili
 
+import com.nanahoshi.audioplayer.text.resolveNoUrl
+import androidx.compose.ui.platform.LocalContext
+import com.nanahoshi.audioplayer.R
+import androidx.compose.ui.res.stringResource
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
@@ -69,11 +73,11 @@ fun BiliBrowser(onOpenCollection: (BiliCollection) -> Unit = {}, viewModel: Bili
     Column(Modifier.fillMaxSize()) {
         if (uploader == null) {
             Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(viewModel.mode == BiliSearchMode.VIDEO, { viewModel.switchMode(BiliSearchMode.VIDEO) }, label = { Text("视频") })
-                FilterChip(viewModel.mode == BiliSearchMode.UPLOADER, { viewModel.switchMode(BiliSearchMode.UPLOADER) }, label = { Text("UP 主") })
+                FilterChip(viewModel.mode == BiliSearchMode.VIDEO, { viewModel.switchMode(BiliSearchMode.VIDEO) }, label = { Text(stringResource(R.string.bilibili_mode_video)) })
+                FilterChip(viewModel.mode == BiliSearchMode.UPLOADER, { viewModel.switchMode(BiliSearchMode.UPLOADER) }, label = { Text(stringResource(R.string.bilibili_mode_uploader)) })
             }
             OutlinedTextField(value = viewModel.query, onValueChange = viewModel::updateQuery,
-                label = { Text(if (users) "UP 主昵称、UID 或主页链接" else "关键词、BV 号或视频链接") }, singleLine = true,
+                label = { Text(stringResource(if (users) R.string.bilibili_search_user_hint else R.string.bilibili_search_video_hint)) }, singleLine = true,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 keyboardActions = KeyboardActions(onSearch = { viewModel.search() }),
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp))
@@ -86,54 +90,73 @@ fun BiliBrowser(onOpenCollection: (BiliCollection) -> Unit = {}, viewModel: Bili
             )
         } else {
             Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = viewModel::closeUploader) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回搜索结果") }
+                IconButton(onClick = viewModel::closeUploader) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.bilibili_back_results)) }
                 Column(Modifier.weight(1f)) {
                     Text(uploader.name, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
-                    Text("UID ${uploader.mid} · 最新投稿", style = MaterialTheme.typography.bodySmall)
+                    Text(stringResource(R.string.bilibili_uploader_latest, uploader.mid), style = MaterialTheme.typography.bodySmall)
                 }
-                TextButton(onClick = viewModel::refreshUploader) { Text("刷新") }
+                TextButton(onClick = viewModel::refreshUploader) { Text(stringResource(R.string.bilibili_refresh)) }
             }
         }
         if (uploader != null) Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(!viewModel.showingCollections, { viewModel.showCollections(false) }, label = { Text("投稿") })
-            FilterChip(viewModel.showingCollections, { viewModel.showCollections(true) }, label = { Text("合集·系列") })
+            FilterChip(!viewModel.showingCollections, { viewModel.showCollections(false) }, label = { Text(stringResource(R.string.bilibili_submissions)) })
+            FilterChip(viewModel.showingCollections, { viewModel.showCollections(true) }, label = { Text(stringResource(R.string.bilibili_collections)) })
         }
         if (uploader != null && viewModel.showingCollections) {
             CollectionCatalogue(viewModel, onOpenCollection, collectionState, Modifier.weight(1f))
         } else {
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(if (loading) "正在读取…" else "$count ${if (users) "位 UP 主" else "个视频"}", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-            if (loading) TextButton(onClick = viewModel::cancelSearch) { Text("中止") }
-            else if (uploader == null) TextButton(onClick = viewModel::search, enabled = !viewModel.working) { Text("查找") }
+            Text(
+                if (loading) stringResource(R.string.bilibili_loading)
+                else stringResource(if (users) R.string.bilibili_count_uploaders else R.string.bilibili_count_videos, count),
+                Modifier.weight(1f),
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (loading) TextButton(onClick = viewModel::cancelSearch) { Text(stringResource(R.string.common_stop)) }
+            else if (uploader == null) TextButton(onClick = viewModel::search, enabled = !viewModel.working) { Text(stringResource(R.string.bilibili_find)) }
             if (!users && items.isNotEmpty()) TextButton(onClick = viewModel::selectAll) {
-                Text(if (viewModel.selected.size == items.size) "取消全选" else "全选已加载")
+                Text(stringResource(if (viewModel.selected.size == items.size) R.string.bilibili_deselect_all else R.string.bilibili_select_all_loaded))
             }
         }
         if (viewModel.selected.isNotEmpty()) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("已选 ${viewModel.selected.size} 个", Modifier.weight(1f))
-                TextButton(onClick = viewModel::clearSelection) { Text("取消") }
+                Text(stringResource(R.string.bilibili_selected_count, viewModel.selected.size), Modifier.weight(1f))
+                TextButton(onClick = viewModel::clearSelection) { Text(stringResource(R.string.common_cancel_selection)) }
                 TextButton(enabled = !viewModel.resolving && !viewModel.working, onClick = {
                     viewModel.prepare(BiliAction.SAVE, items.filter { it.bvid in viewModel.selected })
-                }) { Text("加入音频库") }
+                }) { Text(stringResource(R.string.common_add_to_library)) }
             }
         }
         if (viewModel.resolving) Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("正在读取分 P…", Modifier.weight(1f))
-            TextButton(onClick = viewModel::cancelParts) { Text("中止") }
+            Text(stringResource(R.string.bilibili_reading_parts), Modifier.weight(1f))
+            TextButton(onClick = viewModel::cancelParts) { Text(stringResource(R.string.common_stop)) }
         }
         if (loading || viewModel.resolving || viewModel.working) LinearProgressIndicator(Modifier.fillMaxWidth())
         if (count == 0 && !loading && error == null) {
-            EmptyState(title = if (searched) (if (users) "没有找到 UP 主" else "没有找到视频") else "搜索 B 站音频",
-                message = if (uploader != null) "这位 UP 主暂时没有投稿。"
-                    else if (users) "输入昵称查找 UP 主，也可以输入 UID 或主页链接。" else "输入关键词、BV 号或视频链接，查找后可播放或加入音频库。")
+            EmptyState(
+                title = stringResource(
+                    when {
+                        uploader != null -> R.string.bilibili_empty_video_title
+                        searched && users -> R.string.bilibili_empty_uploader_title
+                        searched -> R.string.bilibili_empty_video_title
+                        else -> R.string.bilibili_empty_search_title
+                    },
+                ),
+                message = stringResource(
+                    when {
+                        uploader != null -> R.string.bilibili_empty_uploader_message
+                        users -> R.string.bilibili_empty_user_hint
+                        else -> R.string.bilibili_empty_video_hint
+                    },
+                ),
+            )
         }
         LazyColumn(state = state, modifier = Modifier.weight(1f)) {
             if (users) {
                 items(viewModel.uploaders.items, key = { it.mid }) { user ->
                     ListItem(headlineContent = { Text(user.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                         supportingContent = { Column {
-                            Text("UID ${user.mid} · 粉丝 ${user.fans ?: "—"} · 投稿 ${user.videos ?: "—"}", style = MaterialTheme.typography.bodySmall)
+                            Text(stringResource(R.string.bilibili_user_summary, user.mid, user.fans ?: "—", user.videos ?: "—"), style = MaterialTheme.typography.bodySmall)
                             if (user.signature.isNotBlank()) Text(user.signature, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         } }, leadingContent = { CoverImage(user.avatar) }, modifier = Modifier.clickable { viewModel.openUploader(user) })
                 }
@@ -149,16 +172,19 @@ fun BiliBrowser(onOpenCollection: (BiliCollection) -> Unit = {}, viewModel: Bili
                     ListItem(headlineContent = { Text(video.title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
                         supportingContent = { Column {
                             Text(listOf(video.author, formatDuration(video.durationMs)).filter { it.isNotBlank() }.joinToString(" · "), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(listOfNotNull(if (saved.isNotEmpty()) "已加入 ${saved.size} 个分 P" else null,
-                                if (downloaded > 0) "已下载 $downloaded 个分 P" else null, if (active > 0) "下载中 $active 个分 P" else null)
-                                .joinToString(" · ").ifBlank { "B 站 · ${video.bvid}" }, style = MaterialTheme.typography.labelSmall)
+                            Text(listOfNotNull(
+                                if (saved.isNotEmpty()) stringResource(R.string.bilibili_saved_parts, saved.size) else null,
+                                if (downloaded > 0) stringResource(R.string.bilibili_downloaded_parts, downloaded) else null,
+                                if (active > 0) stringResource(R.string.bilibili_active_parts, active) else null,
+                            )
+                                .joinToString(" · ").ifBlank { stringResource(R.string.bilibili_bvid_label, video.bvid) }, style = MaterialTheme.typography.labelSmall)
                         } },
                         leadingContent = { if (viewModel.selected.isEmpty()) CoverImage(video.coverUrl)
                             else Checkbox(video.bvid in viewModel.selected, { viewModel.toggle(video.bvid) }) },
                         trailingContent = { if (viewModel.selected.isEmpty()) Box {
-                            IconButton(onClick = { menu = true }, enabled = !busy) { Icon(Icons.Default.MoreVert, "更多") }
+                            IconButton(onClick = { menu = true }, enabled = !busy) { Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.a11y_video_actions)) }
                             DropdownMenu(menu, { menu = false }) {
-                                DropdownMenuItem(text = { Text(BiliAction.SAVE.label) }, onClick = {
+                                DropdownMenuItem(text = { Text(stringResource(BiliAction.SAVE.labelRes)) }, onClick = {
                                     menu = false; viewModel.prepare(BiliAction.SAVE, listOf(video))
                                 })
                             }
@@ -170,19 +196,21 @@ fun BiliBrowser(onOpenCollection: (BiliCollection) -> Unit = {}, viewModel: Bili
             }
             if (error != null) item(key = "error") {
                 Column(Modifier.padding(16.dp)) {
-                    Text(error, color = MaterialTheme.colorScheme.error)
-                    TextButton(onClick = more) { Text("重试") }
+                    Text(LocalContext.current.resolveNoUrl(error, R.string.bilibili_error_page_network), color = MaterialTheme.colorScheme.error)
+                    TextButton(onClick = more) { Text(stringResource(R.string.common_retry)) }
                 }
-            } else if (hasMore && !loading) item(key = "more") { TextButton(onClick = more, modifier = Modifier.fillMaxWidth()) { Text("加载更多") } }
+            } else if (hasMore && !loading) item(key = "more") { TextButton(onClick = more, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.bilibili_load_more)) } }
         }
     }
     }
     viewModel.choice?.let { choice ->
         val allParts = choice.groups.sumOf { it.parts.size }
-        AlertDialog(onDismissRequest = viewModel::cancelParts, title = { Text("选择分 P · ${choice.action.label}") },
+        AlertDialog(onDismissRequest = viewModel::cancelParts, title = {
+            Text(stringResource(R.string.bilibili_select_parts_action, stringResource(choice.action.labelRes)))
+        },
             text = { Column {
                 if (choice.action != BiliAction.PLAY) TextButton(onClick = viewModel::selectAllParts) {
-                    Text(if (choice.selected.size == allParts) "取消全选" else "全选")
+                    Text(stringResource(if (choice.selected.size == allParts) R.string.bilibili_deselect_all else R.string.bilibili_select_all))
                 }
                 LazyColumn(Modifier.heightIn(max = 420.dp)) {
                     for (group in choice.groups) {
@@ -199,11 +227,11 @@ fun BiliBrowser(onOpenCollection: (BiliCollection) -> Unit = {}, viewModel: Bili
                             }
                         }
                     }
-                    if (choice.failed.isNotEmpty()) item(key = "failures-heading") { Text("以下视频读取失败，其余内容可继续：", color = MaterialTheme.colorScheme.error) }
+                    if (choice.failed.isNotEmpty()) item(key = "failures-heading") { Text(stringResource(R.string.bilibili_failures_heading), color = MaterialTheme.colorScheme.error) }
                     items(choice.failed) { Text(it, Modifier.padding(vertical = 4.dp), style = MaterialTheme.typography.bodySmall) }
                 }
-            } }, confirmButton = { TextButton(onClick = viewModel::confirmParts, enabled = choice.selected.isNotEmpty()) { Text(choice.action.label) } },
-            dismissButton = { TextButton(onClick = viewModel::cancelParts) { Text("取消") } })
+            } }, confirmButton = { TextButton(onClick = viewModel::confirmParts, enabled = choice.selected.isNotEmpty()) { Text(stringResource(choice.action.labelRes)) } },
+            dismissButton = { TextButton(onClick = viewModel::cancelParts) { Text(stringResource(R.string.common_cancel)) } })
     }
 }
 
@@ -219,10 +247,10 @@ internal fun BiliSearchFilters(
     var durationMenu by remember { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
         Box(Modifier.weight(1f)) {
-            TextButton(onClick = { orderMenu = true }, enabled = enabled) { Text(order.label) }
+            TextButton(onClick = { orderMenu = true }, enabled = enabled) { Text(stringResource(order.labelRes)) }
             DropdownMenu(expanded = orderMenu, onDismissRequest = { orderMenu = false }) {
                 BiliVideoOrder.entries.forEach { option ->
-                    DropdownMenuItem(text = { Text(option.label) }, onClick = {
+                    DropdownMenuItem(text = { Text(stringResource(option.labelRes)) }, onClick = {
                         orderMenu = false
                         onOrder(option)
                     })
@@ -230,10 +258,10 @@ internal fun BiliSearchFilters(
             }
         }
         Box(Modifier.weight(1f)) {
-            TextButton(onClick = { durationMenu = true }, enabled = enabled) { Text(duration.label) }
+            TextButton(onClick = { durationMenu = true }, enabled = enabled) { Text(stringResource(duration.labelRes)) }
             DropdownMenu(expanded = durationMenu, onDismissRequest = { durationMenu = false }) {
                 BiliVideoDuration.entries.forEach { option ->
-                    DropdownMenuItem(text = { Text(option.label) }, onClick = {
+                    DropdownMenuItem(text = { Text(stringResource(option.labelRes)) }, onClick = {
                         durationMenu = false
                         onDuration(option)
                     })

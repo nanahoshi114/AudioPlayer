@@ -1,5 +1,10 @@
 package com.nanahoshi.audioplayer.ui.library
 
+import com.nanahoshi.audioplayer.text.resolveNoUrl
+import com.nanahoshi.audioplayer.text.resolveUserError
+import com.nanahoshi.audioplayer.data.RemoteTextPreview
+import com.nanahoshi.audioplayer.R
+import androidx.compose.ui.res.stringResource
 import android.app.Application
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.ensureActive
@@ -40,6 +45,7 @@ import com.nanahoshi.audioplayer.data.toHttps
 import com.nanahoshi.audioplayer.graph
 
 class FilePreviewViewModel(app: Application) : AndroidViewModel(app) {
+    private val appContext = app.applicationContext
     private val graph = app.
     graph()
 
@@ -71,27 +77,30 @@ class FilePreviewViewModel(app: Application) : AndroidViewModel(app) {
             java.io.File(url).inputStream().use { input ->
                 val bytes = input.takeBytes(512 * 1024 + 1)
                 bytes.copyOfRange(0, minOf(bytes.size, 512 * 1024)).toString(Charsets.UTF_8) +
-                    if (bytes.size > 512 * 1024) "\n…（只显示前面一段）" else ""
+                    if (bytes.size > 512 * 1024) appContext.getString(R.string.library_file_truncated) else ""
             }
-        } else graph.asmr.readText(url)
+        } else graph.asmr.readText(url).displayText()
     } catch (error: AsmrException) {
-        error.message ?: "无法打开这个文件"
+        appContext.resolveUserError(error, R.string.library_file_open_failed)
     } catch (error: Exception) {
-        error.message ?: "无法打开这个文件"
+        appContext.resolveUserError(error, R.string.library_file_open_failed)
     }
+
+    private fun RemoteTextPreview.displayText(): String =
+        if (clipped) text + appContext.getString(R.string.library_file_truncated) else text
 
     fun cookie(): String? = graph.dlsite.playCookie()
 
     suspend fun remoteText(request: RemotePreview): String = try {
         if (request.authed || request.referer.contains("dlsite")) {
-            graph.dlsite.readText(request.url, request.referer.ifBlank { DlsiteClient.STORE_REFERER }, request.authed)
+            graph.dlsite.readText(request.url, request.referer.ifBlank { DlsiteClient.STORE_REFERER }, request.authed).displayText()
         } else {
-            graph.asmr.readText(request.url)
+            graph.asmr.readText(request.url).displayText()
         }
     } catch (cancelled: kotlinx.coroutines.CancellationException) {
         throw cancelled
     } catch (error: Exception) {
-        error.message ?: "无法打开这个文件"
+        appContext.resolveUserError(error, R.string.library_file_open_failed)
     }
 }
 
@@ -109,19 +118,19 @@ fun FilePreviewScreen(
         missing = loaded == null
     }
     Column(Modifier.fillMaxSize()) {
-        AppTopBar(title = file?.name ?: "预览", onBack = onBack)
+        AppTopBar(title = file?.name ?: stringResource(R.string.library_preview_title), onBack = onBack)
         val current = file
         when {
-            missing -> Text("找不到这个文件", modifier = Modifier.padding(16.dp))
-            current == null -> LoadingState("正在打开")
+            missing -> Text(stringResource(R.string.library_file_missing), modifier = Modifier.padding(16.dp))
+            current == null -> LoadingState(stringResource(R.string.library_file_loading))
             current.kind == FileKind.OTHER -> {
                 var request by remember(current.id) { mutableStateOf<RemotePreview?>(null) }
                 LaunchedEffect(current.id) { request = viewModel.externalRequest(current) }
-                request?.let { ExternalOpenContent(it, current.localUri, viewModel) } ?: LoadingState("正在打开")
+                request?.let { ExternalOpenContent(it, current.localUri, viewModel) } ?: LoadingState(stringResource(R.string.library_file_opening))
             }
             current.kind == FileKind.IMAGE -> {
                 if (current.localUri.isNullOrBlank() && current.remoteUrl.isBlank()) {
-                    Text("无法打开这个文件", modifier = Modifier.padding(16.dp))
+                    Text(stringResource(R.string.library_file_no_local_copy), modifier = Modifier.padding(16.dp))
                 } else {
                     ZoomImage(
                         contentDescription = current.name,
@@ -143,14 +152,15 @@ fun FilePreviewScreen(
 
 @Composable
 private fun TextPreview(file: LibraryFileEntity, viewModel: FilePreviewViewModel) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     var body by remember(file.id) { mutableStateOf<String?>(null) }
     LaunchedEffect(file.id) {
         val path = file.localUri?.takeIf { java.io.File(it).isFile } ?: file.remoteUrl
-        body = if (path.isBlank()) "这个文件还没有下载到本机" else viewModel.text(path)
+        body = if (path.isBlank()) context.getString(R.string.library_file_not_downloaded) else viewModel.text(path)
     }
     val text = body
     if (text == null) {
-        LoadingState("正在打开")
+        LoadingState(stringResource(R.string.library_file_loading))
     } else {
         Text(
             text,
@@ -196,9 +206,9 @@ fun RemotePreviewScreen(
 ) {
     val request = remember { viewModel.request() }
     Column(Modifier.fillMaxSize()) {
-        AppTopBar(title = request?.name ?: "预览", onBack = onBack)
+        AppTopBar(title = request?.name ?: stringResource(R.string.library_preview_title), onBack = onBack)
         when {
-            request == null -> Text("找不到这个文件", modifier = Modifier.padding(16.dp))
+            request == null -> Text(stringResource(R.string.library_file_missing), modifier = Modifier.padding(16.dp))
             request.kind == FileKind.OTHER -> ExternalOpenContent(request, null, viewModel)
             request.kind == FileKind.IMAGE -> {
                 val context = androidx.compose.ui.platform.LocalContext.current
@@ -233,7 +243,7 @@ private fun RemoteTextPreview(request: RemotePreview, viewModel: FilePreviewView
     }
     val text = body
     if (text == null) {
-        LoadingState("正在打开")
+        LoadingState(stringResource(R.string.library_file_opening))
     } else {
         Text(
             text,
@@ -273,12 +283,12 @@ private fun ExternalOpenContent(request: RemotePreview, localUri: String?, viewM
         }
     }
     Column(Modifier.fillMaxWidth().padding(16.dp)) {
-        Text("此文件类型暂不支持应用内预览")
+        Text(stringResource(R.string.library_file_preview_unsupported))
         if (loading) {
             com.nanahoshi.audioplayer.ui.components.RoundedProgress(
                 progress = total?.takeIf { it > 0 }?.let { bytes.toFloat() / it }, modifier = Modifier.padding(top = 16.dp))
-            Text("正在准备文件，已下载 ${com.nanahoshi.audioplayer.data.formatCacheBytes(bytes)}")
-            androidx.compose.material3.TextButton(onClick = { job?.cancel() }) { Text("取消") }
+            Text(stringResource(R.string.library_file_preparing, com.nanahoshi.audioplayer.data.formatCacheBytes(bytes)))
+            androidx.compose.material3.TextButton(onClick = { job?.cancel() }) { Text(stringResource(R.string.common_cancel)) }
         } else {
             androidx.compose.material3.FilledTonalButton(onClick = {
                 loading = true
@@ -293,18 +303,19 @@ private fun ExternalOpenContent(request: RemotePreview, localUri: String?, viewM
                                 clipData = android.content.ClipData.newRawUri("file", file.uri)
                                 addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
                             }
-                            context.startActivity(android.content.Intent.createChooser(intent, "使用其他应用打开")
+                            context.startActivity(android.content.Intent.createChooser(intent, context.getString(R.string.library_file_open_with_other))
                                 .addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION))
                         }
                     } catch (cancelled: kotlinx.coroutines.CancellationException) {
                         throw cancelled
                     } catch (_: android.content.ActivityNotFoundException) {
-                        error = "没有可打开此文件的应用"
+                        error = context.getString(R.string.library_file_no_app)
                     } catch (failure: Exception) {
-                        error = if (failure is com.nanahoshi.audioplayer.data.ExternalFileException) failure.message else "无法用其他应用打开这个文件"
+                        error = if (failure is com.nanahoshi.audioplayer.data.ExternalFileException) context.resolveNoUrl(failure.userText, R.string.library_file_open_other_failed)
+                        else context.getString(R.string.library_file_open_other_failed)
                     } finally { loading = false }
                 }
-            }, modifier = Modifier.padding(top = 12.dp)) { Text("使用其他应用打开") }
+            }, modifier = Modifier.padding(top = 12.dp)) { Text(stringResource(R.string.library_file_open_with_other)) }
         }
         error?.let { Text(it, color = androidx.compose.material3.MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 8.dp)) }
     }
@@ -317,11 +328,11 @@ private fun PreviewImage(model: Any?, contentDescription: String, modifier: Modi
     androidx.compose.runtime.key(retry) {
         coil.compose.SubcomposeAsyncImage(model = model, contentDescription = contentDescription,
             modifier = modifier, contentScale = contentScale,
-            loading = { LoadingState("正在读取图片…") },
+            loading = { LoadingState(stringResource(R.string.library_file_loading_image)) },
             error = {
                 Column(horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally) {
-                    Text("图片读取失败")
-                    androidx.compose.material3.TextButton(onClick = { retry++ }) { Text("重试") }
+                    Text(stringResource(if (model is java.io.File) R.string.library_file_local_image_failed else R.string.library_file_image_failed))
+                    androidx.compose.material3.TextButton(onClick = { retry++ }) { Text(stringResource(R.string.common_retry)) }
                 }
             })
     }

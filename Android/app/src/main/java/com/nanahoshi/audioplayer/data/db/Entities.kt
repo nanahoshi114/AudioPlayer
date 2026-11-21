@@ -21,9 +21,11 @@ enum class DownloadStatus {
 }
 
 object TranslateMark {
+    const val QUEUED = "QUEUED"
     const val RUNNING = "RUNNING"
     const val FAILED = "FAILED"
     const val DONE = "DONE"
+    fun isActive(status: String?): Boolean = status == QUEUED || status == RUNNING
 }
 
 @Entity(
@@ -143,6 +145,10 @@ data class DownloadEntity(
     val phase: String? = null,
     val workFolderId: Long? = null,
     val pendingBiliSubtitle: Boolean? = null,
+    val progressSummary: String? = null,
+    val jaEntryKey: String? = null,
+    val jaReplace: Boolean? = null,
+    val jaForce: Boolean? = null,
 )
 
 @Entity(tableName = "playlists")
@@ -202,6 +208,8 @@ data class QueueItemEntity(
     val referer: String? = null,
     val workno: String? = null,
     val fileKey: String? = null,
+    val mediaKind: String? = null,
+    val mediaPathHash: String? = null,
 )
 
 @Entity(tableName = "playback_state")
@@ -229,6 +237,8 @@ data class QueuedTrack(
     val workno: String?,
     val fileKey: String?,
     val youtubeVideoId: String? = null,
+    val mediaKind: String? = null,
+    val mediaPathHash: String? = null,
 ) {
     fun toTrack() = TrackEntity(
         id = trackId ?: 0L,
@@ -298,6 +308,7 @@ data class WhisperJobEntity(
     val awaitDownloadId: Long? = null,
     val awaitFileKey: String? = null,
     val remoteSubmittedAt: Long? = null,
+    val progressSummary: String? = null,
 )
 
 @Entity(tableName = "translation_jobs")
@@ -315,6 +326,7 @@ data class TranslationJobEntity(
     val bvid: String? = null,
     val cid: Long? = null,
     val localUri: String? = null,
+    val progressSummary: String? = null,
 )
 
 @Entity(tableName = "subtitle_publications")

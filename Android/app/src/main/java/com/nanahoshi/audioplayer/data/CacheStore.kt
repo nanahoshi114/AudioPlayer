@@ -63,11 +63,11 @@ internal fun formatCacheBytes(bytes: Long): String {
 }
 
 internal fun cacheLimitLabel(bytes: Long): String = when (bytes) {
-    100L * 1024L * 1024L -> "100MB"
-    DEFAULT_CACHE_LIMIT_BYTES -> "200MB"
-    500L * 1024L * 1024L -> "500MB"
-    1024L * 1024L * 1024L -> "1GB"
-    2L * 1024L * 1024L * 1024L -> "2GB"
+    100L * 1024L * 1024L -> "100 MB"
+    DEFAULT_CACHE_LIMIT_BYTES -> "200 MB"
+    500L * 1024L * 1024L -> "500 MB"
+    1024L * 1024L * 1024L -> "1 GB"
+    2L * 1024L * 1024L * 1024L -> "2 GB"
     else -> formatCacheBytes(bytes)
 }
 

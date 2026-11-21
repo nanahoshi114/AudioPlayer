@@ -1,5 +1,8 @@
 package com.nanahoshi.audioplayer.ui.asmr
 
+import com.nanahoshi.audioplayer.R
+import androidx.compose.ui.res.stringResource
+
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -35,11 +38,11 @@ fun WorkFactsBlock(
         if (showCover) CoverImage(coverUrl)
         Column(Modifier.padding(start = if (showCover) 12.dp else 0.dp).weight(1f)) {
             FactLine(null, facts.title.ifBlank { facts.sourceId }, singleLine && !expandTitle, emphasize = true)
-            FactLine("社团", facts.circle.ifBlank { "—" }, singleLine)
-            FactLine("声优", facts.vas.joinToString("、").ifBlank { "—" }, singleLine)
+            FactLine(stringResource(R.string.work_fact_circle), facts.circle.ifBlank { "—" }, singleLine)
+            FactLine(stringResource(R.string.work_fact_va), facts.vas.joinToString("、").ifBlank { "—" }, singleLine)
             FactLine(null, facts.sourceId.ifBlank { "—" }, singleLine)
-            FactLine("发售", facts.release.ifBlank { "—" }, singleLine)
-            FactLine("标签", facts.tags.joinToString("、").ifBlank { "—" }, singleLine)
+            FactLine(stringResource(R.string.work_fact_release), facts.release.ifBlank { "—" }, singleLine)
+            FactLine(stringResource(R.string.work_fact_tags), facts.tags.joinToString("、").ifBlank { "—" }, singleLine)
             if (!footnote.isNullOrBlank()) FactLine(null, footnote, singleLine)
         }
     }

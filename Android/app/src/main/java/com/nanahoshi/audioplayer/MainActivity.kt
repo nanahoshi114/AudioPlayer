@@ -1,5 +1,6 @@
 package com.nanahoshi.audioplayer
 
+import androidx.compose.ui.res.stringResource
 import android.Manifest
 import android.content.Intent
 import android.os.Build
@@ -84,6 +85,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import androidx.navigation.NavBackStackEntry
+import androidx.navigation.NavController
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
 import androidx.navigation.navArgument
@@ -97,6 +100,7 @@ import com.nanahoshi.audioplayer.ui.asmr.MineScreen
 import com.nanahoshi.audioplayer.ui.asmr.PurchasesScreen
 import com.nanahoshi.audioplayer.ui.asmr.OnlineSearchScreen
 import com.nanahoshi.audioplayer.ui.asmr.OnlineWorkScreen
+import com.nanahoshi.audioplayer.ui.asmr.JapaneseAsmrVerificationScreen
 import com.nanahoshi.audioplayer.ui.library.FavoriteScreen
 import com.nanahoshi.audioplayer.ui.library.FilePreviewScreen
 import com.nanahoshi.audioplayer.ui.library.RemotePreviewScreen
@@ -111,6 +115,7 @@ import com.nanahoshi.audioplayer.ui.settings.ModelSettingsScreen
 import com.nanahoshi.audioplayer.ui.settings.SettingsScreen
 import com.nanahoshi.audioplayer.ui.theme.AudioPlayerTheme
 import com.nanahoshi.audioplayer.ui.importing.ClipboardImportDialog
+import com.nanahoshi.audioplayer.ui.components.openJapaneseAsmrInBrowser
 import com.nanahoshi.audioplayer.ui.importing.ClipboardImportViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -225,6 +230,9 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+internal fun NavController.popJaDownloadVerification(entry: NavBackStackEntry): Boolean =
+    currentBackStackEntry?.id == entry.id && popBackStack()
+
 private object Routes {
     const val Library = "library"
     const val BiliCollection = "bilibili/collection?ref={ref}"
@@ -238,8 +246,18 @@ private object Routes {
     fun libraryWork(folderId: Long) = "library/work/$folderId"
     const val Playlists = "playlists"
     const val Online = "online"
-    const val OnlineWork = "online/work/{sourceId}"
-    fun onlineWork(sourceId: String) = "online/work/$sourceId"
+    const val OnlineWork = "online/work/{sourceId}?jaPost={jaPost}"
+    fun onlineWork(sourceId: String, jaPost: String? = null): String =
+        "online/work/${android.net.Uri.encode(sourceId)}" +
+            (jaPost?.let { "?jaPost=${android.net.Uri.encode(it)}" } ?: "")
+    const val JapaneseAsmrVerification = "online/japanese-asmr/verify?url={url}&rj={rj}&queueId={queueId}&mediaKey={mediaKey}&operation={operation}&token={token}"
+    fun japaneseAsmrVerification(url: String = "", rj: String? = null, queueId: Long = -1L, mediaKey: String? = null,
+        operation: String = "SYNC", token: String? = null): String =
+        "online/japanese-asmr/verify?url=${android.net.Uri.encode(url)}" +
+            "&rj=${android.net.Uri.encode(rj.orEmpty())}&queueId=$queueId&mediaKey=${android.net.Uri.encode(mediaKey.orEmpty())}" +
+            "&operation=$operation&token=${token.orEmpty()}"
+    const val JaDownloadVerification = "download/ja/verify/{token}"
+    fun jaDownloadVerification(token: String) = "download/ja/verify/$token"
     const val YouTubeList = "youtube/list/{listId}"
     const val Mine = "mine"
     const val Settings = "settings"
@@ -308,7 +326,7 @@ private fun PlayerApp(
     } +
         whisperJobs.count {
             it.status == DownloadStatus.QUEUED || it.status == DownloadStatus.RUNNING ||
-                it.translateStatus == TranslateMark.RUNNING
+                TranslateMark.isActive(it.translateStatus)
         } +
         translations.count { it.status == DownloadStatus.QUEUED || it.status == DownloadStatus.RUNNING }
     val fade = if (reduceMotion) snap<Float>() else tween<Float>(180, easing = Motion.enter)
@@ -319,13 +337,17 @@ private fun PlayerApp(
     val barExit = if (reduceMotion) ExitTransition.None else slideOutVertically(slideAway) { -it } + fadeOut(fadeAway)
     val dockEnter = if (reduceMotion) EnterTransition.None else slideInVertically(slide) { it } + fadeIn(fade)
     val dockExit = if (reduceMotion) ExitTransition.None else slideOutVertically(slideAway) { it } + fadeOut(fadeAway)
-    val title = when (route) {
-        Routes.Playlists -> "播放列表"
-        Routes.Online -> "在线搜索"
-        Routes.Mine -> "我的"
-        Routes.Settings -> "设置"
-        else -> "音频库"
-    }
+    val title = stringResource(
+        when (route) {
+            Routes.Playlists -> R.string.nav_playlists
+            Routes.Online -> R.string.nav_online
+            Routes.Mine -> R.string.nav_mine
+            Routes.Settings -> R.string.nav_settings
+            else -> R.string.nav_library
+        },
+    )
+    val clipboardLookupHint = stringResource(R.string.clipboard_lookup_hint)
+    val clipboardLookupAction = stringResource(R.string.clipboard_lookup_action)
     val notificationPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { }
@@ -336,15 +358,27 @@ private fun PlayerApp(
     }
     LaunchedEffect(message) {
         val text = message ?: return@LaunchedEffect
-        snackbar.showSnackbar(text)
+        val long = text.length > 30 || text.count { it == '；' || it == '。' } >= 2
+        snackbar.showSnackbar(
+            message = text,
+            withDismissAction = long,
+            duration = if (long) SnackbarDuration.Long else SnackbarDuration.Short,
+        )
         messages.value = null
+    }
+    val jaPlaybackFailure by graph.player.jaPlaybackFailure.collectAsStateWithLifecycle()
+    LaunchedEffect(jaPlaybackFailure, route) {
+        val failure = jaPlaybackFailure ?: return@LaunchedEffect
+        if (route == null || route == Routes.NowPlaying) return@LaunchedEffect
+        snackbar.showSnackbar(context.getString(failure.messageRes), withDismissAction = true, duration = SnackbarDuration.Long)
+        graph.player.dismissJaPlaybackFailure(failure)
     }
     LaunchedEffect(pendingLookup, sleepFinished, lifecycle) {
         if (pendingLookup == null || sleepFinished) return@LaunchedEffect
         lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             val result = snackbar.showSnackbar(
-                message = "可能是作品编号",
-                actionLabel = "查找作品",
+                message = clipboardLookupHint,
+                actionLabel = clipboardLookupAction,
                 withDismissAction = true,
                 duration = SnackbarDuration.Long,
             )
@@ -354,18 +388,27 @@ private fun PlayerApp(
     if (sleepFinished) {
         AlertDialog(
             onDismissRequest = {},
-            text = { Text("定时关闭时间已到，播放已暂停") },
+            text = { Text(stringResource(R.string.sleep_timer_finished)) },
             confirmButton = {
                 TextButton(onClick = {
                     graph.player.acknowledgeSleepFinished()
-                }) { Text("确定") }
+                }) { Text(stringResource(R.string.player_got_it)) }
             },
         )
     }
     if (!sleepFinished) clipboardController.state?.let { state ->
         ClipboardImportDialog(state, clipboardController::dismiss, clipboardController::confirm) { workno ->
             clipboardController.dismiss()
-            navController.navigate(Routes.onlineWork(workno)) { launchSingleTop = true }
+            val article = state.preview.jaArticle?.post
+            val external = state.preview.jaBrowserUrl
+            val verification = state.preview.jaVerificationPage
+            if (verification != null) {
+                navController.navigate(Routes.japaneseAsmrVerification(verification))
+            } else if (external != null) {
+                context.openJapaneseAsmrInBrowser(external)
+            } else {
+                navController.navigate(Routes.onlineWork(article?.rj ?: workno, jaPost = article?.postId)) { launchSingleTop = true }
+            }
         }
     }
     SharedTransitionLayout {
@@ -401,7 +444,14 @@ private fun PlayerApp(
                                         }
                                     },
                                 ) {
-                                    Icon(Icons.Default.Download, contentDescription = "下载任务")
+                                    Icon(
+                                        Icons.Default.Download,
+                                        contentDescription = if (activeTasks > 0) {
+                                            stringResource(R.string.common_download_tasks_active, activeTasks)
+                                        } else {
+                                            stringResource(R.string.common_download_tasks)
+                                        },
+                                    )
                                 }
                             }
                         },
@@ -433,7 +483,7 @@ private fun PlayerApp(
                                 }
                             },
                             icon = { Icon(Icons.Default.LibraryMusic, contentDescription = null) },
-                            label = { Text("音频库") },
+                            label = { Text(stringResource(R.string.nav_library)) },
                         )
                         NavigationBarItem(
                             selected = highlight == Routes.Playlists,
@@ -445,7 +495,7 @@ private fun PlayerApp(
                                 }
                             },
                             icon = { Icon(Icons.AutoMirrored.Filled.QueueMusic, contentDescription = null) },
-                            label = { Text("播放列表") },
+                            label = { Text(stringResource(R.string.nav_playlists)) },
                         )
                         NavigationBarItem(
                             selected = highlight == Routes.Online,
@@ -457,7 +507,7 @@ private fun PlayerApp(
                                 }
                             },
                             icon = { Icon(Icons.Default.Search, contentDescription = null) },
-                            label = { Text("在线搜索") },
+                            label = { Text(stringResource(R.string.nav_online)) },
                         )
                         NavigationBarItem(
                             selected = highlight == Routes.Mine,
@@ -469,7 +519,7 @@ private fun PlayerApp(
                                 }
                             },
                             icon = { Icon(Icons.Default.Person, contentDescription = null) },
-                            label = { Text("我的") },
+                            label = { Text(stringResource(R.string.nav_mine)) },
                         )
                         NavigationBarItem(
                             selected = highlight == Routes.Settings,
@@ -481,7 +531,7 @@ private fun PlayerApp(
                                 }
                             },
                             icon = { Icon(Icons.Default.Settings, contentDescription = null) },
-                            label = { Text("设置") },
+                            label = { Text(stringResource(R.string.nav_settings)) },
                         )
                     }
                 }
@@ -543,6 +593,7 @@ private fun PlayerApp(
                     onOpenPreview = { fileId -> navController.navigate(Routes.preview(fileId)) },
                     onOpenLibraryWork = { id -> navController.navigate(Routes.libraryWork(id)) },
                     onOpenBiliVideo = { id -> navController.navigate(Routes.biliVideo(id)) },
+                    onVerifyJaDownload = { token -> navController.navigate(Routes.jaDownloadVerification(token)) },
                     onImportOnline = {
                         navController.navigate(Routes.Online) {
                             popUpTo(navController.graph.findStartDestination().id) { saveState = true }
@@ -562,6 +613,8 @@ private fun PlayerApp(
                     onBack = { navController.popBackStack() },
                     onOpenPreview = { fileId -> navController.navigate(Routes.preview(fileId)) },
                     onOpenOnline = { sourceId -> navController.navigate(Routes.onlineWork(sourceId)) },
+                    onVerifyJaDownload = { token -> navController.navigate(Routes.jaDownloadVerification(token)) },
+                    onVerifyJaRefresh = { token -> navController.navigate(Routes.japaneseAsmrVerification(operation = "REFRESH", token = token)) },
                 )
             }
             composable(Routes.BiliVideo, arguments = listOf(navArgument("folderId") { type = NavType.LongType })) { entry ->
@@ -587,7 +640,10 @@ private fun PlayerApp(
             }
             composable(
                 route = Routes.OnlineWork,
-                arguments = listOf(navArgument("sourceId") { type = NavType.StringType }),
+                arguments = listOf(
+                    navArgument("sourceId") { type = NavType.StringType },
+                    navArgument("jaPost") { type = NavType.StringType; nullable = true; defaultValue = null },
+                ),
             ) { entry ->
                 val sourceId = entry.arguments?.getString("sourceId").orEmpty()
                 OnlineWorkScreen(
@@ -595,6 +651,49 @@ private fun PlayerApp(
                     onBack = { navController.popBackStack() },
                     onOpenPreview = { fileId -> navController.navigate(Routes.preview(fileId)) },
                     onOpenRemotePreview = { navController.navigate(Routes.RemotePreview) },
+                    onVerifyJapaneseAsmr = { page, rj, cleanup ->
+                        navController.navigate(Routes.japaneseAsmrVerification(page, rj, operation = if (cleanup) "REFRESH" else "SYNC"))
+                    },
+                    verifiedJaResult = entry.savedStateHandle.getStateFlow("jaVerifiedArticle", null),
+                    onConsumeJaResult = { entry.savedStateHandle["jaVerifiedArticle"] = null },
+                    jaPost = entry.arguments?.getString("jaPost"),
+                )
+            }
+            composable(
+                route = Routes.JapaneseAsmrVerification,
+                arguments = listOf(
+                    navArgument("url") { type = NavType.StringType },
+                    navArgument("rj") { type = NavType.StringType; defaultValue = "" },
+                    navArgument("queueId") { type = NavType.LongType; defaultValue = -1L },
+                    navArgument("mediaKey") { type = NavType.StringType; defaultValue = "" },
+                    navArgument("operation") { type = NavType.StringType; defaultValue = "SYNC" },
+                    navArgument("token") { type = NavType.StringType; defaultValue = "" },
+                ),
+            ) { entry ->
+                val args = entry.arguments ?: return@composable
+                val queueId = args.getLong("queueId")
+                val mediaKey = args.getString("mediaKey")
+                val operation = args.getString("operation") ?: "SYNC"
+                val token = args.getString("token").orEmpty()
+                val request = token.takeIf { it.isNotEmpty() }?.let(graph.jaRefreshRequests::get)
+                val url = request?.post?.url ?: args.getString("url").orEmpty()
+                val expected = request?.post?.rj ?: args.getString("rj")?.takeIf { it.isNotEmpty() }
+                JapaneseAsmrVerificationScreen(
+                    url = url,
+                    expectedRj = expected,
+                    onBack = {
+                        if (request != null) graph.jaRefreshRequests.finish(token, null)
+                        navController.popBackStack()
+                    },
+                    onArticle = { article ->
+                        when {
+                            request != null -> graph.jaRefreshRequests.finish(token, article)
+                            operation == "PLAYBACK" -> graph.player.resumeVerifiedTrack(queueId, mediaKey, article)
+                            else -> navController.previousBackStackEntry?.savedStateHandle
+                                ?.set("jaVerifiedArticle", "${article.post.postId}:$operation")
+                        }
+                        navController.popBackStack()
+                    },
                 )
             }
             composable(Routes.YouTubeList) { entry ->
@@ -627,8 +726,18 @@ private fun PlayerApp(
             }
             composable(Routes.NowPlaying) {
                 val playingScope = this
+                val verificationScope = androidx.compose.runtime.rememberCoroutineScope()
                 NowPlayingScreen(
                     onBack = { navController.popBackStack() },
+                    onVerifyJapaneseAsmr = { page, queueId, mediaKey ->
+                        verificationScope.launch {
+                            val post = com.nanahoshi.audioplayer.japaneseasmr.jaPostId(page)
+                            val rj = post?.let { graph.db.japaneseAsmr().post(it)?.rj ?: graph.japaneseAsmr.postRef(it)?.rj }
+                            if (graph.player.state.value.queueItemId == queueId) {
+                                navController.navigate(Routes.japaneseAsmrVerification(page, rj, queueId, mediaKey, operation = "PLAYBACK"))
+                            }
+                        }
+                    },
                     onOpenCollection = { ref -> navController.navigate(Routes.biliCollection(ref)) { launchSingleTop = true } },
                     coverModifier = with(shared) {
                         Modifier.sharedElement(
@@ -638,7 +747,39 @@ private fun PlayerApp(
                     },
                 )
             }
-            composable(Routes.Downloads) { DownloadScreen(onBack = { navController.popBackStack() }) }
+            composable(Routes.Downloads) {
+                DownloadScreen(onBack = { navController.popBackStack() },
+                    onVerifyJaDownload = { token -> navController.navigate(Routes.jaDownloadVerification(token)) })
+            }
+            composable(Routes.JaDownloadVerification) { entry ->
+                val token = entry.arguments?.getString("token").orEmpty()
+                // 网页结果移交给下载准备或队列后，验证记录可先于页面退出而回收。
+                val pending = remember(entry.id) { graph.downloads.jaVerification(token) }
+                val close: (Boolean) -> Boolean = { cancel ->
+                    val closed = navController.popJaDownloadVerification(entry)
+                    if (closed && cancel) graph.downloads.cancelJaVerification(token)
+                    closed
+                }
+                if (pending == null) {
+                    LaunchedEffect(entry.id) { close(false) }
+                } else {
+                    var page by remember(token) { mutableStateOf(pending.address) }
+                    androidx.compose.runtime.key(page) {
+                        JapaneseAsmrVerificationScreen(
+                            url = page, expectedRj = pending.entry.post.rj, onBack = { close(true) },
+                            autoRead = true,
+                            onDownload = { visible ->
+                                when (val result = graph.downloads.completeJaVerification(token, visible)) {
+                                    is com.nanahoshi.audioplayer.data.DownloadCenter.WorkVerificationResult.OpenEntry -> page = result.address
+                                    is com.nanahoshi.audioplayer.data.DownloadCenter.WorkVerificationResult.Finished -> {
+                                        if (close(!result.accepted) && !result.accepted) graph.show(R.string.download_cancelled)
+                                    }
+                                }
+                            },
+                        )
+                    }
+                }
+            }
             composable(Routes.SubtitleTasks) {
                 DownloadScreen(onBack = { navController.popBackStack() }, initialSubtitles = true)
             }

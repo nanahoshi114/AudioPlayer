@@ -1,0 +1,21 @@
+<resources>
+    <!-- 播放列表 -->
+    <string name="playlist_empty_title">还没有播放列表</string>
+    <string name="playlist_empty_message">点右下角新建。在音频库里多选曲目，再加入播放列表。</string>
+    <string name="playlist_detail_empty_title">这个播放列表还是空的</string>
+    <string name="playlist_detail_empty_message">在音频库里多选曲目，再加入这个播放列表。</string>
+    <string name="playlist_new">新建</string>
+    <string name="playlist_new_title">新建播放列表</string>
+    <string name="playlist_loading">正在读取列表…</string>
+    <string name="playlist_rename">改名</string>
+    <string name="playlist_delete">删除播放列表</string>
+    <string name="playlist_title">播放列表</string>
+    <string name="playlist_play">播放全部</string>
+    <string name="playlist_add_queue">加入播放队列</string>
+    <string name="playlist_delete_message">删除「%1$s」？音频文件和音频库中的内容会保留。</string>
+    <string name="playlist_track_count">%1$d 首</string>
+    <string name="playlist_online_summary">%1$s · %2$d 个视频</string>
+    <string name="playlist_operation_failed">播放列表操作失败，请重试</string>
+    <string name="playlist_create">创建</string>
+    <string name="playlist_save_name">保存名称</string>
+</resources>

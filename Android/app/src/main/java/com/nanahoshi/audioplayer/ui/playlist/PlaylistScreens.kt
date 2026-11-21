@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.ui.playlist
 
+import com.nanahoshi.audioplayer.R
+import androidx.compose.ui.res.stringResource
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Arrangement
@@ -43,6 +45,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -66,8 +70,8 @@ fun PlaylistListScreen(
     Box(Modifier.fillMaxSize()) {
         if (playlists.isEmpty()) {
             EmptyState(
-                title = "还没有播放列表",
-                message = "点右下角新建。在音频库里多选曲目，再加入播放列表。",
+                title = stringResource(R.string.playlist_empty_title),
+                message = stringResource(R.string.playlist_empty_message),
                 modifier = Modifier.fillMaxSize(),
             )
         } else {
@@ -78,15 +82,16 @@ fun PlaylistListScreen(
             }
         }
         ExtendedFloatingActionButton(
-            text = { Text("新建") },
-            icon = { Icon(Icons.Default.Add, contentDescription = "新建播放列表") },
+            text = { Text(stringResource(R.string.playlist_new)) },
+            icon = { Icon(Icons.Default.Add, contentDescription = stringResource(R.string.playlist_new_title)) },
             onClick = { name = ""; creating = true },
             modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
         )
     }
     if (creating) {
         NameDialog(
-            title = "新建播放列表",
+            title = stringResource(R.string.playlist_new_title),
+            confirmLabel = stringResource(R.string.playlist_create),
             initial = name,
             onDismiss = { creating = false },
             onConfirm = {
@@ -111,7 +116,7 @@ fun PlaylistDetailScreen(
     androidx.compose.runtime.LaunchedEffect(sources, playlistId) {
         if (online == null && sources != null) online = sources!!.any { it.playlistId == playlistId }
     }
-    if (online == null) { com.nanahoshi.audioplayer.ui.components.LoadingState("正在读取列表…"); return }
+    if (online == null) { com.nanahoshi.audioplayer.ui.components.LoadingState(stringResource(R.string.playlist_loading)); return }
     if (online == true) {
         com.nanahoshi.audioplayer.ui.bilibili.BiliCollectionScreen(playlistId = playlistId, onBack = onBack)
         return
@@ -132,25 +137,36 @@ fun PlaylistDetailScreen(
             onBack = onBack,
             actions = {
                 IconButton(onClick = { menu = true }) {
-                    Icon(Icons.Default.MoreVert, contentDescription = "更多")
+                    Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.a11y_playlist_actions))
                 }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                DropdownMenuItem(text = { Text("改名") }, onClick = { menu = false; renaming = true })
-                DropdownMenuItem(text = { Text("删除播放列表") }, onClick = { menu = false; confirmDelete = true })
+                DropdownMenuItem(text = { Text(stringResource(R.string.playlist_rename)) }, onClick = { menu = false; renaming = true })
+                DropdownMenuItem(text = { Text(stringResource(R.string.playlist_delete)) }, onClick = { menu = false; confirmDelete = true })
             }
             },
         )
         Text(
-            playlist?.name ?: "播放列表",
+            playlist?.name ?: stringResource(R.string.playlist_title),
             style = MaterialTheme.typography.headlineMedium,
             modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
         )
+        val playDescription = stringResource(R.string.a11y_playlist_replace_queue)
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { viewModel.playReplacing(playlistId) }, enabled = rows.isNotEmpty(), modifier = Modifier.weight(1f)) { Text("播放") }
-            OutlinedButton(onClick = { viewModel.appendToQueue(playlistId) }, enabled = rows.isNotEmpty(), modifier = Modifier.weight(1f)) { Text("加入播放队列") }
+            Button(
+                onClick = { viewModel.playReplacing(playlistId) },
+                enabled = rows.isNotEmpty(),
+                modifier = Modifier.weight(1f).semantics {
+                    contentDescription = playDescription
+                },
+            ) { Text(stringResource(R.string.playlist_play)) }
+            OutlinedButton(onClick = { viewModel.appendToQueue(playlistId) }, enabled = rows.isNotEmpty(), modifier = Modifier.weight(1f)) { Text(stringResource(R.string.playlist_add_queue)) }
         }
         if (rows.isEmpty()) {
-            EmptyState(title = "这个列表还是空的", message = "在音频库里多选曲目，再加入播放列表。", modifier = Modifier.fillMaxSize())
+            EmptyState(
+                title = stringResource(R.string.playlist_detail_empty_title),
+                message = stringResource(R.string.playlist_detail_empty_message),
+                modifier = Modifier.fillMaxSize(),
+            )
         } else {
             LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                 itemsIndexed(rows, key = { _, row -> row.itemId }) { index, row ->
@@ -171,21 +187,22 @@ fun PlaylistDetailScreen(
     if (confirmDelete) {
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
-            title = { Text("删除播放列表") },
-            text = { Text("删除「${playlist?.name.orEmpty()}」？音频文件和音频库中的内容会保留。") },
+            title = { Text(stringResource(R.string.playlist_delete)) },
+            text = { Text(stringResource(R.string.playlist_delete_message, playlist?.name.orEmpty())) },
             confirmButton = {
                 TextButton(onClick = {
                     confirmDelete = false
                     viewModel.delete(playlistId)
                     onDeleted()
-                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                }) { Text(stringResource(R.string.common_delete), color = MaterialTheme.colorScheme.error) }
             },
-            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("取消") } },
+            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text(stringResource(R.string.common_cancel)) } },
         )
     }
     if (renaming) {
         NameDialog(
-            title = "改名",
+            title = stringResource(R.string.playlist_rename),
+            confirmLabel = stringResource(R.string.playlist_save_name),
             initial = playlist?.name.orEmpty(),
             onDismiss = { renaming = false },
             onConfirm = {
@@ -215,7 +232,7 @@ private fun PlaylistSummaryRow(
     }
     ListItem(
         headlineContent = { Text(playlist.name) },
-        supportingContent = { Text("${rows.size} 首") },
+        supportingContent = { Text(stringResource(R.string.playlist_track_count, rows.size)) },
         leadingContent = {
             Box(Modifier.size(48.dp)) {
                 covers.forEachIndexed { index, coverUri ->
@@ -243,13 +260,13 @@ private fun PlaylistTrackRow(
         supportingContent = { Text(row.artist?.ifBlank { null } ?: formatDuration(row.durationMs)) },
         modifier = Modifier.clickable(onClick = onClick),
         leadingContent = {
-            Icon(Icons.Default.DragHandle, contentDescription = "拖动排序", modifier = Modifier.size(48.dp).then(handleModifier).padding(12.dp))
+            Icon(Icons.Default.DragHandle, contentDescription = stringResource(R.string.a11y_drag_sort), modifier = Modifier.size(48.dp).then(handleModifier).padding(12.dp))
         },
         trailingContent = {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 CoverImage(row.coverUri)
                 IconButton(onClick = onDelete) {
-                    Icon(Icons.Default.Delete, contentDescription = "从播放列表移除")
+                    Icon(Icons.Default.Delete, contentDescription = stringResource(R.string.a11y_playlist_remove))
                 }
             }
         },
@@ -259,6 +276,7 @@ private fun PlaylistTrackRow(
 @Composable
 private fun NameDialog(
     title: String,
+    confirmLabel: String,
     initial: String,
     onDismiss: () -> Unit,
     onConfirm: (String) -> Unit,
@@ -270,14 +288,14 @@ private fun NameDialog(
         text = {
             OutlinedTextField(value = text, onValueChange = { text = it }, singleLine = true, modifier = Modifier.fillMaxWidth())
         },
-        confirmButton = { TextButton(onClick = { onConfirm(text.trim()) }, enabled = text.isNotBlank()) { Text("确定") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        confirmButton = { TextButton(onClick = { onConfirm(text.trim()) }, enabled = text.isNotBlank()) { Text(confirmLabel) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) } },
     )
 }
 
 @Composable
 internal fun OnlinePlaylistSummary(name: String, source: com.nanahoshi.audioplayer.bilibili.BiliCollection, onClick: () -> Unit) {
     ListItem(headlineContent = { Text(name) },
-        supportingContent = { Text("${source.label} · ${source.total} 个视频") },
+        supportingContent = { Text(stringResource(R.string.playlist_online_summary, stringResource(source.kind.labelRes), source.total)) },
         leadingContent = { CoverImage(source.coverUrl) }, modifier = Modifier.clickable(onClick = onClick))
 }

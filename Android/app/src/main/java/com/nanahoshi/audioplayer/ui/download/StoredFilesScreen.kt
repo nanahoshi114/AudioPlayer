@@ -1,9 +1,16 @@
 package com.nanahoshi.audioplayer.ui.download
 
+import com.nanahoshi.audioplayer.text.resolveUserError
+import com.nanahoshi.audioplayer.R
+import androidx.compose.ui.res.stringResource
+
 import android.app.Application
 import android.content.ClipData
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
+import com.nanahoshi.audioplayer.AppGraph
+import com.nanahoshi.audioplayer.data.TrackSource
 import kotlinx.coroutines.CancellationException
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -91,11 +98,15 @@ class StoredFilesViewModel(app: Application) : AndroidViewModel(app) {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                error = failure.message ?: "无法读取文件列表"
+                error = getApplication<Application>().resolveUserError(failure, R.string.stored_read_failed)
             } finally {
                 loading = false
             }
         }
+    }
+
+    fun openArticle(item: StoredItem) {
+        viewModelScope.launch { openJapaneseArticle(getApplication(), graph, item.workKey) }
     }
 
     fun play(item: StoredItem) {
@@ -104,6 +115,24 @@ class StoredFilesViewModel(app: Application) : AndroidViewModel(app) {
             val track = item.trackId?.let { graph.library.track(it) } ?: graph.db.tracks().findByLocalUri(item.path)
             if (track != null) {
                 graph.player.replaceAndPlay(listOf(track))
+                return@launch
+            }
+            if (item.source == TrackSource.JAPANESE_ASMR && item.remoteUrl?.startsWith("japaneseasmr://file?") == true) {
+                graph.player.replaceAndPlayRemote(listOf(com.nanahoshi.audioplayer.dlsite.RemotePlayable(
+                    item.name, item.workTitle, null, item.remoteUrl, item.source, "",
+                    workno = item.workCode, fileKey = item.fileKey,
+                )))
+                return@launch
+            }
+            if (item.source == TrackSource.JAPANESE_ASMR) {
+                val postId = item.workKey ?: return@launch
+                val key = item.fileKey ?: return@launch
+                val post = graph.db.japaneseAsmr().post(postId) ?: return@launch
+                graph.player.replaceAndPlayRemote(listOf(com.nanahoshi.audioplayer.dlsite.RemotePlayable(
+                    item.name, item.workTitle, post.coverUri, post.url, item.source,
+                    com.nanahoshi.audioplayer.japaneseasmr.JapaneseAsmrClient.REFERER,
+                    workno = postId, fileKey = key, mediaKind = graph.db.japaneseAsmr().media(postId, key)?.kind,
+                )))
                 return@launch
             }
             val app = getApplication<Application>()
@@ -133,7 +162,7 @@ class StoredFilesViewModel(app: Application) : AndroidViewModel(app) {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                error = failure.message?.takeIf { it.isNotBlank() } ?: "无法读取字幕信息，请重试"
+                error = getApplication<Application>().resolveUserError(failure, R.string.stored_subtitle_info_failed)
             }
         }
     }
@@ -152,7 +181,7 @@ class StoredFilesViewModel(app: Application) : AndroidViewModel(app) {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                error = failure.message?.takeIf { it.isNotBlank() } ?: "删除失败，请重试"
+                error = getApplication<Application>().resolveUserError(failure, R.string.stored_delete_failed)
             } finally {
                 onDone()
             }
@@ -210,18 +239,20 @@ fun StoredFilesScreen(
                 actions = buildList {
                     add(
                         SelectionAction(
-                            "分享",
+                            stringResource(R.string.stored_share),
                             Icons.Default.Share,
                             { shareStored(context, chosen.map { File(it.path) }) },
                             enabled = chosen.isNotEmpty(),
                         ),
                     )
-                    if (single?.sourceId != null) {
-                        add(SelectionAction("打开作品", Icons.Default.Album, { onOpenWork(single.sourceId) }))
+                    if (single?.source == TrackSource.JAPANESE_ASMR) {
+                        add(SelectionAction(stringResource(R.string.download_open_article), Icons.Default.Album, { viewModel.openArticle(single) }))
+                    } else if (single?.sourceId != null) {
+                        add(SelectionAction(stringResource(R.string.stored_open_work), Icons.Default.Album, { onOpenWork(single.sourceId) }))
                     }
                     add(
                         SelectionAction(
-                            "删除",
+                            stringResource(R.string.common_delete),
                             Icons.Default.Delete,
                             { if (chosen.isNotEmpty()) viewModel.requestDelete(chosen) },
                             destructive = true,
@@ -231,7 +262,7 @@ fun StoredFilesScreen(
                 },
             )
         } else {
-            AppTopBar(title = "下载管理", onBack = onBack)
+            AppTopBar(title = stringResource(R.string.stored_title), onBack = onBack)
         }
         SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
             SegmentedButton(
@@ -239,48 +270,61 @@ fun StoredFilesScreen(
                 onClick = { showAudio = true },
                 shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
                 enabled = !selecting,
-            ) { Text("音频") }
+            ) { Text(stringResource(R.string.stored_segment_audio)) }
             SegmentedButton(
                 selected = !showAudio,
                 onClick = { showAudio = false },
                 shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
                 enabled = !selecting,
-            ) { Text("字幕") }
+            ) { Text(stringResource(R.string.stored_segment_subtitle)) }
         }
         OutlinedTextField(
             value = query,
             onValueChange = { query = it },
-            placeholder = { Text("文件名、编号或作品名") },
+            placeholder = { Text(stringResource(R.string.stored_search_hint)) },
             leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
             singleLine = true,
             shape = RoundedCornerShape(28.dp),
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
         )
         when {
-            viewModel.loading && visible.isEmpty() -> LoadingState("正在读取文件", Modifier.fillMaxSize())
+            viewModel.loading && visible.isEmpty() -> LoadingState(stringResource(R.string.stored_loading), Modifier.fillMaxSize())
             viewModel.error != null && visible.isEmpty() -> ErrorState(
                 message = viewModel.error!!,
                 onRetry = viewModel::refresh,
                 modifier = Modifier.fillMaxSize(),
             )
             categoryItems.isEmpty() -> EmptyState(
-                title = if (showAudio) "还没有下载的音频" else "还没有字幕文件",
+                title = stringResource(
+                    if (showAudio) R.string.stored_audio_empty_title
+                    else R.string.stored_subtitle_empty_title,
+                ),
+                message = stringResource(
+                    if (showAudio) R.string.stored_audio_empty_message
+                    else R.string.stored_subtitle_empty_message,
+                ),
                 modifier = Modifier.fillMaxSize(),
             )
-            visible.isEmpty() -> EmptyState(title = "没有匹配的文件", modifier = Modifier.fillMaxSize())
+            visible.isEmpty() -> EmptyState(
+                title = stringResource(R.string.stored_search_empty_title),
+                message = stringResource(R.string.stored_search_empty_message),
+                actionLabel = stringResource(R.string.stored_clear_search),
+                onAction = { query = "" },
+                modifier = Modifier.fillMaxSize(),
+            )
             else -> LazyColumn(
                 state = if (showAudio) audioListState else subtitleListState,
                 modifier = Modifier.fillMaxSize(),
             ) {
                 if (viewModel.loading) {
-                    item(key = "loading") { LoadingState("正在读取文件") }
+                    item(key = "loading") { LoadingState(stringResource(R.string.stored_loading)) }
                 } else if (viewModel.error != null) {
                     item(key = "error") { ErrorState(viewModel.error!!, viewModel::refresh) }
                 }
                 if (!selecting) {
                     item(key = "selection-hint") {
                         Text(
-                            "长按文件可多选、分享或删除",
+                            stringResource(if (showAudio) R.string.stored_audio_tap_hint else R.string.stored_long_press_hint),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
@@ -297,8 +341,8 @@ fun StoredFilesScreen(
                         supportingContent = {
                             val bits = listOfNotNull(
                                 when (item.kind) {
-                                    StoredKind.GENERATED -> "App 生成字幕"
-                                    StoredKind.SUBTITLE -> "字幕文件"
+                                    StoredKind.GENERATED -> stringResource(R.string.stored_generated_subtitle)
+                                    StoredKind.SUBTITLE -> stringResource(R.string.stored_subtitle_file)
                                     StoredKind.AUDIO -> null
                                 },
                                 item.workTitle?.takeIf { it.isNotBlank() },
@@ -313,7 +357,7 @@ fun StoredFilesScreen(
                             ListItemDefaults.colors()
                         },
                         modifier = Modifier.semantics { this.selected = on }.combinedClickable(
-                            onLongClickLabel = "选择文件",
+                            onLongClickLabel = stringResource(R.string.stored_select_file),
                             onClick = {
                                 if (!selecting) {
                                     viewModel.play(item)
@@ -356,11 +400,11 @@ private fun shareStored(context: Context, files: List<File>) {
         uris.drop(1).forEach { clip.addItem(ClipData.Item(it)) }
         intent.clipData = clip
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        val chooser = Intent.createChooser(intent, "分享")
+        val chooser = Intent.createChooser(intent, context.getString(R.string.stored_share))
         chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         context.startActivity(chooser)
     } catch (_: Exception) {
-        (context.applicationContext as Application).graph().messages.value = "无法分享"
+        (context.applicationContext as Application).graph().show(R.string.download_error_share_file)
     }
 }
 
@@ -373,4 +417,10 @@ private fun shareType(file: File): String = when (file.extension.lowercase()) {
     "m4a", "aac" -> "audio/mp4"
     "ogg" -> "audio/ogg"
     else -> "*/*"
+}
+
+internal suspend fun openJapaneseArticle(app: Application, graph: AppGraph, postId: String?) {
+    val article = postId?.let { graph.db.japaneseAsmr().post(it) } ?: return
+    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(article.url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    runCatching { app.startActivity(intent) }.onFailure { graph.show(R.string.download_error_open_article) }
 }

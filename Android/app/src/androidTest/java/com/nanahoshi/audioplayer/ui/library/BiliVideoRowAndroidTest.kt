@@ -74,7 +74,7 @@ class BiliVideoRowAndroidTest {
         compose.waitForIdle()
         compose.runOnIdle { folders.value = listOf(video) }
         compose.onNodeWithText(video.name).assertIsDisplayed()
-        compose.onNodeWithContentDescription("更多").performClick()
+        compose.onNodeWithContentDescription("视频操作").performClick()
         compose.onNodeWithText("从音频库移除").performClick()
         compose.runOnIdle { assertEquals(1, removed) }
         compose.onNodeWithTag("video-row").performTouchInput { longClick() }

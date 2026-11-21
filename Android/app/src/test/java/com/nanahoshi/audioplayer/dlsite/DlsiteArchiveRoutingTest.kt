@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.dlsite
 
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.R
 import kotlinx.coroutines.runBlocking
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
@@ -208,7 +210,7 @@ class DlsiteArchiveRoutingTest {
         }
         val error = runCatching { client.download("RJ300957", temporary.newFolder()) }.exceptionOrNull()
         assertTrue(error is DlsiteArchiveException)
-        assertTrue(error!!.message.orEmpty().contains("重定向次数过多"))
+        assertEquals(TextRef.Res(R.string.dlsite_archive_error_redirect_limit), (error as DlsiteArchiveException).userText)
         assertTrue(requests <= 9)
     }
 
@@ -227,21 +229,20 @@ class DlsiteArchiveRoutingTest {
 
     @Test fun distinguishesVerificationLoginUnknownPageAndBadRequestWithoutLeakingBodies() = runBlocking {
         for ((html, expected) in listOf(
-            "<html><script src='/cdn-cgi/challenge-platform/test'></script></html>" to "验证页面",
-            "<html><input type='password' name='password'></html>" to "商店登录尚未生效",
-            "<html><title>unrecognized</title>private text</html>" to "没有找到完整原始包的下载地址",
+            "<html><script src='/cdn-cgi/challenge-platform/test'></script></html>" to R.string.dlsite_archive_error_verify,
+            "<html><input type='password' name='password'></html>" to R.string.dlsite_archive_error_store_login,
+            "<html><title>unrecognized</title>private text</html>" to R.string.dlsite_archive_error_missing_address,
         )) {
             val error = runCatching { client { reply(it, 200, html) }.download("RJ300957", temporary.newFolder()) }.exceptionOrNull()
             assertTrue(error is DlsiteArchiveException)
-            assertTrue(error!!.message.orEmpty().contains(expected))
+            assertEquals(TextRef.Res(expected), (error as DlsiteArchiveException).userText)
             assertFalse(error.message.orEmpty().contains("private text"))
         }
         var count = 0
         val error = runCatching { client { count++; reply(it, 400, "secret server body") }
             .download("RJ01042521", temporary.newFolder()) }.exceptionOrNull()
         assertEquals(1, count)
-        assertTrue(error!!.message.orEmpty().contains("原始下载入口"))
-        assertTrue(error.message.orEmpty().contains("400"))
+        assertEquals(TextRef.Res(R.string.dlsite_archive_error_server_denied), (error as DlsiteArchiveException).userText)
         assertFalse(error.message.orEmpty().contains("secret"))
     }
 

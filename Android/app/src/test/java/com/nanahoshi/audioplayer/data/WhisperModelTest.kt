@@ -1,5 +1,6 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.data.db.DownloadStatus
 import com.nanahoshi.audioplayer.data.db.WhisperJobEntity
 import com.nanahoshi.audioplayer.playback.SubtitleCue
@@ -22,8 +23,8 @@ class WhisperModelTest {
         assertNull(effectiveWhisperBase(SENSE_VOICE_MODEL, null))
         assertNull(effectiveWhisperBase(SENSE_VOICE_MODEL, "http://192.168.1.20:8000"))
         assertNull(effectiveWhisperBase(null, null))
-        assertEquals("SenseVoiceSmall", whisperModelLabel(SENSE_VOICE_MODEL))
-        assertEquals("Qwen3-ASR", whisperModelLabel(WHISPER_MODEL_QWEN3))
+        assertEquals(R.string.settings_model_sensevoice, whisperModelLabelRes(SENSE_VOICE_MODEL))
+        assertEquals(R.string.settings_model_qwen3, whisperModelLabelRes(WHISPER_MODEL_QWEN3))
         assertEquals(WHISPER_MODEL_QWEN3, knownWhisperModel(WHISPER_MODEL_QWEN3))
         assertEquals(SENSE_VOICE_MODEL, knownWhisperModel(SENSE_VOICE_MODEL))
         assertNull(knownWhisperModel("whisper-1"))

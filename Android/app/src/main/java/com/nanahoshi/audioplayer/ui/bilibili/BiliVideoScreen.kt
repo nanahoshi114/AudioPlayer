@@ -1,5 +1,8 @@
 package com.nanahoshi.audioplayer.ui.bilibili
 
+import com.nanahoshi.audioplayer.R
+import com.nanahoshi.audioplayer.text.TextRef
+import androidx.compose.ui.res.stringResource
 import android.app.Application
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
@@ -63,12 +66,15 @@ class BiliVideoViewModel(app: Application) : AndroidViewModel(app) {
     fun append(items: List<TrackEntity> = chosen()) { graph.player.append(items); clear() }
     private fun action(block: suspend () -> Unit) { viewModelScope.launch {
         try { block() } catch (cancelled: CancellationException) { throw cancelled }
-        catch (failure: Exception) { graph.messages.value = failure.message ?: "操作失败，请重试" }
+        catch (failure: Exception) { graph.showError(failure, R.string.bilibili_operation_failed) }
     } }
     fun download(items: List<TrackEntity> = chosen()) = action {
         val added = graph.downloads.enqueue(items)
         clear()
-        graph.messages.value = if (added > 0) "已加入 $added 个下载任务" else "已有本地文件或下载任务"
+        graph.show(
+            if (added > 0) TextRef.Res(R.string.bilibili_added_download_count, listOf(added))
+            else TextRef.Res(R.string.bilibili_already_local_or_downloading),
+        )
     }
     data class PendingDelete(val tracks: List<TrackEntity>, val subtitles: Int)
     var pendingDelete by mutableStateOf<PendingDelete?>(null); private set
@@ -84,7 +90,7 @@ class BiliVideoViewModel(app: Application) : AndroidViewModel(app) {
         } else {
             val result = graph.downloads.deleteDownloaded(downloads, deleteSubtitles = true)
             clear()
-            graph.messages.value = deleteDownloadedNotice(result)
+            graph.show(deleteDownloadedNotice(result))
         }
     }
     fun confirmDelete(deleteSubtitles: Boolean) {
@@ -93,7 +99,7 @@ class BiliVideoViewModel(app: Application) : AndroidViewModel(app) {
         action {
             val result = graph.downloads.deleteDownloaded(pending.tracks, deleteSubtitles)
             clear()
-            graph.messages.value = deleteDownloadedNotice(result)
+            graph.show(deleteDownloadedNotice(result))
         }
     }
     fun cancelDelete() { pendingDelete = null }
@@ -114,20 +120,20 @@ fun BiliVideoScreen(folderId: Long, onBack: () -> Unit, viewModel: BiliVideoView
     val state = rememberLazyListState()
     Column(Modifier.fillMaxSize()) {
         if (selecting) SelectionTopBar(viewModel.selected.size, viewModel::clear, listOf(
-            SelectionAction("播放所选", Icons.Default.PlayArrow, viewModel::playSelection),
-            SelectionAction("接下来播放", Icons.Default.SkipNext, { viewModel.next() }),
-            SelectionAction("加入播放队列", Icons.AutoMirrored.Filled.PlaylistAdd, { viewModel.append() }),
-            SelectionAction("下载音轨", Icons.Default.Download, { viewModel.download() }),
-            SelectionAction("加入播放列表", Icons.AutoMirrored.Filled.QueueMusic, { pickingPlaylist = true }),
-            SelectionAction("删除已下载文件", Icons.Default.Delete, { viewModel.deleteDownloads() }, destructive = true),
-        )) else AppTopBar("视频", onBack = onBack, actions = {
-            IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "更多") }
+            SelectionAction(stringResource(R.string.bilibili_play_selected), Icons.Default.PlayArrow, viewModel::playSelection),
+            SelectionAction(stringResource(R.string.library_play_next), Icons.Default.SkipNext, { viewModel.next() }),
+            SelectionAction(stringResource(R.string.library_add_queue), Icons.AutoMirrored.Filled.PlaylistAdd, { viewModel.append() }),
+            SelectionAction(stringResource(R.string.bilibili_download_track), Icons.Default.Download, { viewModel.download() }),
+            SelectionAction(stringResource(R.string.library_add_playlist), Icons.AutoMirrored.Filled.QueueMusic, { pickingPlaylist = true }),
+            SelectionAction(stringResource(R.string.bilibili_delete_downloads), Icons.Default.Delete, { viewModel.deleteDownloads() }, destructive = true),
+        )) else AppTopBar(stringResource(R.string.bilibili_video_title), onBack = onBack, actions = {
+            IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.a11y_video_actions)) }
             DropdownMenu(menu, { menu = false }) {
-                DropdownMenuItem(text = { Text("从音频库移除") }, onClick = { menu = false; removing = true })
+                DropdownMenuItem(text = { Text(stringResource(R.string.library_remove_from_library)) }, onClick = { menu = false; removing = true })
             }
         })
         val folder = viewModel.folder
-        if (folder == null) LoadingState("正在读取视频…") else WorkFileBrowser(
+        if (folder == null) LoadingState(stringResource(R.string.bilibili_reading_video)) else WorkFileBrowser(
             state = state, modifier = Modifier.weight(1f).fillMaxWidth(),
             header = {
                 Row(Modifier.padding(16.dp)) {
@@ -135,17 +141,17 @@ fun BiliVideoScreen(folderId: Long, onBack: () -> Unit, viewModel: BiliVideoView
                     Column(Modifier.weight(1f).padding(start = 12.dp)) {
                         Text(folder.name, style = MaterialTheme.typography.titleLarge)
                         Text(viewModel.tracks.firstOrNull()?.artist.orEmpty(), Modifier.padding(top = 8.dp))
-                        BadgeLine(listOf(BadgeItem("B 站", LocalSourceColors.current.bilibili), BadgeItem("多 P", MaterialTheme.colorScheme.secondary)),
+                        BadgeLine(listOf(BadgeItem(stringResource(R.string.library_badge_bilibili), LocalSourceColors.current.bilibili), BadgeItem(stringResource(R.string.library_badge_multi_part), MaterialTheme.colorScheme.secondary)),
                             listOf(BadgeItem(folder.biliBvid.orEmpty(), MaterialTheme.colorScheme.onSurfaceVariant)), modifier = Modifier.padding(top = 8.dp))
                         Text("${viewModel.tracks.size} P · ${formatDuration(viewModel.tracks.sumOf { it.durationMs })}", Modifier.padding(top = 8.dp))
                     }
                 }
-                FilledTonalButton(onClick = { viewModel.download(viewModel.tracks) }, modifier = Modifier.padding(horizontal = 16.dp)) { Text("下载全部音轨") }
+                FilledTonalButton(onClick = { viewModel.download(viewModel.tracks) }, modifier = Modifier.padding(horizontal = 16.dp)) { Text(stringResource(R.string.bilibili_download_all_tracks)) }
             },
             controls = {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    SectionHeader("分 P", Modifier.weight(1f))
-                    TextButton(onClick = viewModel::all) { Text(if (selecting && viewModel.selected.size == viewModel.tracks.size) "取消全选" else "全选") }
+                    SectionHeader(stringResource(R.string.bilibili_parts), Modifier.weight(1f))
+                    TextButton(onClick = viewModel::all) { Text(stringResource(if (selecting && viewModel.selected.size == viewModel.tracks.size) R.string.bilibili_deselect_all else R.string.bilibili_select_all)) }
                 }
             },
         ) {
@@ -161,10 +167,10 @@ fun BiliVideoScreen(folderId: Long, onBack: () -> Unit, viewModel: BiliVideoView
     }
     if (pickingPlaylist) PlaylistPickDialog(playlists,
         onPick = { pickingPlaylist = false; viewModel.addToPlaylist(it) }, onDismiss = { pickingPlaylist = false })
-    if (removing) AlertDialog(onDismissRequest = { removing = false }, title = { Text("从音频库移除") },
-        text = { Text("移除整个视频及其分 P？已下载文件会保留。") },
-        confirmButton = { TextButton(onClick = { removing = false; viewModel.remove() }) { Text("移除") } },
-        dismissButton = { TextButton(onClick = { removing = false }) { Text("取消") } })
+    if (removing) AlertDialog(onDismissRequest = { removing = false }, title = { Text(stringResource(R.string.library_remove_from_library)) },
+        text = { Text(stringResource(R.string.bilibili_remove_video_message)) },
+        confirmButton = { TextButton(onClick = { removing = false; viewModel.remove() }) { Text(stringResource(R.string.common_remove)) } },
+        dismissButton = { TextButton(onClick = { removing = false }) { Text(stringResource(R.string.common_cancel)) } })
     viewModel.pendingDelete?.let { pending ->
         com.nanahoshi.audioplayer.ui.components.DeleteAudioDialog(
             itemCount = pending.tracks.size,

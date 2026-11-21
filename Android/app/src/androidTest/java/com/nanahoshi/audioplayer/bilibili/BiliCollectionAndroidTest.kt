@@ -1,5 +1,6 @@
 package com.nanahoshi.audioplayer.bilibili
 
+import kotlinx.serialization.json.Json
 import android.content.Context
 import android.content.ContextWrapper
 import androidx.room.Room
@@ -51,6 +52,25 @@ class BiliCollectionAndroidTest {
             assertTrue(runCatching { library.addTracksToPlaylist(id, emptyList()) }.isFailure)
             assertTrue(runCatching { library.movePlaylistItem(id, 0, 1) }.isFailure)
             assertTrue(runCatching { library.removePlaylistItem(id, 1) }.isFailure)
+        }
+    }
+
+    @Test fun fallbackTitleSurvivesBookmarkRefreshAndCopy() = runBlocking {
+        fixture { context, db, client, library ->
+            val api = BiliCollectionApi { path, _, _ ->
+                Json.parseToJsonElement(if (path.endsWith("seasons_series_list")) {
+                    """{"items_lists":{"page":{"total":1},"seasons_list":[{"meta":{"season_id":7}}],"series_list":[]}}"""
+                } else """{"meta":{},"page":{"total":1},"archives":[{"bvid":"${video.bvid}"}]}""")
+            }
+            val store = BiliCollectionRepository(context, db, client, loadPage = api::videos)
+            val unnamed = api.catalogue(ref.mid, 1).items.single()
+            val id = store.bookmark(unnamed)
+            assertEquals("B 站合集", db.playlists().observe(id).first()?.name)
+            val refreshed = store.refresh(unnamed, id, { true }, {})
+            assertEquals("B 站合集", db.playlists().observe(id).first()?.name)
+            library.importBili(BiliImportRequest(video, parts, BiliImportMode.SPLIT))
+            val copy = requireNotNull(library.publishBiliPlaylist(refreshed.collection.title, parts))
+            assertEquals("B 站合集", db.playlists().observe(copy).first()?.name)
         }
     }
 

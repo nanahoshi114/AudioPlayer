@@ -1,5 +1,8 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.text.userTextOr
+import com.nanahoshi.audioplayer.R
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -79,7 +82,7 @@ internal sealed interface OfflineWhisperModelState {
     data object NotDownloaded : OfflineWhisperModelState
     data class Downloading(val source: ModelDownloadSource, val bytesDone: Long, val bytesTotal: Long) : OfflineWhisperModelState
     data object Ready : OfflineWhisperModelState
-    data class Failed(val message: String) : OfflineWhisperModelState
+    data class Failed(val message: TextRef) : OfflineWhisperModelState
 }
 
 internal class OfflineWhisperModelManager(
@@ -105,7 +108,7 @@ internal class OfflineWhisperModelManager(
 
     private class Download(val source: ModelDownloadSource, val ticket: InflightCalls.Ticket) {
         lateinit var job: Job
-        var interruption: String? = null
+        var interruption: TextRef? = null
         @Volatile var cancelled = false
 
         fun checkActive() {
@@ -150,12 +153,12 @@ internal class OfflineWhisperModelManager(
         attempt?.let { cancelLocked(it, interruption = null) }
     }
 
-    fun cancelDownload(job: Job, interruption: String? = null) = synchronized(lock) {
+    fun cancelDownload(job: Job, interruption: TextRef? = null) = synchronized(lock) {
         val current = attempt?.takeIf { it.job === job } ?: return@synchronized
         cancelLocked(current, interruption)
     }
 
-    private fun cancelLocked(current: Download, interruption: String?) {
+    private fun cancelLocked(current: Download, interruption: TextRef?) {
         if (current.cancelled) return
         current.interruption = interruption
         current.cancelled = true
@@ -168,18 +171,18 @@ internal class OfflineWhisperModelManager(
         val marker = File(directory, VERSION_FILE)
         val removed = (!marker.exists() || marker.delete()) && directory.deleteRecursively()
         _state.value = installedState()
-        if (!removed) throw WhisperException("模型删除失败，请重试")
+        if (!removed) throw WhisperException(TextRef.Res(R.string.settings_model_error_delete))
         true
     }
 
     private fun installedState() = if (isReady()) OfflineWhisperModelState.Ready else OfflineWhisperModelState.NotDownloaded
 
     private fun runDownload(current: Download) {
-        var failure: String? = null
+        var failure: TextRef? = null
         try {
             current.checkActive()
-            if (!staging.deleteRecursively() || !staging.mkdirs()) throw WhisperException("无法创建模型暂存目录")
-            if (staging.usableSpace in 1 until model.installedBytes) throw WhisperException("可用空间不足")
+            if (!staging.deleteRecursively() || !staging.mkdirs()) throw WhisperException(TextRef.Res(R.string.settings_model_error_staging))
+            if (staging.usableSpace in 1 until model.installedBytes) throw WhisperException(TextRef.Res(R.string.settings_model_error_space))
 
             when (current.source) {
                 ModelDownloadSource.GitHub -> downloadArchive(current)
@@ -189,13 +192,13 @@ internal class OfflineWhisperModelManager(
             synchronized(lock) {
                 current.checkActive()
                 if (!directory.deleteRecursively() || !staging.renameTo(directory)) {
-                    throw WhisperException("模型保存失败")
+                    throw WhisperException(TextRef.Res(R.string.settings_model_error_save))
                 }
             }
         } catch (_: CancellationException) {
             // 取消后的状态在清理完暂存后发布。
         } catch (error: Exception) {
-            failure = (error as? WhisperException)?.message ?: "无法下载或保存模型，请重试"
+            failure = error.userTextOr(R.string.settings_model_error_download)
         } finally {
             staging.deleteRecursively()
             synchronized(lock) {
@@ -301,7 +304,7 @@ internal class OfflineWhisperModelManager(
         _state.value = OfflineWhisperModelState.Downloading(current.source, done, total)
     }
 
-    private fun invalidFiles(): Nothing = throw WhisperException("模型文件不完整或校验失败，请重试")
+    private fun invalidFiles(): Nothing = throw WhisperException(TextRef.Res(R.string.settings_model_error_invalid))
 
     private fun MessageDigest.matches(expected: String) =
         digest().joinToString("") { "%02x".format(it) } == expected

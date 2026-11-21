@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.youtube
 
+import com.nanahoshi.audioplayer.R
+import com.nanahoshi.audioplayer.text.TextRef
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.*
 import okhttp3.Request
@@ -129,7 +131,7 @@ class YouTubeClientTest {
         assertEquals(listOf(false, false, false, true), calls)
     }
     @Test fun networkFailureWithoutAnyResponseStillRetriesWithCookie() = runBlocking {
-        for (failure in listOf(java.io.IOException("fixture offline"), YouTubeException("连不上 YouTube"))) {
+        for (failure in listOf(java.io.IOException("fixture offline"), YouTubeException("无法连接 YouTube，请检查网络后重试"))) {
             val calls = mutableListOf<Boolean>()
             val client = YouTubeClient({ "SAPISID=fixture" }, solver) { request ->
                 if (request.method == "GET") homepage else {
@@ -149,7 +151,7 @@ class YouTubeClientTest {
             }
         }
         try { client.resolveAudio(id); fail() }
-        catch (error: YouTubeException) { assertEquals("连不上 YouTube", error.message) }
+        catch (error: YouTubeException) { assertEquals(TextRef.Res(R.string.youtube_error_connection), error.userText) }
         assertEquals(3, posts)
     }
     @Test fun okWithoutAudioTracksDoesNotRetryWithCookie() = runBlocking {
@@ -161,7 +163,7 @@ class YouTubeClientTest {
             }
         }
         try { client.resolveAudio(id); fail() }
-        catch (error: YouTubeException) { assertEquals("这个视频没有可用的独立音轨", error.message) }
+        catch (error: YouTubeException) { assertEquals(TextRef.Res(R.string.youtube_error_no_independent_audio), error.userText) }
         assertEquals(listOf(false, false, false), calls)
     }
     @Test fun parsedResponseWithoutStatusDoesNotRetryWithCookie() = runBlocking {
@@ -173,7 +175,7 @@ class YouTubeClientTest {
             }
         }
         try { client.resolveAudio(id); fail() }
-        catch (error: YouTubeException) { assertEquals("这个视频没有可用的独立音轨", error.message) }
+        catch (error: YouTubeException) { assertEquals(TextRef.Res(R.string.youtube_error_no_independent_audio), error.userText) }
         assertEquals(listOf(false, false, false), calls)
     }
     @Test fun searchDeduplicatesAndStopsWhenNoNewItems() = runBlocking {
@@ -408,7 +410,7 @@ class YouTubeClientTest {
             try {
                 YouTubeClient({null},solver,media).copyAudio(YouTubeAudio(YouTubeVideo(id,"fixture"),
                     "https://example.googlevideo.com/v","audio/mp4",emptyMap()),file) { _, _ -> };fail()
-            } catch (error: YouTubeException) { assertTrue(error.message!!.contains("音轨数据不完整")) }
+            } catch (error: YouTubeException) { assertEquals(TextRef.Res(R.string.youtube_error_incomplete_data), error.userText) }
             assertFalse(file.exists())
         } finally { file.delete() }
     }

@@ -1,5 +1,8 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.text.persistedErrorText
+import com.nanahoshi.audioplayer.text.PersistedErrors
+import com.nanahoshi.audioplayer.R
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -17,7 +20,11 @@ import com.nanahoshi.audioplayer.MainActivity
 import com.nanahoshi.audioplayer.data.db.DownloadStatus
 import com.nanahoshi.audioplayer.data.db.TranslateMark
 import com.nanahoshi.audioplayer.data.db.WhisperJobEntity
+import com.nanahoshi.audioplayer.data.db.TranslationJobEntity
 import com.nanahoshi.audioplayer.graph
+import androidx.annotation.StringRes
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.text.UserFacingError
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -27,20 +34,26 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
 
-internal const val SUBTITLE_START_FAILED = "无法启动后台字幕任务，请回到应用后重试"
-internal const val SUBTITLE_INTERRUPTED = "后台字幕任务已中断，请重试"
-private const val SUBTITLE_TIMEOUT = "后台字幕任务超时，请重试"
+internal const val SUBTITLE_START_FAILED = PersistedErrors.SUBTITLE_START_FAILED
+internal const val SUBTITLE_INTERRUPTED = PersistedErrors.SUBTITLE_INTERRUPTED
+private const val SUBTITLE_TIMEOUT = PersistedErrors.SUBTITLE_TIMEOUT
 
-internal class SubtitleTaskStopped(message: String) : CancellationException(message)
+internal class SubtitleTaskStopped(
+    val persistedError: String,
+) : CancellationException(persistedError), UserFacingError {
+    override val userText = persistedErrorText(persistedError) ?: TextRef.Raw(persistedError)
+}
 
-internal enum class SubtitleTask(val label: String) {
-    WHISPER("生成字幕"),
-    TRANSLATE("翻译字幕"),
-    POLISH("润色字幕"),
+internal enum class SubtitleTask(@param:StringRes val labelRes: Int) {
+    WHISPER(R.string.subtitle_task_whisper),
+    TRANSLATE(R.string.subtitle_task_translate),
+    POLISH(R.string.subtitle_task_polish),
 }
 
 internal fun SubtitleTaskRequests(startService: (Long) -> Boolean) =
@@ -83,7 +96,7 @@ internal class ForegroundTaskRequests<K>(
         private var worker: Job? = null
         private var cancellation: CancellationException? = null
 
-        fun cancel(reason: CancellationException = CancellationException("已中止")) {
+        fun cancel(reason: CancellationException = CancellationException(PersistedErrors.CANCELLED)) {
             val current = synchronized(this) {
                 if (cancellation != null) return
                 cancellation = reason
@@ -119,7 +132,8 @@ internal class SubtitleTaskService : Service() {
     private val notifications by lazy { getSystemService(NotificationManager::class.java) }
     private val running = mutableMapOf<Int, SubtitleTask>()
     private var whisperJobs = emptyList<WhisperJobEntity>()
-    private var notificationState: Triple<String, String?, Int>? = null
+    private var translationJobs = emptyList<TranslationJobEntity>()
+    private var notificationState: Triple<String, String?, Int?>? = null
     private var latestStartId = 0
     private var foreground = false
     private var stopping = false
@@ -160,7 +174,7 @@ internal class SubtitleTaskService : Service() {
     private fun promote(): Boolean {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             notifications.createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "字幕任务", NotificationManager.IMPORTANCE_LOW),
+                NotificationChannel(CHANNEL_ID, getString(R.string.channel_subtitle_tasks), NotificationManager.IMPORTANCE_LOW),
             )
         }
         try {
@@ -180,41 +194,61 @@ internal class SubtitleTaskService : Service() {
                 acquire(TimeUnit.HOURS.toMillis(6))
             }
         scope.launch {
-            application.graph().whisper.observe().conflate().collect { jobs ->
+            application.graph().whisper.observe().map { rows -> rows.map { it.copy(progress = 0f, progressSummary = null) } }.distinctUntilChanged().conflate().collect { jobs ->
                 whisperJobs = jobs
                 updateNotification()
             }
         }
+        scope.launch {
+            application.graph().translator.jobs.map { rows -> rows.map { it.copy(progressSummary = null) } }.distinctUntilChanged().conflate().collect { jobs ->
+                translationJobs = jobs
+                updateNotification()
+            }
+        }
+        scope.launch { application.graph().taskProgress.snapshots.collect { updateNotification() } }
         return true
     }
 
     private fun updateNotification() {
         if (running.isEmpty() || stopping) return
-        val whisper = if (SubtitleTask.WHISPER in running.values) {
-            whisperJobs.firstOrNull { it.status == DownloadStatus.RUNNING || it.translateStatus == TranslateMark.RUNNING }
-                ?: whisperJobs.lastOrNull { it.status == DownloadStatus.QUEUED }
-        } else null
-        val phases = running.values.toSet().map { task ->
-            when {
-                task != SubtitleTask.WHISPER -> task.label
-                whisper?.translateStatus == TranslateMark.RUNNING -> SubtitleTask.TRANSLATE.label
-                whisper?.status == DownloadStatus.QUEUED && whisper.fingerprint.isEmpty() -> "等待音频下载"
-                else -> task.label
-            }
-        }.distinct()
-        val progress = whisper?.takeIf { it.status == DownloadStatus.RUNNING }?.progress ?: 0f
-        val percent = (progress.coerceIn(0f, 1f) * 100).toInt()
+        val whisper = whisperJobs.firstOrNull { it.status == DownloadStatus.RUNNING }
+        val waiting = whisperJobs.filter { it.status == DownloadStatus.QUEUED }
+        val translating = whisperJobs.firstOrNull { it.translateStatus == TranslateMark.RUNNING }
+        val independent = translationJobs.filter { it.status == DownloadStatus.RUNNING }
+        val queuedTranslations = whisperJobs.count { it.translateStatus == TranslateMark.QUEUED } +
+            translationJobs.count { it.status == DownloadStatus.QUEUED }
+        val snapshots = application.graph().taskProgress.snapshots.value
+        fun stage(kind: TaskKind, id: Long, fallback: String): String {
+            val live = snapshots[TaskKey(kind, id)]?.takeIf { it.active } ?: return fallback
+            val stats = live.commonText(this@SubtitleTaskService)
+            val phase = live.summary.phase?.let { getString(it.labelRes) } ?: fallback
+            return "$phase · $stats"
+        }
+        val phases = buildList {
+            if (whisper != null) add(stage(TaskKind.WHISPER, whisper.id, getString(SubtitleTask.WHISPER.labelRes)))
+            else if (waiting.any { it.fingerprint.isNotBlank() }) add(getString(R.string.subtitle_queued))
+            else if (waiting.isNotEmpty()) add(getString(R.string.subtitle_waiting_audio))
+            if (translating != null) add(stage(TaskKind.WHISPER, translating.id, getString(SubtitleTask.TRANSLATE.labelRes)))
+            independent.forEach { add(stage(TaskKind.TRANSLATION, it.id, getString(it.operation.labelRes))) }
+            if (queuedTranslations > 0) add(getString(R.string.subtitle_translation_queue, queuedTranslations))
+            if (isEmpty()) add(getString(R.string.subtitle_preparing))
+        }
+        val first = whisper?.let { snapshots[TaskKey(TaskKind.WHISPER, it.id)] }
+            ?: translating?.let { snapshots[TaskKey(TaskKind.WHISPER, it.id)] }
+            ?: independent.firstOrNull()?.let { snapshots[TaskKey(TaskKind.TRANSLATION, it.id)] }
+        val percent = first?.fraction()?.let { (it * 100).toInt() }
         val text = phases.joinToString(" · ")
-        val state = Triple(text, whisper?.title, percent)
+        val title = whisper?.title ?: translating?.title ?: independent.firstOrNull()?.title ?: waiting.firstOrNull()?.title
+        val state = Triple(text, title, percent)
         if (notificationState == state) return
         notificationState = state
-        notifications.notify(NOTIFICATION_ID, notification(text, whisper?.title, percent).build())
+        notifications.notify(NOTIFICATION_ID, notification(text, title, percent).build())
     }
 
     private fun notification(
-        text: String = "准备字幕任务",
+        text: String = getString(R.string.notification_subtitle_preparing),
         title: String? = null,
-        percent: Int = 0,
+        percent: Int? = null,
     ): NotificationCompat.Builder {
         val openTasks = PendingIntent.getActivity(
             this,
@@ -226,7 +260,7 @@ internal class SubtitleTaskService : Service() {
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_notify_sync)
-            .setContentTitle("正在处理字幕")
+            .setContentTitle(getString(R.string.notification_subtitle_title))
             .setContentText(text)
             .setSubText(title)
             .setContentIntent(openTasks)
@@ -236,7 +270,7 @@ internal class SubtitleTaskService : Service() {
             .setOnlyAlertOnce(true)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setProgress(100, percent, percent == 0)
+            .setProgress(100, percent ?: 0, percent == null)
     }
 
     override fun onTimeout(startId: Int, fgsType: Int) {

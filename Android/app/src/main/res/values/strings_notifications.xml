@@ -1,0 +1,22 @@
+<resources>
+    <!-- 字幕任务 -->
+    <string name="subtitle_task_whisper">生成字幕</string>
+    <string name="subtitle_task_translate">翻译字幕</string>
+    <string name="subtitle_task_polish">润色字幕</string>
+    <string name="subtitle_queued">听写排队</string>
+    <string name="subtitle_waiting_audio">等待音频下载</string>
+    <string name="subtitle_translation_queue">翻译排队 %1$d 项</string>
+    <string name="subtitle_preparing">准备字幕任务</string>
+    <string name="subtitle_task_failed">%1$s失败</string>
+    <string name="notification_model_title">正在下载听写模型</string>
+    <string name="notification_model_installing">正在校验和安装</string>
+    <string name="notification_model_progress">%1$s · %2$d%%</string>
+    <string name="notification_model_cancel">取消 %1$s</string>
+    <string name="notification_model_start_failed">无法启动后台模型下载，请回到设置页重试</string>
+    <string name="notification_model_interrupted">后台下载中断，请重试</string>
+    <string name="notification_audio_title">正在下载音频</string>
+    <string name="notification_ja_work_verification_title">Japanese ASMR 整部作品下载待验证</string>
+    <string name="notification_ja_work_verification_message">%1$d 部作品需要验证，点按继续</string>
+    <string name="notification_subtitle_preparing">准备字幕任务</string>
+    <string name="notification_subtitle_title">正在处理字幕</string>
+</resources>

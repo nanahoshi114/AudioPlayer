@@ -42,6 +42,7 @@ class DownloadLibraryGateAndroidTest {
             override fun getFilesDir(): File = root
         }
         val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        var centerToClose: DownloadCenter? = null
         try {
             val credentials = CredentialStore(context)
             val asmr = AsmrClient()
@@ -58,6 +59,7 @@ class DownloadLibraryGateAndroidTest {
                 SubtitleSource(context, db, bili, asmr),
                 startService = { _, requestId -> serviceStarts.trySend(requestId).isSuccess },
             )
+            centerToClose = center
             center.awaitStartup()
             val part = BiliPart("BV1234567890", 42L, 1, "Part", "Author", 1000L, "")
             val failedId = db.downloads().insert(
@@ -84,6 +86,7 @@ class DownloadLibraryGateAndroidTest {
             assertEquals(DOWNLOAD_LIBRARY_REQUIRED, db.downloads().get(failedId)?.error)
             assertNull(db.downloads().nextQueued())
         } finally {
+            centerToClose?.close()
             db.close()
             root.deleteRecursively()
         }
@@ -97,6 +100,7 @@ class DownloadLibraryGateAndroidTest {
             override fun getFilesDir(): File = root
         }
         val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        var centerToClose: DownloadCenter? = null
         try {
             val credentials = CredentialStore(context)
             val asmr = AsmrClient()
@@ -113,6 +117,7 @@ class DownloadLibraryGateAndroidTest {
                 SubtitleSource(context, db, bili, asmr),
                 startService = { _, requestId -> serviceStarts.trySend(requestId).isSuccess },
             )
+            centerToClose = center
             center.awaitStartup()
             suspend fun <T> drive(block: suspend () -> T): T = withTimeout(5_000) {
                 val result = async { block() }
@@ -136,6 +141,7 @@ class DownloadLibraryGateAndroidTest {
             assertEquals(first.id, viaTrack.id)
             assertFalse(viaTrack.added)
         } finally {
+            centerToClose?.close()
             db.close()
             root.deleteRecursively()
         }

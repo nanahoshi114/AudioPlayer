@@ -1,5 +1,10 @@
 package com.nanahoshi.audioplayer.playback
 
+import com.nanahoshi.audioplayer.R
+import com.nanahoshi.audioplayer.text.PersistedErrors
+import com.nanahoshi.audioplayer.data.encode
+import com.nanahoshi.audioplayer.japaneseasmr.jaAudioIdentity
+import com.nanahoshi.audioplayer.japaneseasmr.jaIdentity
 import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
@@ -70,7 +75,7 @@ class SubtitleSource(
             when (val state = generatedState(row)) {
                 is GeneratedState.Ready -> return@withContext loadedGenerated(state.fingerprint, state.document)
                 GeneratedState.Corrupt -> return@withContext LoadedSubtitles(
-                    emptyList(), false, false, "生成的字幕文件损坏，可在「更多」里删除后重新生成",
+                    emptyList(), false, false, context.getString(R.string.player_error_generated_subtitles_corrupt),
                 )
                 GeneratedState.Missing -> Unit
             }
@@ -140,7 +145,7 @@ class SubtitleSource(
             when (track.source) {
                 TrackSource.BILIBILI -> bilibiliCues(track)
                 TrackSource.ASMR -> TrackSubtitles(parseSubtitleDocument(asmrText(track).orEmpty()))
-                TrackSource.DLSITE, TrackSource.YOUTUBE -> TrackSubtitles(emptyList())
+                TrackSource.DLSITE, TrackSource.YOUTUBE, TrackSource.JAPANESE_ASMR -> TrackSubtitles(emptyList())
                 TrackSource.LOCAL -> TrackSubtitles(parseSubtitleDocument(localText(track).orEmpty()))
             }
         } catch (error: CancellationException) {
@@ -247,7 +252,7 @@ class SubtitleSource(
     internal suspend fun recoverPublications() = generatedWriteLock.withLock {
         for (publication in db.translations().pendingPublications()) {
             try {
-                finishPublication(publication)
+                finishPublication(publication, recovering = true)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
@@ -256,7 +261,7 @@ class SubtitleSource(
         }
     }
 
-    private suspend fun finishPublication(publication: SubtitlePublicationEntity): Boolean {
+    private suspend fun finishPublication(publication: SubtitlePublicationEntity, recovering: Boolean = false): Boolean {
         val target = File(File(context.filesDir, "subtitles"), publication.filename)
         var written = false
         // 非法文件名（如目录穿越）与写入失败同走失败分支，不抛出中断恢复。
@@ -273,8 +278,9 @@ class SubtitleSource(
         if (!written) {
             db.withTransaction {
                 db.translations().clearPublication(publication.filename)
-                publication.translationJobId?.let { db.translations().failIfActive(it, "无法保存译文，请重试") }
-                    ?: publication.whisperJobId?.let { db.whisper().markTranslateFailed(it, "无法保存译文，请重试") }
+                publication.translationJobId?.let { db.translations().failIfActive(it, PersistedErrors.TRANSLATE_SAVE_FAILED) }
+                    ?: publication.whisperJobId?.let { db.whisper().markTranslateFailed(it, PersistedErrors.TRANSLATE_SAVE_FAILED) }
+                if (recovering) finishProgressPublication(publication, false)
             }
             return false
         }
@@ -282,6 +288,7 @@ class SubtitleSource(
             db.withTransaction {
                 publication.translationJobId?.let { db.translations().finishIfActive(it) }
                 publication.whisperJobId?.let { db.whisper().markTranslated(it, publication.translatedAt) }
+                if (recovering) finishProgressPublication(publication, true)
                 db.translations().clearPublication(publication.filename)
             }
             true
@@ -291,6 +298,26 @@ class SubtitleSource(
             // 文件已写成但 DB 提交失败：保留发布记录，下次启动幂等重写再提交。
             false
         }
+    }
+
+    /** 发布恢复先完成，再登记进度；丢失的进程内统计不推算补齐。调用者持有事务。 */
+    private suspend fun finishProgressPublication(publication: SubtitlePublicationEntity, success: Boolean) {
+        val translationId = publication.translationJobId
+        val whisperId = publication.whisperJobId
+        val raw = translationId?.let { db.translations().get(it)?.progressSummary }
+            ?: whisperId?.let { db.whisper().get(it)?.progressSummary }
+        val summary = com.nanahoshi.audioplayer.data.decodeProgressSummary(raw)
+        val part = com.nanahoshi.audioplayer.data.ProgressPart.TRANSLATION
+        val previous = summary.parts[part]
+        val result = com.nanahoshi.audioplayer.data.TaskSegmentSummary(
+            phase = com.nanahoshi.audioplayer.data.ProgressPhase.SAVING_TRANSLATION,
+            result = if (success) com.nanahoshi.audioplayer.data.ProgressResult.COMPLETED else com.nanahoshi.audioplayer.data.ProgressResult.FAILED,
+            failurePhase = com.nanahoshi.audioplayer.data.ProgressPhase.SAVING_TRANSLATION.takeUnless { success },
+            model = previous?.model, platform = previous?.platform,
+        )
+        val encoded = summary.merge(part, result).encode()
+        if (translationId != null) db.translations().setProgressSummary(translationId, encoded)
+        else if (whisperId != null) db.whisper().setProgressSummary(whisperId, encoded)
     }
 
     private suspend fun generatedState(row: QueuedTrack): GeneratedState {
@@ -307,7 +334,9 @@ class SubtitleSource(
         data object Missing : GeneratedState
     }
 
-    private suspend fun removeGenerated(row: QueuedTrack) {
+    private suspend fun removeGenerated(input: QueuedTrack) {
+        val identity = jaSubtitleIdentity(input)
+        val row = if (identity != null) input.copy(remoteUrl = identity) else input
         val jobs = relatedDone(row)
         jobs.map { it.fingerprint }.filter { it.isNotBlank() }.distinct().forEach { fingerprint ->
             val file = generatedFile(fingerprint)
@@ -366,7 +395,7 @@ class SubtitleSource(
     private suspend fun relatedDone(row: QueuedTrack): List<WhisperJobEntity> {
         val found = mutableListOf<WhisperJobEntity>()
         row.trackId?.takeIf { it > 0L }?.let { found += db.whisper().doneForTrack(it) }
-        row.remoteUrl?.takeIf { it.isNotBlank() && (row.source != TrackSource.BILIBILI || it.startsWith("/")) }
+        subtitleIdentity(row)
             ?.let { found += db.whisper().doneForUrl(it) }
         storedAudioPath(row)?.let { found += db.whisper().doneForPath(it) }
         return found.distinctBy { it.id }
@@ -375,7 +404,7 @@ class SubtitleSource(
     private suspend fun findGeneratedJob(row: QueuedTrack): WhisperJobEntity? {
         val jobs = buildList {
             row.trackId?.let { db.whisper().latestDoneForTrack(it) }?.let(::add)
-            row.remoteUrl?.takeIf { it.isNotBlank() && (row.source != TrackSource.BILIBILI || it.startsWith("/")) }
+            subtitleIdentity(row)
                 ?.let { db.whisper().latestDoneForUrl(it) }?.let(::add)
             storedAudioPath(row)?.let { db.whisper().latestDoneForPath(it) }?.let(::add)
         }
@@ -394,8 +423,15 @@ class SubtitleSource(
     private fun overlayFile(row: QueuedTrack, useBiliIdentity: Boolean = true): File {
         val bili = if (useBiliIdentity) bilibiliRowTrack(row) else null
         return File(File(context.filesDir, "subtitles"),
-            overlayFileName(row.trackId, row.remoteUrl, row.localUri, row.queueItemId, bili?.bvid, bili?.cid)!!)
+            overlayFileName(row.trackId, row.jaAudioIdentity() ?: row.remoteUrl, row.localUri, row.queueItemId, bili?.bvid, bili?.cid)!!)
     }
+
+    private suspend fun jaSubtitleIdentity(row: QueuedTrack): String? = row.jaAudioIdentity()
+        ?: row.trackId?.let { db.japaneseAsmr().mediaForTrack(it) }?.let { jaIdentity(it.postId, it.mediaKey) }
+
+    private suspend fun subtitleIdentity(row: QueuedTrack): String? = jaSubtitleIdentity(row)
+        ?: row.remoteUrl?.takeIf { row.source != TrackSource.JAPANESE_ASMR && it.isNotBlank() &&
+            (row.source != TrackSource.BILIBILI || it.startsWith("/")) }
 
     private suspend fun storedAudioPath(row: QueuedTrack): String? {
         val track = row.trackId?.let { db.tracks().getById(it) }
@@ -404,6 +440,15 @@ class SubtitleSource(
             com.nanahoshi.audioplayer.data.readyBiliAudio(context.filesDir, bili.bvid, bili.cid)?.let { return it.absolutePath }
         }
         listOf(track?.localUri, row.localUri, row.remoteUrl).firstOrNull { isFile(it) }?.let { return it }
+        val ja = jaSubtitleIdentity(row)
+        if (ja != null) {
+            val uri = android.net.Uri.parse(ja)
+            val post = uri.getQueryParameter("post") ?: return null
+            val key = uri.getQueryParameter("media") ?: return null
+            return db.downloads().finishedForWork(TrackSource.JAPANESE_ASMR.name, post)
+                .firstOrNull { it.fileKey == key && isFile(it.localPath) }?.localPath
+        }
+        if (row.source == TrackSource.JAPANESE_ASMR) return null
         val url = row.remoteUrl
         if (!url.isNullOrBlank()) {
             val done = db.downloads().latestForUrl(url)
@@ -437,8 +482,8 @@ class SubtitleSource(
                 }
                 TrackSubtitles(cues, language = result.language)
             }
-            BiliSubtitle.NeedsLogin -> TrackSubtitles(emptyList(), "B 站字幕需要登录后显示，可在「我的」重新登录")
-            BiliSubtitle.Failed -> TrackSubtitles(emptyList(), "B 站字幕读取失败，可稍后再试")
+            BiliSubtitle.NeedsLogin -> TrackSubtitles(emptyList(), context.getString(R.string.player_error_bili_subtitle_login))
+            BiliSubtitle.Failed -> TrackSubtitles(emptyList(), context.getString(R.string.player_error_bili_subtitle_load))
             BiliSubtitle.Missing -> TrackSubtitles(emptyList())
         }
     }
@@ -448,7 +493,7 @@ class SubtitleSource(
         val files = db.files().listIn(folderId)
         val name = pickSubtitleName(track.title, files.map { it.name }) ?: return null
         val remote = files.firstOrNull { it.name == name }?.remoteUrl ?: return null
-        return asmr.readText(remote)
+        return asmr.readText(remote).text
     }
 
     private fun localText(track: TrackEntity): String? {
@@ -587,6 +632,7 @@ internal fun overlayFileName(
 ): String? {
     val raw = when {
         bvid != null && cid != null && (trackId == null || trackId <= 0L) -> "bili:$bvid:$cid"
+        remoteUrl?.startsWith("japaneseasmr://audio?") == true -> "url:$remoteUrl"
         trackId != null && trackId > 0L -> "track:$trackId"
         !remoteUrl.isNullOrBlank() -> "url:$remoteUrl"
         !localUri.isNullOrBlank() -> "path:$localUri"

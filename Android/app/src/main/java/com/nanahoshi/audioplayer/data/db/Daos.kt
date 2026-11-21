@@ -97,7 +97,10 @@ interface TrackDao {
     @Query("SELECT * FROM tracks WHERE localUri = :uri LIMIT 1")
     suspend fun findByLocalUri(uri: String): TrackEntity?
 
-    @Query("SELECT * FROM tracks WHERE source IN ('ASMR', 'DLSITE') AND localUri IS NOT NULL")
+    @Query("SELECT * FROM tracks WHERE localUri LIKE '/%' ORDER BY id")
+    suspend fun withAbsoluteLocalPaths(): List<TrackEntity>
+
+    @Query("SELECT * FROM tracks WHERE source IN ('ASMR', 'DLSITE', 'JAPANESE_ASMR') AND localUri IS NOT NULL")
     suspend fun onlineWithLocal(): List<TrackEntity>
 
     @Query("SELECT * FROM tracks WHERE source = 'BILIBILI' AND localUri IS NOT NULL")
@@ -117,6 +120,9 @@ interface TrackDao {
 
     @Query("DELETE FROM tracks WHERE id = :id")
     suspend fun delete(id: Long)
+
+    @Query("UPDATE tracks SET durationMs = :duration WHERE id = :id AND durationMs = 0")
+    suspend fun fillDuration(id: Long, duration: Long)
 
     @Query("UPDATE tracks SET folderId = :folderId WHERE id = :id")
     suspend fun setFolder(id: Long, folderId: Long?)
@@ -175,6 +181,9 @@ interface LibraryFileDao {
     @Query("SELECT * FROM library_files WHERE asmrWorkId = :workId AND fileHash = :hash LIMIT 1")
     suspend fun findAsmr(workId: Long, hash: String): LibraryFileEntity?
 
+    @Query("SELECT * FROM library_files WHERE folderId IN (:folderIds)")
+    suspend fun inFolders(folderIds: List<Long>): List<LibraryFileEntity>
+
     @Query("SELECT * FROM library_files WHERE asmrWorkId = :workId")
     suspend fun forWork(workId: Long): List<LibraryFileEntity>
 
@@ -196,10 +205,25 @@ interface LibraryFileDao {
 
 @Dao
 interface DownloadDao {
+    @Query("UPDATE downloads SET progressSummary = :summary WHERE id = :id")
+    suspend fun setProgressSummary(id: Long, summary: String?)
+
     @Query("UPDATE downloads SET status = 'FAILED', error = :error WHERE id = :id AND status = 'RUNNING'")
     suspend fun failRunning(id: Long, error: String)
     @Query("SELECT * FROM downloads WHERE kind = 'DLSITE_ARCHIVE' AND workKey = :workno ORDER BY id DESC LIMIT 1")
     suspend fun latestArchive(workno: String): DownloadEntity?
+
+    @Query("""
+        SELECT * FROM downloads WHERE kind = 'JAPANESE_ASMR_WORK' AND workKey = :workKey AND id != :excludeId
+            AND (status IN ('QUEUED', 'RUNNING') OR (status = 'FAILED' AND phase = 'VERIFY')) ORDER BY id LIMIT 1
+    """)
+    suspend fun reserveWorkTask(workKey: String, excludeId: Long): DownloadEntity?
+
+    @Query("UPDATE downloads SET status = 'FAILED', phase = 'VERIFY', error = '需要验证后继续' WHERE id = :id AND status = 'RUNNING'")
+    suspend fun waitForJaVerification(id: Long)
+
+    @Query("UPDATE downloads SET phase = NULL, error = '篇目已从音频库移除' WHERE kind = 'JAPANESE_ASMR_WORK' AND status = 'FAILED' AND phase = 'VERIFY' AND workFolderId IN (:folderIds)")
+    suspend fun invalidateJaWorkVerification(folderIds: List<Long>)
 
     @Query("SELECT * FROM downloads WHERE kind = 'DLSITE_ARCHIVE' AND workKey = :workno AND status IN ('QUEUED', 'RUNNING') LIMIT 1")
     suspend fun activeArchive(workno: String): DownloadEntity?
@@ -288,7 +312,7 @@ interface DownloadDao {
     @Query("UPDATE downloads SET status = 'FAILED', error = :error WHERE status IN ('QUEUED', 'RUNNING')")
     suspend fun failActive(error: String)
 
-    @Query("UPDATE downloads SET status = 'QUEUED', bytesDone = 0, bytesTotal = 0, error = NULL, phase = NULL WHERE id = :id AND status = 'FAILED'")
+    @Query("UPDATE downloads SET status = 'QUEUED', bytesDone = 0, bytesTotal = 0, error = NULL, phase = NULL, progressSummary = NULL WHERE id = :id AND status = 'FAILED'")
     suspend fun requeue(id: Long)
 
     @Query("DELETE FROM downloads WHERE trackId = :trackId AND status = 'DONE'")
@@ -303,12 +327,33 @@ interface DownloadDao {
     @Query("SELECT * FROM downloads WHERE trackId = :trackId ORDER BY id DESC LIMIT 1")
     suspend fun latestForTrack(trackId: Long): DownloadEntity?
 
+    @Query("SELECT * FROM downloads WHERE source = :source AND workKey = :post AND fileKey = :key ORDER BY id DESC LIMIT 1")
+    suspend fun latestForSourceFile(source: String, post: String, key: String): DownloadEntity?
+
     @Query("SELECT * FROM downloads WHERE remoteUrl = :url ORDER BY id DESC LIMIT 1")
     suspend fun latestForUrl(url: String): DownloadEntity?
 }
 
 @Dao
 interface WhisperDao {
+    @Query("UPDATE whisper_jobs SET progressSummary = :summary WHERE id = :id")
+    suspend fun setProgressSummary(id: Long, summary: String?)
+
+    @Query("SELECT * FROM whisper_jobs WHERE status IN ('QUEUED', 'RUNNING') OR translateStatus IN ('QUEUED', 'RUNNING') ORDER BY id")
+    suspend fun pendingWork(): List<WhisperJobEntity>
+
+    @Query("SELECT * FROM whisper_jobs WHERE fingerprint = :fingerprint AND translateStatus IN ('QUEUED', 'RUNNING') LIMIT 1")
+    suspend fun activeTranslation(fingerprint: String): WhisperJobEntity?
+
+    @Query("UPDATE whisper_jobs SET status = 'DONE', progress = 1, error = NULL, translateStatus = 'QUEUED' WHERE id = :id AND status IN ('QUEUED', 'RUNNING')")
+    suspend fun queueTranslationIfActive(id: Long): Int
+
+    @Query("UPDATE whisper_jobs SET translateStatus = 'RUNNING' WHERE id = :id AND translateStatus = 'QUEUED'")
+    suspend fun startQueuedTranslation(id: Long): Int
+
+    @Query("UPDATE whisper_jobs SET error = :error, translateStatus = 'FAILED' WHERE translateStatus IN ('QUEUED', 'RUNNING') AND NOT EXISTS (SELECT 1 FROM subtitle_publications WHERE whisperJobId = whisper_jobs.id)")
+    suspend fun failActiveTranslations(error: String)
+
     @Query("UPDATE whisper_jobs SET awaitDownloadId = NULL, awaitFileKey = NULL WHERE id = :id")
     suspend fun clearAwaitDownload(id: Long)
 
@@ -445,7 +490,7 @@ interface WhisperDao {
     @Query("UPDATE whisper_jobs SET status = 'DONE', progress = 1, error = :error, translateStatus = 'FAILED' WHERE id = :id")
     suspend fun markTranslateFailed(id: Long, error: String)
 
-    @Query("UPDATE whisper_jobs SET error = :error, translateStatus = 'FAILED' WHERE id = :id AND translateStatus = 'RUNNING' AND NOT EXISTS (SELECT 1 FROM subtitle_publications WHERE whisperJobId = :id)")
+    @Query("UPDATE whisper_jobs SET error = :error, translateStatus = 'FAILED' WHERE id = :id AND translateStatus IN ('QUEUED', 'RUNNING') AND NOT EXISTS (SELECT 1 FROM subtitle_publications WHERE whisperJobId = :id)")
     suspend fun failTranslateIfUnpublished(id: Long, error: String): Int
 
     @Query("UPDATE whisper_jobs SET error = :error, translateStatus = 'FAILED' WHERE translateStatus = 'RUNNING' AND NOT EXISTS (SELECT 1 FROM subtitle_publications WHERE whisperJobId = whisper_jobs.id)")
@@ -460,6 +505,12 @@ interface WhisperDao {
     @Query("UPDATE whisper_jobs SET status = 'FAILED', error = :error WHERE status IN ('QUEUED', 'RUNNING')")
     suspend fun failActive(error: String)
 
+    @Query("UPDATE whisper_jobs SET status = 'FAILED', error = :error WHERE trackId = :trackId AND status IN ('QUEUED', 'RUNNING')")
+    suspend fun failActiveForTrack(trackId: Long, error: String)
+
+    @Query("UPDATE whisper_jobs SET error = :error, translateStatus = 'FAILED' WHERE trackId = :trackId AND translateStatus IN ('QUEUED', 'RUNNING') AND NOT EXISTS (SELECT 1 FROM subtitle_publications WHERE whisperJobId = whisper_jobs.id)")
+    suspend fun failTranslationForTrack(trackId: Long, error: String)
+
     @Query("UPDATE whisper_jobs SET status = 'FAILED', error = :error WHERE id = :id AND status = 'QUEUED'")
     suspend fun failWaiting(id: Long, error: String)
 
@@ -468,7 +519,7 @@ interface WhisperDao {
         UPDATE whisper_jobs
         SET title = :title, fingerprint = :fingerprint, trackId = :trackId, localPath = :path,
             awaitRemoteUrl = :url, endpoint = :endpoint, skipTranslate = :skipTranslate, model = :model,
-            status = 'QUEUED', remoteJobId = NULL, remoteSubmittedAt = NULL, progress = 0, error = NULL, translateStatus = NULL
+            status = 'QUEUED', remoteJobId = NULL, remoteSubmittedAt = NULL, progress = 0, error = NULL, translateStatus = NULL, progressSummary = NULL
         WHERE id = :id
         """,
     )
@@ -488,7 +539,7 @@ interface WhisperDao {
         """
         UPDATE whisper_jobs
         SET status = 'QUEUED', fingerprint = '', localPath = NULL, remoteJobId = NULL, remoteSubmittedAt = NULL, progress = 0, error = NULL,
-            translateStatus = NULL
+            translateStatus = NULL, progressSummary = NULL
         WHERE id = :id
         """,
     )
@@ -497,6 +548,9 @@ interface WhisperDao {
 
 @Dao
 interface TranslationDao {
+    @Query("UPDATE translation_jobs SET progressSummary = :summary WHERE id = :id")
+    suspend fun setProgressSummary(id: Long, summary: String?)
+
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun stagePublication(item: SubtitlePublicationEntity)
 
@@ -509,7 +563,7 @@ interface TranslationDao {
     @Query("SELECT * FROM translation_jobs WHERE status IN ('QUEUED', 'RUNNING') ORDER BY id")
     suspend fun active(): List<TranslationJobEntity>
 
-    @Query("UPDATE translation_jobs SET status = 'QUEUED', error = NULL WHERE id = :id AND status = 'FAILED'")
+    @Query("UPDATE translation_jobs SET status = 'QUEUED', error = NULL, progressSummary = NULL WHERE id = :id AND status = 'FAILED'")
     suspend fun requeue(id: Long): Int
 
     @Query("UPDATE translation_jobs SET status = 'RUNNING', error = NULL WHERE id = :id AND status = 'QUEUED'")
@@ -574,6 +628,9 @@ interface TranslationDao {
     suspend fun deleteInactive(id: Long)
 
     /** 只删终态记录；进行中的翻译保留，与听写侧「保留进行中的听写」一致。 */
+    @Query("UPDATE translation_jobs SET status = 'FAILED', error = :error WHERE (trackId = :trackId OR queueItemId IN (:queueIds)) AND status IN ('QUEUED', 'RUNNING') AND NOT EXISTS (SELECT 1 FROM subtitle_publications WHERE translationJobId = translation_jobs.id)")
+    suspend fun failForRemovedAudio(trackId: Long?, queueIds: List<Long>, error: String)
+
     @Query("DELETE FROM translation_jobs WHERE status IN ('DONE', 'FAILED') AND trackId = :trackId")
     suspend fun deleteInactiveForTrack(trackId: Long)
 
@@ -643,6 +700,9 @@ interface PlaylistDao {
     @Query("SELECT COALESCE(MAX(position), -1) FROM playlist_items WHERE playlistId = :playlistId")
     suspend fun maxPosition(playlistId: Long): Int
 
+    @Query("SELECT * FROM playlist_items WHERE trackId = :trackId")
+    suspend fun itemsForTrack(trackId: Long): List<PlaylistItemEntity>
+
     @Query("SELECT trackId FROM playlist_items WHERE playlistId = :playlistId")
     suspend fun trackIds(playlistId: Long): List<Long>
 
@@ -671,11 +731,16 @@ interface QueueDao {
             COALESCE(tracks.durationMs, 0) AS durationMs,
             COALESCE(tracks.coverUri, queue_items.coverUri) AS coverUri,
             tracks.localUri AS localUri, tracks.bvid AS bvid, tracks.cid AS cid, tracks.page AS page,
-            queue_items.remoteUrl AS remoteUrl, queue_items.referer AS referer,
-            queue_items.workno AS workno, queue_items.fileKey AS fileKey,
+            COALESCE(queue_items.remoteUrl, CASE WHEN tracks.remoteUrl LIKE 'japaneseasmr://file?%' THEN tracks.remoteUrl END) AS remoteUrl,
+            queue_items.referer AS referer,
+            COALESCE(japaneseasmr_media.postId, queue_items.workno) AS workno,
+            COALESCE(japaneseasmr_media.mediaKey, queue_items.fileKey) AS fileKey,
+            COALESCE(japaneseasmr_media.kind, queue_items.mediaKind) AS mediaKind,
+            COALESCE(japaneseasmr_media.pathHash, queue_items.mediaPathHash) AS mediaPathHash,
             COALESCE(tracks.youtubeVideoId, CASE WHEN queue_items.source = 'YOUTUBE' THEN queue_items.workno END) AS youtubeVideoId
         FROM queue_items
         LEFT JOIN tracks ON tracks.id = queue_items.trackId
+        LEFT JOIN japaneseasmr_media ON japaneseasmr_media.trackId = tracks.id AND tracks.source = 'JAPANESE_ASMR'
         ORDER BY queue_items.position ASC
         """,
     )
@@ -691,11 +756,16 @@ interface QueueDao {
             COALESCE(tracks.durationMs, 0) AS durationMs,
             COALESCE(tracks.coverUri, queue_items.coverUri) AS coverUri,
             tracks.localUri AS localUri, tracks.bvid AS bvid, tracks.cid AS cid, tracks.page AS page,
-            queue_items.remoteUrl AS remoteUrl, queue_items.referer AS referer,
-            queue_items.workno AS workno, queue_items.fileKey AS fileKey,
+            COALESCE(queue_items.remoteUrl, CASE WHEN tracks.remoteUrl LIKE 'japaneseasmr://file?%' THEN tracks.remoteUrl END) AS remoteUrl,
+            queue_items.referer AS referer,
+            COALESCE(japaneseasmr_media.postId, queue_items.workno) AS workno,
+            COALESCE(japaneseasmr_media.mediaKey, queue_items.fileKey) AS fileKey,
+            COALESCE(japaneseasmr_media.kind, queue_items.mediaKind) AS mediaKind,
+            COALESCE(japaneseasmr_media.pathHash, queue_items.mediaPathHash) AS mediaPathHash,
             COALESCE(tracks.youtubeVideoId, CASE WHEN queue_items.source = 'YOUTUBE' THEN queue_items.workno END) AS youtubeVideoId
         FROM queue_items
         LEFT JOIN tracks ON tracks.id = queue_items.trackId
+        LEFT JOIN japaneseasmr_media ON japaneseasmr_media.trackId = tracks.id AND tracks.source = 'JAPANESE_ASMR'
         ORDER BY queue_items.position ASC
         """,
     )
@@ -718,6 +788,9 @@ interface QueueDao {
 
     @Query("SELECT * FROM queue_items ORDER BY position ASC")
     suspend fun items(): List<QueueItemEntity>
+
+    @Query("UPDATE queue_items SET mediaKind = :kind WHERE id = :id AND trackId IS NULL AND source = 'JAPANESE_ASMR'")
+    suspend fun setJaMediaKind(id: Long, kind: String)
 
     @Query("UPDATE queue_items SET position = :position WHERE id = :id")
     suspend fun updatePosition(id: Long, position: Int)

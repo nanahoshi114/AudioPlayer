@@ -1,13 +1,15 @@
 package com.nanahoshi.audioplayer.data
 
 import android.content.Context
+import androidx.annotation.StringRes
+import com.nanahoshi.audioplayer.R
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
-enum class ThemeMode(val label: String) {
-    SYSTEM("跟随系统"),
-    LIGHT("浅色"),
-    DARK("深色"),
+enum class ThemeMode(@param:StringRes val labelRes: Int) {
+    SYSTEM(R.string.theme_mode_system),
+    LIGHT(R.string.theme_mode_light),
+    DARK(R.string.theme_mode_dark),
 }
 
 enum class AccentMode {

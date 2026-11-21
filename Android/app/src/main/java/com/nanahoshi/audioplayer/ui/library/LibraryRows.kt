@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.ui.library
 
+import com.nanahoshi.audioplayer.R
+import androidx.compose.ui.res.stringResource
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.snap
@@ -32,6 +34,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
@@ -137,7 +140,7 @@ internal fun LibraryBreadcrumb(
     trail: List<LibraryCrumb>,
     onRoot: () -> Unit,
     onCrumb: (Int) -> Unit,
-    rootLabel: String = "音频库",
+    rootLabel: String = stringResource(R.string.nav_library),
     revealCurrent: Boolean = false,
 ) {
     val scroll = rememberScrollState()
@@ -194,7 +197,7 @@ internal fun PlaylistPickDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("加入播放列表") },
+        title = { Text(stringResource(R.string.library_add_playlist)) },
         text = {
             LazyColumn(Modifier.heightIn(max = 420.dp)) {
                 items(playlists, key = { it.id }) { playlist ->
@@ -209,7 +212,7 @@ internal fun PlaylistPickDialog(
             }
         },
         confirmButton = {},
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) } },
     )
 }
 
@@ -221,10 +224,10 @@ internal fun ConfirmRemoveDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("从音频库移除") },
+        title = { Text(stringResource(R.string.library_remove_from_library)) },
         text = { Text(message) },
-        confirmButton = { TextButton(onClick = onConfirm) { Text("移除") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        confirmButton = { TextButton(onClick = onConfirm) { Text(stringResource(R.string.common_remove)) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) } },
     )
 }
 
@@ -278,7 +281,7 @@ internal fun FolderRow(
     )
     ListItem(
         headlineContent = { ItemName(folder.name, selected) },
-        supportingContent = { Text("文件夹") },
+        supportingContent = { Text(stringResource(R.string.library_folder)) },
         leadingContent = {
             AnimatedContent(targetState = selecting, label = "folderLead") { on ->
                 if (on) {
@@ -291,16 +294,16 @@ internal fun FolderRow(
         trailingContent = {
             if (!selecting && (onCache != null || onRecognize != null || onDelete != null)) {
                 IconButton(onClick = { menu = true }) {
-                    Icon(Icons.Default.MoreVert, contentDescription = "更多")
+                    Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.a11y_folder_actions))
                 }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     if (onCache != null) {
-                        DropdownMenuItem(text = { Text("下载到本地") }, onClick = { menu = false; onCache() })
+                        DropdownMenuItem(text = { Text(stringResource(R.string.library_download_whole_work)) }, onClick = { menu = false; onCache() })
                     }
                     if (onRecognize != null) {
-                        DropdownMenuItem(text = { Text("关联为作品") }, onClick = { menu = false; onRecognize() })
+                        DropdownMenuItem(text = { Text(stringResource(R.string.library_recognize_work)) }, onClick = { menu = false; onRecognize() })
                     }
-                    if (onDelete != null) DropdownMenuItem(text = { Text("从音频库移除") }, onClick = { menu = false; onDelete() })
+                    if (onDelete != null) DropdownMenuItem(text = { Text(stringResource(R.string.library_remove_from_library)) }, onClick = { menu = false; onDelete() })
                 }
             }
         },
@@ -345,7 +348,7 @@ private fun BiliVideoPreviewRow(
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                artist?.ifBlank { null } ?: "UP 主未知",
+                artist?.ifBlank { null } ?: stringResource(R.string.library_uploader_unknown),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -353,16 +356,16 @@ private fun BiliVideoPreviewRow(
                 modifier = Modifier.padding(top = 2.dp),
             )
             BadgeLine(
-                leading = listOf(BadgeItem("B 站", LocalSourceColors.current.bilibili),
-                    BadgeItem("多 P", MaterialTheme.colorScheme.secondary)),
+                leading = listOf(BadgeItem(stringResource(R.string.library_badge_bilibili), LocalSourceColors.current.bilibili),
+                    BadgeItem(stringResource(R.string.library_badge_multi_part), MaterialTheme.colorScheme.secondary)),
                 tags = listOf(BadgeItem(folder.biliBvid.orEmpty(), MaterialTheme.colorScheme.onSurfaceVariant)),
                 modifier = Modifier.padding(top = 6.dp),
             )
         }
         if (!selecting && onDelete != null) Box {
-            IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "更多") }
+            IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.a11y_video_actions)) }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                DropdownMenuItem(text = { Text("从音频库移除") }, onClick = { menu = false; onDelete() })
+                DropdownMenuItem(text = { Text(stringResource(R.string.library_remove_from_library)) }, onClick = { menu = false; onDelete() })
             }
         }
     }
@@ -440,13 +443,13 @@ private fun WorkPreviewRow(
         if (!selecting) {
             Box {
                 IconButton(onClick = { onMenu(true) }) {
-                    Icon(Icons.Default.MoreVert, contentDescription = "更多")
+                    Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.a11y_work_actions))
                 }
                 DropdownMenu(expanded = menu, onDismissRequest = { onMenu(false) }) {
                     if (onCache != null) {
-                        DropdownMenuItem(text = { Text("下载到本地") }, onClick = { onMenu(false); onCache() })
+                        DropdownMenuItem(text = { Text(stringResource(R.string.library_download_whole_work)) }, onClick = { onMenu(false); onCache() })
                     }
-                    if (onDelete != null) DropdownMenuItem(text = { Text("从音频库移除") }, onClick = { onMenu(false); onDelete() })
+                    if (onDelete != null) DropdownMenuItem(text = { Text(stringResource(R.string.library_remove_from_library)) }, onClick = { onMenu(false); onDelete() })
                 }
             }
         }
@@ -476,7 +479,7 @@ internal fun TrackRow(
     val downloaded = when (track.source) {
         TrackSource.BILIBILI, TrackSource.YOUTUBE -> track.localUri?.startsWith("/") == true &&
             java.io.File(track.localUri).isFile
-        TrackSource.ASMR, TrackSource.DLSITE ->
+        TrackSource.ASMR, TrackSource.DLSITE, TrackSource.JAPANESE_ASMR ->
             com.nanahoshi.audioplayer.data.LocalAudio.hasStoredCopy(track.localUri)
         else -> false
     }
@@ -493,10 +496,10 @@ internal fun TrackRow(
                     SourceBadge(track.source)
                     Text(formatDuration(track.durationMs), style = MaterialTheme.typography.labelMedium)
                     if (downloaded) {
-                        LabelBadge("已下载", MaterialTheme.colorScheme.tertiary)
+                        LabelBadge(stringResource(R.string.library_badge_downloaded), MaterialTheme.colorScheme.tertiary)
                     }
                     if (hasSubtitle) {
-                        LabelBadge("有字幕", MaterialTheme.colorScheme.primary)
+                        LabelBadge(stringResource(R.string.library_badge_has_subtitle), MaterialTheme.colorScheme.primary)
                     }
                 }
             }
@@ -513,22 +516,22 @@ internal fun TrackRow(
         trailingContent = {
             if (!selecting) {
                 IconButton(onClick = { menu = true }) {
-                    Icon(Icons.Default.MoreVert, contentDescription = "更多")
+                    Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.a11y_track_actions))
                 }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    DropdownMenuItem(text = { Text("接下来播放") }, onClick = { menu = false; onPlayNext() })
-                    DropdownMenuItem(text = { Text("加入播放队列") }, onClick = { menu = false; onAppend() })
+                    DropdownMenuItem(text = { Text(stringResource(R.string.library_play_next)) }, onClick = { menu = false; onPlayNext() })
+                    DropdownMenuItem(text = { Text(stringResource(R.string.library_add_queue)) }, onClick = { menu = false; onAppend() })
                     if (!downloaded && onDownload != null) {
-                        DropdownMenuItem(text = { Text("下载音轨") }, onClick = { menu = false; onDownload() })
+                        DropdownMenuItem(text = { Text(stringResource(R.string.library_download_track)) }, onClick = { menu = false; onDownload() })
                     }
                     if (downloaded && onDeleteDownloaded != null) {
-                        val label = if (!appCopy) "取消本地关联" else "删除已下载文件"
+                        val label = stringResource(if (!appCopy) R.string.library_action_unlink else R.string.library_action_delete_downloads)
                         DropdownMenuItem(
                             text = { Text(label) },
                             onClick = { menu = false; onDeleteDownloaded() },
                         )
                     }
-                    if (onDelete != null) DropdownMenuItem(text = { Text("从音频库移除") }, onClick = { menu = false; onDelete() })
+                    if (onDelete != null) DropdownMenuItem(text = { Text(stringResource(R.string.library_remove_from_library)) }, onClick = { menu = false; onDelete() })
                 }
             }
         },
@@ -553,9 +556,9 @@ internal fun FileRow(
         FileKind.OTHER -> Icons.AutoMirrored.Filled.InsertDriveFile
     }
     val label = when (file.kind) {
-        FileKind.IMAGE -> "图片"
-        FileKind.TEXT -> "文本"
-        FileKind.OTHER -> "文件"
+        FileKind.IMAGE -> stringResource(R.string.file_kind_image)
+        FileKind.TEXT -> stringResource(R.string.file_kind_text)
+        FileKind.OTHER -> stringResource(R.string.file_kind_other)
     }
     ListItem(
         headlineContent = { Text(file.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
@@ -564,10 +567,10 @@ internal fun FileRow(
         trailingContent = {
             if (onDelete != null) {
                 IconButton(onClick = { menu = true }) {
-                    Icon(Icons.Default.MoreVert, contentDescription = "更多")
+                    Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.a11y_file_actions))
                 }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    DropdownMenuItem(text = { Text("从音频库移除") }, onClick = { menu = false; onDelete() })
+                    DropdownMenuItem(text = { Text(stringResource(R.string.library_remove_from_library)) }, onClick = { menu = false; onDelete() })
                 }
             }
         },
@@ -579,19 +582,67 @@ internal fun FileRow(
 internal fun CachePromptDialog(
     prompt: CachePrompt?,
     onAnswer: (Any?) -> Unit,
+    onCancelWaiting: (CachePrompt.JapaneseWaiting) -> Unit,
+    onVerifyJaDownload: (String) -> Unit,
+    onVerifyJaRefresh: (String) -> Unit = {},
 ) {
     when (prompt) {
         null -> Unit
         is CachePrompt.Source -> CachePickDialog(
-            title = "从哪个来源下载？",
-            message = "这部作品已购买，asmr.one 上也有收录。请选择要下载的来源。",
-            options = listOf(TrackSource.DLSITE to "DLsite（已购买）", TrackSource.ASMR to "asmr.one"),
+            title = stringResource(R.string.library_choose_source_title),
+            message = stringResource(R.string.library_choose_source_message),
+            options = prompt.sources.map { source -> source to when (source) {
+                TrackSource.DLSITE -> stringResource(R.string.library_source_dlsite_archive)
+                TrackSource.JAPANESE_ASMR -> "Japanese ASMR"
+                else -> "asmr.one"
+            } },
             onPick = onAnswer,
             onDismiss = { onAnswer(null) },
         )
+        is CachePrompt.JapanesePosts -> CachePickDialog(
+            title = stringResource(if (prompt.refresh) R.string.library_ja_refresh_title else R.string.library_ja_download_title),
+            message = stringResource(if (prompt.refresh) R.string.library_ja_multiple_message else R.string.library_ja_multiple_download_message),
+            options = (if (prompt.refresh) listOf(true to stringResource(R.string.library_ja_all)) else emptyList()) +
+                prompt.posts.map { it.postId to it.title },
+            onPick = onAnswer,
+            onDismiss = { onAnswer(null) },
+        )
+        is CachePrompt.JapaneseChoice -> CachePickDialog(
+            title = prompt.title, message = prompt.message, options = prompt.options,
+            onPick = onAnswer, onDismiss = { onAnswer(null) },
+        )
+        is CachePrompt.JapaneseVerify -> CachePickDialog(
+            title = when {
+                prompt.buzzheavier -> stringResource(R.string.library_ja_verify_buzz_open)
+                prompt.articleTitle != null -> stringResource(R.string.library_ja_verify_article)
+                else -> stringResource(R.string.library_ja_verify_read)
+            },
+            message = when {
+                prompt.buzzheavier -> stringResource(R.string.library_ja_verify_buzz_help)
+                prompt.articleTitle != null -> stringResource(R.string.library_ja_verify_article_help, prompt.articleTitle)
+                else -> stringResource(R.string.library_ja_verify_help)
+            },
+            options = listOf(true to stringResource(
+                if (prompt.buzzheavier) R.string.library_ja_open_hosting else R.string.library_ja_open_verify,
+            )),
+            onPick = {
+                onAnswer(true)
+                if (prompt.articleTitle == null) onVerifyJaDownload(prompt.token) else onVerifyJaRefresh(prompt.token)
+            },
+            onDismiss = { onAnswer(null) },
+        )
+        is CachePrompt.JapaneseWaiting -> AlertDialog(
+            onDismissRequest = { onCancelWaiting(prompt) },
+            title = { Text(prompt.title) },
+            text = { LinearProgressIndicator(Modifier.fillMaxWidth()) },
+            confirmButton = { TextButton(onClick = { onCancelWaiting(prompt) }) { Text(stringResource(R.string.common_cancel)) } },
+        )
         is CachePrompt.Format -> CachePickDialog(
-            title = "下载哪种格式？",
-            message = "有些音频同时有 ${prompt.conflict.extensions.joinToString(" / ") { it.uppercase() }} 两种格式（文件名前缀相同），只下载你选的那种。",
+            title = stringResource(R.string.library_format_title),
+            message = stringResource(
+                R.string.library_format_message,
+                prompt.conflict.extensions.joinToString(" / ") { it.uppercase() },
+            ),
             options = prompt.conflict.extensions.map { it to it.uppercase() },
             onPick = onAnswer,
             onDismiss = { onAnswer(null) },
@@ -626,6 +677,6 @@ private fun CachePickDialog(
             }
         },
         confirmButton = {},
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) } },
     )
 }

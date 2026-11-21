@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.ui.player
 
+import com.nanahoshi.audioplayer.R
+
 
 import android.Manifest
 import android.app.Activity
@@ -81,7 +83,6 @@ import com.nanahoshi.audioplayer.data.effectiveWhisperBase
 import com.nanahoshi.audioplayer.data.isLocalNetworkAddress
 import com.nanahoshi.audioplayer.data.isOnDeviceWhisperModel
 import com.nanahoshi.audioplayer.data.WhisperStart
-import com.nanahoshi.audioplayer.data.SUBTITLE_INTERRUPTED
 import com.nanahoshi.audioplayer.data.SubtitleTaskStopped
 import com.nanahoshi.audioplayer.graph
 import com.nanahoshi.audioplayer.playback.PlayerUiState
@@ -125,6 +126,26 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     internal var translatePrompt by mutableStateOf(false)
         private set
 
+    internal suspend fun chapters(row: QueuedTrack?): List<com.nanahoshi.audioplayer.japaneseasmr.JaChapter> {
+        if (row?.source != TrackSource.JAPANESE_ASMR) return emptyList()
+        val post = row.workno ?: return emptyList()
+        val key = row.fileKey ?: return emptyList()
+        val saved = graph.db.japaneseAsmr().media(post, key)
+        if (saved?.chapters != null) {
+            return runCatching {
+                kotlinx.serialization.json.Json.decodeFromString<List<com.nanahoshi.audioplayer.japaneseasmr.JaChapter>>(saved.chapters)
+            }.getOrDefault(emptyList())
+        }
+        if (saved != null) return emptyList()
+        return try {
+            graph.japaneseAsmr.article(post).media.firstOrNull { it.key == key }?.chapters.orEmpty()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
     fun showChinese(queueItemId: Long, chinese: Boolean) =
         graph.currentSubtitles.showChinese(queueItemId, chinese)
 
@@ -145,7 +166,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun reportLocalNetworkDenied() {
-        graph.messages.value = "需要允许访问本地网络，才能连接你填写的听写服务"
+        graph.show(R.string.whisper_error_local_network)
     }
 
     fun requestTranslation() = requestSubtitleOperation(SubtitleTask.TRANSLATE)
@@ -172,11 +193,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         try {
             if (graph.translator.submit(task, row, loaded)) showChinese(row.queueItemId, true)
         } catch (stopped: SubtitleTaskStopped) {
-            graph.messages.value = stopped.message ?: SUBTITLE_INTERRUPTED
+            graph.show(stopped.userText)
         } catch (cancelled: CancellationException) {
             if (!coroutineContext.isActive) throw cancelled
         } catch (_: Exception) {
-            graph.messages.value = "无法创建字幕任务，请重试"
+            graph.show(R.string.player_subtitle_create_failed)
         }
     }
 
@@ -199,16 +220,16 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 return@launch
             }
             if (row.source == TrackSource.LOCAL) {
-                graph.messages.value = "这首歌没有可用的音频文件，无法生成字幕"
+                graph.show(R.string.player_no_audio_for_subtitle)
                 return@launch
             }
             val saved = graph.downloads.libraryTrack(row)
-            if (saved == null) {
-                graph.messages.value = "请先加入音频库，再生成字幕"
+            if (saved == null && graph.downloads.japaneseRoot(row) == null) {
+                graph.show(R.string.player_add_to_library_first)
                 return@launch
             }
-            val target = row.copy(trackId = saved.id)
-            if (saved.source == TrackSource.DLSITE) downloadAndGenerate(target, translate, model)
+            val target = row.copy(trackId = saved?.id)
+            if (saved?.source == TrackSource.DLSITE) downloadAndGenerate(target, translate, model)
             else whisperPrompt = WhisperPrompt.NeedDownload(target, translate, model)
         }
     }
@@ -246,15 +267,16 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun report(result: WhisperStart, row: QueuedTrack, translate: Boolean) {
         when (result) {
-            WhisperStart.Started -> graph.messages.value =
-                if (translate) "已开始生成字幕和翻译" else "已开始生成字幕"
-            WhisperStart.AlreadyRunning -> graph.messages.value = "已经在生成字幕"
+            WhisperStart.Started -> graph.show(
+                if (translate) R.string.player_started_subtitle_translate else R.string.player_started_subtitle,
+            )
+            WhisperStart.AlreadyRunning -> graph.show(R.string.player_subtitle_already_running)
             WhisperStart.AlreadyDone -> {
                 graph.currentSubtitles.refresh()
                 if (translate) translateExisting(row)
             }
-            WhisperStart.Unavailable -> graph.messages.value = "这首歌没有可用的音频文件，无法生成字幕"
-            is WhisperStart.BackgroundUnavailable -> graph.messages.value = result.message
+            WhisperStart.Unavailable -> graph.show(R.string.player_no_audio_for_subtitle)
+            is WhisperStart.BackgroundUnavailable -> graph.show(result.message)
             is WhisperStart.NeedModelDownload -> whisperPrompt = WhisperPrompt.NeedModelDownload(result.model)
         }
     }

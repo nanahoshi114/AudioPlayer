@@ -52,12 +52,19 @@ class DownloadStatusConverter {
         SubtitlePublicationEntity::class,
         DlsiteOriginalWorkEntity::class,
         DlsiteOriginalEntryEntity::class,
+        JapaneseAsmrPostEntity::class,
+        JapaneseAsmrMediaEntity::class,
+        JaDownloadWorkEntity::class,
+        JaDownloadEntryEntity::class,
+        JaDownloadPackageEntity::class,
     ],
-    version = 19,
+    version = 22,
     exportSchema = false,
 )
 @TypeConverters(TrackSourceConverter::class, FileKindConverter::class, DownloadStatusConverter::class)
 abstract class AppDatabase : RoomDatabase() {
+    abstract fun japaneseAsmr(): JapaneseAsmrDao
+    abstract fun jaDownloads(): JaDownloadDao
     abstract fun dlsiteOriginals(): DlsiteOriginalDao
     abstract fun folders(): FolderDao
     abstract fun tracks(): TrackDao
@@ -91,8 +98,48 @@ abstract class AppDatabase : RoomDatabase() {
                     MIGRATION_16_17,
                     MIGRATION_17_18,
                     MIGRATION_18_19,
+                    MIGRATION_19_20,
+                    MIGRATION_20_21,
+                    MIGRATION_21_22,
                 )
                 .build()
+
+        internal val MIGRATION_21_22 = object : Migration(21, 22) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("ALTER TABLE downloads ADD COLUMN jaEntryKey TEXT")
+                connection.execSQL("ALTER TABLE downloads ADD COLUMN jaReplace INTEGER")
+                connection.execSQL("ALTER TABLE downloads ADD COLUMN jaForce INTEGER")
+                connection.execSQL("ALTER TABLE queue_items ADD COLUMN mediaPathHash TEXT")
+                connection.execSQL("ALTER TABLE japaneseasmr_media ADD COLUMN pathHash TEXT")
+                connection.execSQL("UPDATE japaneseasmr_media SET pathHash = substr(mediaKey, 3) WHERE mediaKey GLOB 'p:*'")
+                connection.execSQL("CREATE INDEX index_japaneseasmr_media_postId_pathHash ON japaneseasmr_media(postId, pathHash)")
+                connection.execSQL("CREATE TABLE japaneseasmr_download_works (rj TEXT NOT NULL PRIMARY KEY, rootFolderId INTEGER, postId TEXT, directory TEXT, updatedAt INTEGER, entryKey TEXT)")
+                connection.execSQL("CREATE TABLE japaneseasmr_download_entries (rj TEXT NOT NULL, postId TEXT NOT NULL, relativePath TEXT NOT NULL, kind TEXT NOT NULL, size INTEGER NOT NULL, sha256 TEXT, localPath TEXT, packageKey TEXT, trackId INTEGER, fileId INTEGER, folderId INTEGER, packageRevision TEXT, PRIMARY KEY(rj, relativePath))")
+                connection.execSQL("CREATE TABLE japaneseasmr_download_packages (rj TEXT NOT NULL, packageKey TEXT NOT NULL, relativePath TEXT NOT NULL, size INTEGER NOT NULL, sha256 TEXT, localPath TEXT, extractedAt INTEGER, publishedAt INTEGER, revision TEXT, PRIMARY KEY(rj, packageKey))")
+                connection.execSQL("CREATE INDEX index_japaneseasmr_download_entries_trackId ON japaneseasmr_download_entries(trackId)")
+                connection.execSQL("CREATE INDEX index_japaneseasmr_download_entries_fileId ON japaneseasmr_download_entries(fileId)")
+                connection.execSQL("CREATE INDEX index_japaneseasmr_download_entries_folderId ON japaneseasmr_download_entries(folderId)")
+                connection.execSQL("CREATE INDEX index_japaneseasmr_download_entries_packageKey ON japaneseasmr_download_entries(rj, packageKey)")
+            }
+        }
+
+        internal val MIGRATION_20_21 = object : Migration(20, 21) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("ALTER TABLE queue_items ADD COLUMN mediaKind TEXT")
+                connection.execSQL("CREATE TABLE japaneseasmr_posts (postId TEXT NOT NULL PRIMARY KEY, rootFolderId INTEGER, articleFolderId INTEGER, rj TEXT NOT NULL, title TEXT NOT NULL, coverUri TEXT, publishedAt TEXT, url TEXT NOT NULL, refreshedAt INTEGER)")
+                connection.execSQL("CREATE INDEX index_japaneseasmr_posts_rootFolderId ON japaneseasmr_posts(rootFolderId)")
+                connection.execSQL("CREATE TABLE japaneseasmr_media (postId TEXT NOT NULL, mediaKey TEXT NOT NULL, trackId INTEGER, kind TEXT NOT NULL, title TEXT NOT NULL, durationMs INTEGER NOT NULL, chapters TEXT, PRIMARY KEY(postId, mediaKey))")
+                connection.execSQL("CREATE INDEX index_japaneseasmr_media_trackId ON japaneseasmr_media(trackId)")
+            }
+        }
+
+        internal val MIGRATION_19_20 = object : Migration(19, 20) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("ALTER TABLE downloads ADD COLUMN progressSummary TEXT")
+                connection.execSQL("ALTER TABLE whisper_jobs ADD COLUMN progressSummary TEXT")
+                connection.execSQL("ALTER TABLE translation_jobs ADD COLUMN progressSummary TEXT")
+            }
+        }
 
         /** 移除废弃的 B 站自动入库批次表；downloads.biliImportPart 列恒为 NULL，保留以免重建下载表。 */
         internal val MIGRATION_18_19 = object : Migration(18, 19) {

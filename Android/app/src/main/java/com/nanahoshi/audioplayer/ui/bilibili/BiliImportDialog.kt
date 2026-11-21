@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.ui.bilibili
 
+import com.nanahoshi.audioplayer.R
+import androidx.compose.ui.res.stringResource
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -19,7 +21,7 @@ fun BiliImportDialog(requests: BiliImportRequests) {
     val prompt = current ?: return
     AlertDialog(
         onDismissRequest = { requests.cancel(prompt.id) },
-        title = { Text(if (prompt.confirming) "更改导入方式？" else "选择导入方式") },
+        title = { Text(stringResource(if (prompt.confirming) R.string.bilibili_import_change_title else R.string.bilibili_import_choose_title)) },
         text = {
             LazyColumn(Modifier.heightIn(max = 460.dp)) {
                 prompt.options.forEachIndexed { index, option ->
@@ -28,19 +30,25 @@ fun BiliImportDialog(requests: BiliImportRequests) {
                         Text(option.details.video.title, style = MaterialTheme.typography.titleSmall,
                             modifier = Modifier.padding(vertical = 8.dp))
                         if (prompt.confirming) {
-                            if (option.converts) Text(if (option.mode == BiliImportMode.GROUPED)
-                                "会把这个视频已有的分 P 合并为一个视频项；下载、字幕和播放列表关联不变。"
-                            else "原分 P 会保留为独立项并放回原目录；勾选只影响本次新增内容。")
+                            if (option.converts) Text(
+                                stringResource(
+                                    if (option.mode == BiliImportMode.GROUPED) R.string.bilibili_import_grouped_help
+                                    else R.string.bilibili_import_separate_help,
+                                ),
+                            )
                         } else {
                             SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                                 SegmentedButton(selected = option.mode == BiliImportMode.SPLIT,
                                     onClick = { requests.edit(prompt.id, index) { it.copy(mode = BiliImportMode.SPLIT) } },
-                                    shape = SegmentedButtonDefaults.itemShape(0, 2)) { Text("分开导入") }
+                                    shape = SegmentedButtonDefaults.itemShape(0, 2)) { Text(stringResource(R.string.bilibili_import_separate)) }
                                 SegmentedButton(selected = option.mode == BiliImportMode.GROUPED,
                                     onClick = { requests.edit(prompt.id, index) { it.copy(mode = BiliImportMode.GROUPED) } },
-                                    shape = SegmentedButtonDefaults.itemShape(1, 2)) { Text("统一导入") }
+                                    shape = SegmentedButtonDefaults.itemShape(1, 2)) { Text(stringResource(R.string.bilibili_import_grouped)) }
                             }
-                            if (option.mode == BiliImportMode.GROUPED) Text("全部 ${option.details.parts.size} 个分 P 合并为一个视频项", Modifier.padding(top = 8.dp))
+                            if (option.mode == BiliImportMode.GROUPED) Text(
+                                stringResource(R.string.bilibili_import_grouped_summary, option.details.parts.size),
+                                Modifier.padding(top = 8.dp),
+                            )
                         }
                     }
                     if (!prompt.confirming && option.mode == BiliImportMode.SPLIT) {
@@ -50,11 +58,11 @@ fun BiliImportDialog(requests: BiliImportRequests) {
                                 it.copy(selected = if (it.selected == all) emptySet() else all)
                             } }) {
                                 Text(
-                                    if (option.selected.size == option.details.parts.size) {
-                                        "已选 ${option.selected.size} 个分 P · 取消全选"
-                                    } else {
-                                        "已选 ${option.selected.size} 个分 P · 全选"
-                                    },
+                                    stringResource(
+                                        if (option.selected.size == option.details.parts.size) R.string.bilibili_import_selected_deselect
+                                        else R.string.bilibili_import_selected_select,
+                                        option.selected.size,
+                                    ),
                                 )
                             }
                         }
@@ -72,15 +80,15 @@ fun BiliImportDialog(requests: BiliImportRequests) {
                     }
                 }
                 if (prompt.failed.isNotEmpty()) item(key = "failures") {
-                    Text("以下视频读取失败，其余内容可继续：", color = MaterialTheme.colorScheme.error,
+                    Text(stringResource(R.string.bilibili_import_failures), color = MaterialTheme.colorScheme.error,
                         modifier = Modifier.padding(top = 12.dp))
                     prompt.failed.forEach { Text(it, modifier = Modifier.padding(top = 4.dp)) }
                 }
             }
         },
         confirmButton = { TextButton(onClick = { requests.confirm(prompt.id) }, enabled = prompt.ready) {
-            Text(if (prompt.confirming) "确认更改并继续" else "按此方式导入")
+            Text(stringResource(if (prompt.confirming) R.string.bilibili_import_confirm_change else R.string.bilibili_import_confirm))
         } },
-        dismissButton = { TextButton(onClick = { requests.cancel(prompt.id) }) { Text("取消") } },
+        dismissButton = { TextButton(onClick = { requests.cancel(prompt.id) }) { Text(stringResource(R.string.common_cancel)) } },
     )
 }

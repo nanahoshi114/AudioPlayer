@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.playback.SubtitleCue
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.boolean
@@ -152,10 +154,55 @@ class TranslationReplyTest {
 
     @Test
     fun failureDetailScrubsUrlsAndClipsRaw() {
-        assertEquals("err", japaneseFailureDetail("err", null))
-        assertEquals("翻译结果格式或合并范围不正确", japaneseFailureDetail(null, "  "))
-        assertEquals("err\n模型返回：看 [地址已略] 谢谢", japaneseFailureDetail("err", "看 https://example.com/a?b=1 谢谢"))
-        assertEquals("err\n模型返回：" + "x".repeat(1500), japaneseFailureDetail("err", "x".repeat(2000)))
+        val fallback = TextRef.Res(R.string.translate_error_format_retry)
+        val network = TextRef.Res(R.string.translate_error_connection)
+        assertEquals(network, translationFailureDetail(network, "raw", "hidden"))
+        assertEquals(fallback, translationFailureDetail(null, "  ", "hidden"))
+
+        val detail = translationFailureDetail(null, "看 https://example.com/a?b=1 谢谢", "hidden")
+        assertEquals(TextRef.Joined(listOf(
+            fallback, TextRef.Res(R.string.translate_error_model_response, listOf(TextRef.Raw("看 hidden 谢谢"))),
+        ), separator = "\n"), detail)
+        val long = translationFailureDetail(null, "x".repeat(2_000), "hidden") as TextRef.Joined
+        assertEquals(listOf(TextRef.Raw("x".repeat(1_500))), (long.parts.last() as TextRef.Res).args)
+    }
+
+    @Test
+    fun completeLinesAreDeliveredEvenIfServiceReportsTruncation() {
+        val truncation = TextRef.Res(R.string.translate_error_truncated)
+        val complete = parseLineCompletion("1|译文", truncation, 1)
+        assertEquals(listOf("译文"), complete.lines)
+        assertNull(complete.error)
+        val incomplete = parseLineCompletion("1|译文", truncation, 2)
+        assertNull(incomplete.lines)
+        assertEquals(truncation, incomplete.error)
+        assertEquals("1|译文", incomplete.raw)
+        assertEquals(TextRef.Res(R.string.translate_detail_line_format), incomplete.diagnostic)
+        assertNull(complete.diagnostic)
+    }
+
+    @Test
+    fun failureDetailsIncludeStructuralReasonsOrHttpStatus() {
+        val source = listOf(SubtitleCue(0, 800, "はい"))
+        val parsed = parseRevisedTranslation(
+            """{"captions":[{"source":[1],"japanese":"はい"}]}""", source,
+        )
+        val structure = TextRef.Res(R.string.translate_detail_missing_chinese)
+        assertEquals(structure, parsed.structuralError)
+        val format = TextRef.Res(R.string.translate_error_format_retry)
+        assertEquals(
+            TextRef.Joined(listOf(format, structure), separator = "\n"),
+            translationFailureDetail(format, null, "hidden", parsed.structuralError),
+        )
+
+        val server = TextRef.Res(R.string.translate_error_server_unavailable)
+        val status = TextRef.Res(R.string.translate_detail_http_status, listOf(503))
+        val reply = parseLineCompletion(null, server, 1, status)
+        assertNull(reply.raw)
+        assertEquals(
+            TextRef.Joined(listOf(server, status), separator = "\n"),
+            translationFailureDetail(reply.error, reply.raw, "hidden", reply.diagnostic),
+        )
     }
 
     @Test

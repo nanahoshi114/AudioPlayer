@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.ui.library
 
+import com.nanahoshi.audioplayer.R
+import androidx.compose.ui.res.stringResource
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -117,6 +119,7 @@ fun LibraryScreen(
     onOpenLibraryWork: (Long) -> Unit,
     onOpenBiliVideo: (Long) -> Unit,
     onImportOnline: () -> Unit,
+    onVerifyJaDownload: (String) -> Unit = {},
     viewModel: LibraryViewModel = viewModel(),
 ) {
     val listing by viewModel.listing.collectAsStateWithLifecycle(LibraryListing(emptyList(), emptyList()))
@@ -174,21 +177,21 @@ fun LibraryScreen(
                     onClose = viewModel::clearSelection,
                     actions = buildList {
                         if (!selectsWork) {
-                            add(SelectionAction("接下来播放", Icons.Default.SkipNext, viewModel::playNextSelection))
-                            add(SelectionAction("加入播放队列", Icons.AutoMirrored.Filled.PlaylistAdd, viewModel::appendSelection))
-                            add(SelectionAction("下载", Icons.Default.Download, viewModel::downloadSelection))
+                            add(SelectionAction(context.getString(R.string.library_play_next), Icons.Default.SkipNext, viewModel::playNextSelection))
+                            add(SelectionAction(context.getString(R.string.library_add_queue), Icons.AutoMirrored.Filled.PlaylistAdd, viewModel::appendSelection))
+                            add(SelectionAction(context.getString(R.string.library_download_selected), Icons.Default.Download, viewModel::downloadSelection))
                             add(
-                                SelectionAction("加入播放列表", Icons.AutoMirrored.Filled.QueueMusic, {
-                                    if (playlists.isEmpty()) viewModel.note("请先新建播放列表") else pickingPlaylist = true
+                                SelectionAction(context.getString(R.string.library_add_playlist), Icons.AutoMirrored.Filled.QueueMusic, {
+                                    if (playlists.isEmpty()) viewModel.note(context.getString(R.string.library_create_playlist_first)) else pickingPlaylist = true
                                 }),
                             )
                         }
                         if (removalTargets != null) {
-                            add(SelectionAction(removalTargets.label, Icons.Default.Delete, {
+                            add(SelectionAction(context.getString(removalTargets.labelRes), Icons.Default.Delete, {
                                 viewModel.deleteDownloadedSelection(removalSelection, removalTargets)
                             }, destructive = true))
                         }
-                        if (canRemoveSelection) add(SelectionAction("移除", Icons.Default.Delete, { confirmDelete = true }, destructive = true))
+                        if (canRemoveSelection) add(SelectionAction(context.getString(R.string.library_remove_from_library), Icons.Default.Delete, { confirmDelete = true }, destructive = true))
                     },
                 )
             }
@@ -222,7 +225,7 @@ fun LibraryScreen(
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = viewModel::updateSearch,
-                placeholder = { Text(if (folderId == null) "搜索名称、RJ 号或文件名" else "搜索当前目录及子目录的文件名") },
+                placeholder = { Text(stringResource(if (folderId == null) R.string.library_search_hint_root else R.string.library_search_hint_folder)) },
                 trailingIcon = if (folderId != null) ({ LibrarySortMenu(sort) { if (sort != it) viewModel.toggleSort() } }) else null,
                 leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
                 singleLine = true,
@@ -238,11 +241,11 @@ fun LibraryScreen(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     listOf(
-                        LibrarySourceFilter.ALL to "全部",
-                        LibrarySourceFilter.BILIBILI to "B 站",
+                        LibrarySourceFilter.ALL to stringResource(R.string.library_filter_all),
+                        LibrarySourceFilter.BILIBILI to stringResource(R.string.library_filter_bilibili),
                         LibrarySourceFilter.YOUTUBE to "YouTube",
-                        LibrarySourceFilter.ASMR to "asmr.one",
-                        LibrarySourceFilter.LOCAL to "本地",
+                        LibrarySourceFilter.ASMR to stringResource(R.string.library_filter_online),
+                        LibrarySourceFilter.LOCAL to stringResource(R.string.library_filter_local),
                     ).forEach { (filter, label) ->
                         FilterChip(
                             selected = sourceFilter == filter && searchQuery.isBlank(),
@@ -263,12 +266,18 @@ fun LibraryScreen(
         if (folders.isEmpty() && entries.isEmpty()) {
             Box(topInset.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
                 when {
-                    !listing.browsing -> EmptyState(title = "没有符合的内容")
-                    currentFolder == null -> EmptyState(
-                        title = "还没有音频",
-                        message = "点右下角导入本地文件或文件夹；也可以复制 BV 号、RJ 号或视频链接，用剪贴板导入。",
+                    !listing.browsing -> EmptyState(
+                        title = stringResource(R.string.library_empty_search_title),
+                        message = stringResource(R.string.library_empty_search_message),
                     )
-                    else -> EmptyState(title = "这个文件夹是空的")
+                    currentFolder == null -> EmptyState(
+                        title = stringResource(R.string.library_empty_root_title),
+                        message = stringResource(R.string.library_empty_root_message),
+                    )
+                    else -> EmptyState(
+                        title = stringResource(R.string.library_empty_folder_title),
+                        message = stringResource(R.string.library_empty_folder_message),
+                    )
                 }
             }
         } else {
@@ -370,25 +379,25 @@ fun LibraryScreen(
                 onClick = { menuOpen = true },
                 expanded = fabExpanded,
                 icon = { Icon(Icons.Default.Add, contentDescription = null) },
-                text = { Text("导入") },
+                text = { Text(stringResource(R.string.library_import)) },
             )
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                 DropdownMenuItem(
-                    text = { Text("选择文件导入") },
+                    text = { Text(stringResource(R.string.library_import_files)) },
                     onClick = {
                         menuOpen = false
                         openFile.launch(arrayOf("audio/*"))
                     },
                 )
                 DropdownMenuItem(
-                    text = { Text("选择文件夹导入") },
+                    text = { Text(stringResource(R.string.library_import_folder)) },
                     onClick = {
                         menuOpen = false
                         openFolder.launch(null)
                     },
                 )
                 DropdownMenuItem(
-                    text = { Text("导入在线音频") },
+                    text = { Text(stringResource(R.string.library_import_online)) },
                     onClick = { menuOpen = false; onImportOnline() },
                 )
             }
@@ -396,35 +405,35 @@ fun LibraryScreen(
     }
     }
 
-    CachePromptDialog(cachePrompt, viewModel::answerCache)
+    CachePromptDialog(cachePrompt, viewModel::answerCache, viewModel::cancelCacheWait, onVerifyJaDownload)
 
     pendingAsmr?.let { preview ->
         AlertDialog(
             onDismissRequest = viewModel::dismissAsmrPreview,
-            title = { Text("asmr.one 查询结果") },
+            title = { Text(stringResource(R.string.library_asmr_result_title)) },
             text = {
                 Column {
                     CoverImage(preview.coverUrl)
                     Text(preview.title, modifier = Modifier.padding(top = 8.dp))
-                    Text("要加入音频库吗？", modifier = Modifier.padding(top = 8.dp))
+                    Text(stringResource(R.string.library_asmr_add_confirm), modifier = Modifier.padding(top = 8.dp))
                 }
             },
-            confirmButton = { TextButton(onClick = viewModel::confirmAsmrPreview) { Text("加入音频库") } },
-            dismissButton = { TextButton(onClick = viewModel::dismissAsmrPreview) { Text("取消") } },
+            confirmButton = { TextButton(onClick = viewModel::confirmAsmrPreview) { Text(stringResource(R.string.common_add_to_library)) } },
+            dismissButton = { TextButton(onClick = viewModel::dismissAsmrPreview) { Text(stringResource(R.string.common_cancel)) } },
         )
     }
 
     recognizeFolder?.let { folderIdToRecognize ->
         AlertDialog(
             onDismissRequest = { recognizeFolder = null },
-            title = { Text("关联为作品") },
+            title = { Text(stringResource(R.string.library_recognize_title)) },
             text = {
                 Column {
-                    Text("已购买的作品会先对照 DLsite 的文件；对不上、没买过或 DLsite 连不上，再对照 asmr.one。可以少文件，但不能包含作品里没有的内容。")
+                    Text(stringResource(R.string.library_recognize_help))
                     OutlinedTextField(
                         value = recognizeCode,
                         onValueChange = { recognizeCode = it },
-                        label = { Text("RJ 号") },
+                        label = { Text(stringResource(R.string.library_rj_label)) },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
                     )
@@ -437,9 +446,9 @@ fun LibraryScreen(
                         viewModel.recognizeFolder(folderIdToRecognize, recognizeCode)
                     },
                     enabled = recognizeCode.isNotBlank(),
-                ) { Text("确认关联") }
+                ) { Text(stringResource(R.string.library_recognize_confirm)) }
             },
-            dismissButton = { TextButton(onClick = { recognizeFolder = null }) { Text("取消") } },
+            dismissButton = { TextButton(onClick = { recognizeFolder = null }) { Text(stringResource(R.string.common_cancel)) } },
         )
     }
 
@@ -457,26 +466,26 @@ fun LibraryScreen(
     pendingTree?.let { uri ->
         AlertDialog(
             onDismissRequest = { pendingTree = null },
-            title = { Text("导入文件夹") },
-            text = { Text("可以保留里面的文件夹，也可以只把音频放进当前目录。图片和其他文件会跳过。") },
+            title = { Text(stringResource(R.string.library_import_folder_title)) },
+            text = { Text(stringResource(R.string.library_import_folder_help)) },
             confirmButton = {
                 TextButton(onClick = {
                     pendingTree = null
                     viewModel.importFolder(uri, keepStructure = true)
-                }) { Text("保留文件夹结构") }
+                }) { Text(stringResource(R.string.library_import_keep_structure)) }
             },
             dismissButton = {
                 TextButton(onClick = {
                     pendingTree = null
                     viewModel.importFolder(uri, keepStructure = false)
-                }) { Text("只导入音频") }
+                }) { Text(stringResource(R.string.library_import_audio_only)) }
             },
         )
     }
 
     if (confirmDelete) {
         ConfirmRemoveDialog(
-            message = "移除选中的内容？已下载文件和手机上的原文件都会保留。",
+            message = stringResource(R.string.library_remove_selection_message, selectedTracks.size + selectedFolders.size),
             onConfirm = {
                 confirmDelete = false
                 viewModel.deleteSelection()
@@ -487,7 +496,7 @@ fun LibraryScreen(
 
     confirmFolderDelete?.let { id ->
         ConfirmRemoveDialog(
-            message = "这个文件夹和里面的内容会从音频库移除。已下载文件和手机上的原文件都会保留。",
+            message = stringResource(R.string.library_remove_folder_message),
             onConfirm = {
                 confirmFolderDelete = null
                 viewModel.deleteFolder(id)
@@ -533,11 +542,14 @@ private fun LibrarySortMenu(sort: LibrarySort, onChoose: (LibrarySort) -> Unit) 
     var expanded by remember { mutableStateOf(false) }
     Box {
         IconButton(onClick = { expanded = true }) {
-            Icon(Icons.AutoMirrored.Filled.Sort, contentDescription = if (sort == LibrarySort.NAME) "按名称" else "按加入时间")
+            Icon(
+                Icons.AutoMirrored.Filled.Sort,
+                contentDescription = stringResource(if (sort == LibrarySort.NAME) R.string.a11y_sort_name else R.string.a11y_sort_added),
+            )
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            DropdownMenuItem(text = { Text("按名称") }, onClick = { expanded = false; onChoose(LibrarySort.NAME) })
-            DropdownMenuItem(text = { Text("按加入时间") }, onClick = { expanded = false; onChoose(LibrarySort.ADDED) })
+            DropdownMenuItem(text = { Text(stringResource(R.string.library_sort_name)) }, onClick = { expanded = false; onChoose(LibrarySort.NAME) })
+            DropdownMenuItem(text = { Text(stringResource(R.string.library_sort_added)) }, onClick = { expanded = false; onChoose(LibrarySort.ADDED) })
         }
     }
 }

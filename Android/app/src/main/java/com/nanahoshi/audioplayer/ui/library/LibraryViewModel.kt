@@ -1,5 +1,13 @@
 package com.nanahoshi.audioplayer.ui.library
 
+import com.nanahoshi.audioplayer.text.resolveUserError
+import com.nanahoshi.audioplayer.asmr.AsmrErrorKind
+import com.nanahoshi.audioplayer.text.resolveNoUrl
+import androidx.annotation.StringRes
+import com.nanahoshi.audioplayer.R
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.text.resolve
+
 import android.app.Application
 import android.net.Uri
 import androidx.compose.foundation.lazy.LazyListState
@@ -77,13 +85,22 @@ sealed interface LibraryEntry {
 }
 
 sealed interface CachePrompt {
-    data class Source(val folderId: Long) : CachePrompt
+    data class Source(val sources: List<TrackSource>) : CachePrompt
+    data class JapanesePosts(
+        val posts: List<com.nanahoshi.audioplayer.japaneseasmr.JaPostRef>,
+        val refresh: Boolean = false,
+    ) : CachePrompt
+    data class JapaneseChoice(val title: String, val message: String, val options: List<Pair<Any, String>>) : CachePrompt
+    data class JapaneseVerify(val token: String, val articleTitle: String? = null, val buzzheavier: Boolean = false) : CachePrompt
+    class JapaneseWaiting(val title: String) : CachePrompt
     data class Format(val conflict: FormatConflict) : CachePrompt
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     private val graph = app.graph()
+    private val appContext = app.applicationContext
+    private fun text(@StringRes id: Int, vararg args: Any): String = appContext.getString(id, *args)
     val removalPolicy = graph.library.observeAllFolders().map {
         com.nanahoshi.audioplayer.data.LibraryRemovalPolicy(it)
     }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5000), null)
@@ -103,7 +120,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     val sourceFilter = MutableStateFlow(LibrarySourceFilter.ALL)
     val searchQuery = MutableStateFlow("")
     val workFileSource = MutableStateFlow<TrackSource?>(null)
-    val workSources = MutableStateFlow(false)
+    val workSources = MutableStateFlow<List<TrackSource>>(emptyList())
     val workRootId = MutableStateFlow<Long?>(null)
     internal val workLocation = MutableStateFlow<WorkFolderLocation?>(null)
     internal val workMissing = MutableStateFlow(false)
@@ -298,19 +315,19 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             sourceCheckJob?.cancel()
             workRootId.value = folder.id
             workFileSource.value = null
-            workSources.value = false
+            workSources.value = emptyList()
         } else if (folder.asmrWorkId == null) {
             sourceCheckJob?.cancel()
             workRootId.value = null
             workFileSource.value = null
-            workSources.value = false
+            workSources.value = emptyList()
         }
         openJob = viewModelScope.launch {
             if (work) busyCounter.begin()
             try {
                 graph.library.ensureWorkMeta(folder.id)
                 if (work && graph.library.ensureWorkFiles(folder.id) == WorkFill.EMPTY) {
-                    graph.messages.value = "没有找到这个作品的文件"
+                    graph.show(R.string.library_work_files_not_found)
                 }
                 if (work && generation == openGeneration && workRootId.value == folder.id) {
                     applyWorkSources(folder.id)
@@ -318,7 +335,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                graph.messages.value = failure.message ?: "没有找到这个作品的文件"
+                graph.showError(failure, R.string.library_work_files_not_found)
             } finally {
                 if (work) busyCounter.end()
             }
@@ -339,19 +356,18 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val fill = graph.library.ensureWorkSource(root.id, source)
                 if (fill == WorkFill.EMPTY) {
-                    graph.messages.value = if (source == TrackSource.DLSITE) {
-                        "无法读取已购买作品的文件"
-                    } else {
-                        "没有找到这个作品的文件"
-                    }
+                    graph.show(
+                        if (source == TrackSource.DLSITE) R.string.library_purchased_files_unavailable
+                        else R.string.library_work_files_not_found,
+                    )
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                graph.messages.value = if (failure.message == "未找到该作品") {
-                    "asmr.one 未收录"
+                if ((failure as? AsmrException)?.kind == AsmrErrorKind.NOT_FOUND) {
+                    graph.show(R.string.library_asmr_not_listed)
                 } else {
-                    failure.message ?: "没有找到这个作品的文件"
+                    graph.showError(failure, R.string.library_work_files_not_found)
                 }
             } finally {
                 busyCounter.end()
@@ -361,38 +377,43 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun applyWorkSources(folderId: Long) {
         val sources = graph.library.prepareWorkSources(folderId) ?: return
-        if (sources.hasPlay) {
-            showWorkSources(TrackSource.DLSITE)
-            return
+        val choices = buildList {
+            if (sources.hasPlay || sources.purchased == true) add(TrackSource.DLSITE)
+            if (sources.hasAsmr) add(TrackSource.ASMR)
+            if (sources.hasJapaneseAsmr) add(TrackSource.JAPANESE_ASMR)
         }
-        if (sources.purchased == true) {
-            showWorkSources(TrackSource.ASMR)
-            return
+        val default = when {
+            sources.hasPlay -> TrackSource.DLSITE
+            sources.hasAsmr -> TrackSource.ASMR
+            sources.hasJapaneseAsmr -> TrackSource.JAPANESE_ASMR
+            else -> null
         }
-        if (sources.purchased == false) return
-        // 没有 Play 文件时，购买状态只决定要不要给出切换；放后台查，别让打开作品等它。
+        if (default != null) showWorkSources(default, choices)
+        if (sources.hasPlay || sources.purchased != null) return
+        // 购买状态在后台确认，保持当前来源。
         sourceCheckJob = viewModelScope.launch {
             val purchased = graph.library.checkPurchased(folderId)
             if (purchased && workRootId.value == folderId) {
-                showWorkSources(TrackSource.ASMR)
+                workSources.value = (listOf(TrackSource.DLSITE) + workSources.value).distinct()
             }
         }
     }
 
-    private fun showWorkSources(defaultSource: TrackSource) {
+    private fun showWorkSources(defaultSource: TrackSource, choices: List<TrackSource>) {
         val location = workLocation.value
         if (location != null) {
             val folderSource = location.path.last().contentSource
-            val source = if (location.path.size == 1) defaultSource else when (folderSource) {
+            val source = location.request.source?.takeIf { it in choices } ?: if (location.path.size == 1) defaultSource else when (folderSource) {
                 TrackSource.ASMR.name -> TrackSource.ASMR
                 TrackSource.DLSITE.name -> TrackSource.DLSITE
+                TrackSource.JAPANESE_ASMR.name -> TrackSource.JAPANESE_ASMR
                 else -> defaultSource
             }
             updateWorkLocation(location.move(location.path, source))
         } else {
             workFileSource.value = defaultSource
         }
-        workSources.value = true
+        workSources.value = choices
     }
 
     fun setSourceFilter(filter: LibrarySourceFilter) {
@@ -443,7 +464,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         pendingAsmr.value = null
         launch {
             graph.library.importAsmr(preview.sourceId, currentFolderId.value)
-            graph.messages.value = "已加入音频库"
+            graph.show(R.string.library_added_to_library)
         }
     }
 
@@ -465,17 +486,18 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         sourceCheckJob?.cancel()
         workRootId.value = null
         workFileSource.value = null
-        workSources.value = false
+        workSources.value = emptyList()
     }
 
     fun importFile(uri: Uri, play: Boolean) = launch {
         val track = graph.library.importFile(uri, currentFolderId.value)
-        if (play) graph.player.playTrack(track) else graph.messages.value = "已导入"
+        if (play) graph.player.playTrack(track) else graph.show(R.string.library_imported)
     }
 
     fun importFolder(uri: Uri, keepStructure: Boolean) = launch {
         val count = graph.library.importTree(uri, currentFolderId.value, keepStructure)
-        graph.messages.value = if (count == 0) "这个文件夹里没有音频" else "已导入 $count 首"
+        if (count == 0) graph.show(R.string.library_folder_no_audio)
+        else graph.show(R.string.library_imported_count, count)
     }
 
     fun createFolder(name: String) = launch {
@@ -492,14 +514,16 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     fun downloadTrack(track: TrackEntity) = launch {
         val count = downloadTracks(listOf(track)) ?: return@launch
-        graph.messages.value = if (count == 0) "已在本地或正在下载" else "已加入下载"
+        if (count == 0) graph.show(R.string.library_already_local_or_downloading)
+        else graph.show(R.string.library_added_download_count, count)
     }
 
     fun downloadSelection() = launch {
         val tracks = selectedTracks()
         val count = downloadTracks(tracks) ?: return@launch
         clearSelection()
-        graph.messages.value = if (count == 0) "没有需要下载的音频" else "已加入 $count 个下载任务"
+        if (count == 0) graph.show(R.string.library_no_audio_to_download)
+        else graph.show(R.string.library_added_download_count, count)
     }
 
     private suspend fun downloadTracks(tracks: List<TrackEntity>): Int? {
@@ -507,7 +531,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         if (dlsite.isEmpty()) return graph.downloads.enqueue(tracks)
         val works = linkedMapOf<String, String>()
         for (track in dlsite) {
-            val workno = graph.downloads.requestWorkno(track) ?: error("找不到这首音频的作品编号")
+            val workno = graph.downloads.requestWorkno(track) ?: error(text(R.string.library_missing_work_id))
             works.putIfAbsent(workno, workno)
         }
         val mode = graph.dlsiteDownloadRequests.choose(
@@ -525,7 +549,12 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         val downloads: List<TrackEntity>,
         val associations: List<TrackEntity>,
     ) {
-        val label: String get() = if (downloads.isNotEmpty()) "删除已下载文件" else "取消本地关联"
+        @get:StringRes
+        val labelRes: Int get() = when {
+            downloads.isNotEmpty() && associations.isNotEmpty() -> R.string.library_action_delete_and_unlink
+            downloads.isNotEmpty() -> R.string.library_action_delete_downloads
+            else -> R.string.library_action_unlink
+        }
     }
 
     internal data class LocalRemovalSelection(
@@ -577,7 +606,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun applyLocalRemoval(targets: LocalRemovalTargets, deleteSubtitles: Boolean) {
         val tracks = targets.downloads + targets.associations
         val result = graph.downloads.deleteDownloaded(tracks, deleteSubtitles)
-        graph.messages.value = deleteDownloadedNotice(result)
+        graph.show(deleteDownloadedNotice(result))
     }
 
     private fun localRemovalTargets(tracks: List<TrackEntity>): LocalRemovalTargets {
@@ -598,6 +627,22 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         cacheAnswer?.complete(answer)
     }
 
+    fun cancelCacheWait(prompt: CachePrompt.JapaneseWaiting) {
+        if (cachePrompt.compareAndSet(prompt, null)) cacheJob?.cancel()
+    }
+
+    private suspend fun <T> waitForJapaneseDownload(
+        prompt: CachePrompt.JapaneseWaiting,
+        read: suspend () -> T,
+    ): T {
+        cachePrompt.value = prompt
+        try {
+            return read()
+        } finally {
+            cachePrompt.compareAndSet(prompt, null)
+        }
+    }
+
     private suspend fun askCache(prompt: CachePrompt): Any? {
         val answer = CompletableDeferred<Any?>()
         cacheAnswer = answer
@@ -605,8 +650,10 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         try {
             return answer.await()
         } finally {
-            cachePrompt.value = null
-            cacheAnswer = null
+            if (cacheAnswer === answer) {
+                cachePrompt.value = null
+                cacheAnswer = null
+            }
         }
     }
 
@@ -618,8 +665,131 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
-                graph.messages.value = error.message ?: "操作失败"
+                graph.showError(error, R.string.library_operation_failed)
             }
+        }
+    }
+
+    private suspend fun selectJapanesePosts(
+        posts: List<com.nanahoshi.audioplayer.japaneseasmr.JaPostRef>,
+        refresh: Boolean = false,
+    ) = if (posts.size <= 1) posts else when (val answer = askCache(CachePrompt.JapanesePosts(posts, refresh))) {
+        is String -> posts.filter { it.postId == answer }
+        true -> if (refresh) posts else emptyList()
+        else -> emptyList()
+    }
+
+    fun refreshJapaneseArticles(rootId: Long) {
+        cacheJob?.cancel()
+        cacheJob = viewModelScope.launch {
+            val rows = graph.db.japaneseAsmr().postsForRoot(rootId)
+            val trail = workLocation.value?.path.orEmpty().map { it.id }
+            val current = rows.firstOrNull { it.articleFolderId in trail }
+            val selected = if (current != null) listOf(current.ref()) else selectJapanesePosts(rows.map { it.ref() }, refresh = true)
+            val result = mutableListOf<String>()
+            for (post in selected) {
+                try {
+                    val article = try {
+                        graph.japaneseAsmr.article(post.postId, post.rj, refresh = true)
+                    } catch (failure: com.nanahoshi.audioplayer.japaneseasmr.JapaneseAsmrException) {
+                        if (failure.verificationPage == null) throw failure
+                        graph.jaRefreshRequests.verify(post) { token ->
+                            askCache(CachePrompt.JapaneseVerify(token, post.title)) == true
+                        } ?: break
+                    }
+                    val updated = graph.player.refreshJaArticle(article, rootId, cleanup = true)
+                    result += appContext.getString(R.string.library_ja_refresh_line, post.title, updated.message(appContext))
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failure: Exception) {
+                    val reason = appContext.resolveUserError(failure, R.string.library_refresh_failed)
+                    result += appContext.getString(R.string.library_ja_refresh_line, post.title, reason)
+                }
+            }
+            if (result.isNotEmpty()) graph.messages.value = result.joinToString("\n")
+        }
+    }
+
+    private suspend fun cacheJapaneseWork(root: FolderEntity): Int {
+        val posts = graph.db.japaneseAsmr().postsForRoot(root.id).map { it.ref() }
+        val selected = selectJapanesePosts(posts)
+        if (selected.isEmpty()) return 0
+        try {
+            val entries = waitForJapaneseDownload(CachePrompt.JapaneseWaiting(text(R.string.ja_download_reading_entry))) {
+                graph.downloads.jaWorkEntries(selected)
+            }
+            val entry = if (entries.size == 1) entries.single() else {
+                val titles = entries.groupingBy { it.post.title }.eachCount()
+                val options = entries.mapIndexed { index, option ->
+                    val title = option.post.title
+                    index to if (titles[title] == 1) title else text(R.string.ja_download_entry_suffix, title, index + 1)
+                }
+                val pick = askCache(CachePrompt.JapaneseChoice(
+                    text(R.string.ja_download_choose_entry_title),
+                    text(R.string.ja_download_choose_entry_message),
+                    options,
+                ))
+                entries.getOrNull(pick as? Int ?: return 0) ?: return 0
+            }
+            val readingFiles = CachePrompt.JapaneseWaiting(text(R.string.ja_download_reading_manifest))
+            val manifest = waitForJapaneseDownload(readingFiles) {
+                graph.downloads.prepareJaManifest(
+                    entry, root.id,
+                    onReadVerifiedManifest = { cachePrompt.value = readingFiles },
+                    onVerify = { token, buzzheavier -> askCache(CachePrompt.JapaneseVerify(token, buzzheavier = buzzheavier)) == true },
+                )
+            } ?: return 0
+            suspend fun checkFiles(force: Boolean) =
+                waitForJapaneseDownload(CachePrompt.JapaneseWaiting(text(R.string.ja_download_checking_local))) {
+                    graph.downloads.checkJaWork(manifest, force)
+                }
+            var check = checkFiles(force = false)
+            val retained = if (check.retained > 0) text(R.string.ja_download_retained_suffix, check.retained) else ""
+            if (check.pending == 0 && !check.lengthOnly) {
+                graph.show(R.string.ja_download_files_local, retained)
+                return 0
+            }
+            val total = manifest.bytes?.let {
+                android.text.format.Formatter.formatShortFileSize(getApplication<Application>(), it)
+            } ?: text(R.string.ja_download_total_unknown)
+            val note = if (check.lengthOnly) text(R.string.ja_download_length_only_note) else ""
+            val title = text(if (check.pending == 0) R.string.ja_download_files_local_title else R.string.ja_download_download_work)
+            val options = buildList<Pair<Any, String>> {
+                if (check.pending > 0) add(false to text(R.string.ja_download_confirm))
+                if (check.lengthOnly) add(true to text(R.string.ja_download_redownload))
+            }
+            val force = askCache(CachePrompt.JapaneseChoice(
+                title,
+                text(R.string.ja_download_manifest_summary, manifest.files.size, total, check.pending, note, retained),
+                options,
+            )) as? Boolean ?: return 0
+            if (force) check = checkFiles(force = true)
+            val replace = !check.needsReplace || askCache(CachePrompt.JapaneseChoice(
+                text(R.string.ja_download_replace_title),
+                text(R.string.ja_download_replace_message),
+                listOf(true to text(R.string.ja_download_replace), false to text(R.string.ja_download_keep_old)),
+            )) == true
+            val queued = graph.downloads.enqueueJaWork(root.id, manifest, replace, force)
+            if (!queued.added) graph.show(R.string.ja_download_task_exists)
+            return if (queued.added) 1 else 0
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            val detail = (failure as? com.nanahoshi.audioplayer.japaneseasmr.JaWorkException)?.userText?.let { appContext.resolve(it) }
+                ?: text(R.string.ja_download_read_failed)
+            val fallback = askCache(CachePrompt.JapaneseChoice(
+                text(R.string.ja_download_failed_title),
+                detail,
+                listOf(true to text(R.string.ja_download_use_track)),
+            )) == true
+            if (!fallback) return 0
+            val tracks = selected.flatMap { post ->
+                val article = graph.japaneseAsmr.article(post.postId, post.rj)
+                graph.library.importJapaneseAsmrPost(article, root.id)
+                val matches = com.nanahoshi.audioplayer.japaneseasmr.resolveStoredJaMatches(article, post.postId, graph.db.japaneseAsmr())
+                matches.filterValues { it.media != null }.keys.mapNotNull { graph.db.japaneseAsmr().track(post.postId, it) }
+            }
+            return graph.downloads.enqueue(tracks)
         }
     }
 
@@ -629,11 +799,12 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         val sourceFolderId = root?.id ?: folderId
         // 已购买（读缓存）且 asmr.one 也有这部作品时，让用户选来源。
         val sources = graph.library.prepareWorkSources(sourceFolderId)
-        val bothKnown = sources != null && (sources.hasPlay || sources.purchased == true) && sources.hasAsmr
-        var chosen: TrackSource? = null
-        if (bothKnown) {
-            chosen = askCache(CachePrompt.Source(sourceFolderId)) as? TrackSource ?: return
+        val available = buildList {
+            if (sources?.hasPlay == true || sources?.purchased == true) add(TrackSource.DLSITE)
+            if (sources?.hasAsmr == true) add(TrackSource.ASMR)
+            if (sources?.hasJapaneseAsmr == true) add(TrackSource.JAPANESE_ASMR)
         }
+        val chosen = if (available.size > 1) askCache(CachePrompt.Source(available)) as? TrackSource ?: return else null
         val tracks = if (root == null) graph.library.tracksInTree(folderId)
             else graph.library.asmrTracksInTree(folderId)
         // 普通父目录仍下载整个子树；DLsite 子作品各自转为一个完整原始包任务。
@@ -641,31 +812,49 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             val worknos = tracks.filter { it.source == TrackSource.DLSITE }
                 .mapNotNull { graph.downloads.requestWorkno(it) }
                 .distinctBy { com.nanahoshi.audioplayer.dlsite.DlsiteClient.canonicalWorkno(it) }
+            val jaWorks = tracks.filter { it.source == TrackSource.JAPANESE_ASMR }
+                .mapNotNull { workRootOf(it.folderId, byId) }.distinctBy { it.id }
+            var jaCount = 0
+            for (work in jaWorks) jaCount += cacheJapaneseWork(work)
             val count = graph.downloads.prepare {
                 val archives = worknos.count { graph.downloads.enqueueDlsiteArchive(it).added }
-                archives + graph.downloads.enqueue(tracks.filter { it.source != TrackSource.DLSITE })
+                archives + graph.downloads.enqueue(tracks.filter {
+                    it.source != TrackSource.DLSITE && it.source != TrackSource.JAPANESE_ASMR
+                })
+            } + jaCount
+            if (count > 0 || jaWorks.isEmpty()) {
+                if (count == 0) graph.show(R.string.library_no_audio_to_download)
+        else graph.show(R.string.library_added_download_count, count)
             }
-            graph.messages.value = if (count == 0) "没有需要下载的音频" else "已加入 $count 个下载任务"
             return
         }
         // 没弹窗时：当前来源优先，作品外面按 Play 优先，其次 asmr.one。
         val source = chosen
-            ?: workFileSource.value?.takeIf { current -> tracks.any { it.source == current } }
-            ?: if (tracks.any { it.source == TrackSource.DLSITE } || (sources?.purchased == true && !sources.hasAsmr)) {
-                TrackSource.DLSITE
-            } else TrackSource.ASMR
+            ?: workFileSource.value?.takeIf { current -> current in available || tracks.any { it.source == current } }
+            ?: available.firstOrNull()
+            ?: tracks.firstOrNull()?.source ?: TrackSource.ASMR
+        if (source == TrackSource.JAPANESE_ASMR) {
+            val count = cacheJapaneseWork(root)
+            if (count > 0) graph.show(R.string.library_added_download_count, count)
+            return
+        }
         if (source == TrackSource.DLSITE) {
             val worknos = root?.asmrSourceId?.let { listOf(it) }
                 ?: tracks.filter { it.source == TrackSource.DLSITE }.mapNotNull { graph.downloads.requestWorkno(it) }
                     .distinctBy { com.nanahoshi.audioplayer.dlsite.DlsiteClient.canonicalWorkno(it) }
-            if (worknos.isEmpty()) error("这个作品缺少编号")
+            if (worknos.isEmpty()) error(text(R.string.library_missing_work_id))
             val count = graph.downloads.prepare {
                 worknos.count { graph.downloads.enqueueDlsiteArchive(it, root?.name ?: it, root?.id).added }
             }
-            graph.messages.value = if (count == 0) "没有需要下载的音频" else "已加入 $count 个完整原始包下载任务"
+            if (count == 0) graph.show(R.string.library_no_audio_to_download)
+            else graph.show(R.string.library_added_archive_download_count, count)
             return
         }
-        val pending = tracks.filter { it.source == source && !LocalAudio.hasStoredCopy(it.localUri) }
+        val sourceTracks = if (source == TrackSource.ASMR && tracks.none { it.source == source }) {
+            graph.library.ensureWorkSource(root.id, source)
+            graph.library.asmrTracksInTree(folderId)
+        } else tracks
+        val pending = sourceTracks.filter { it.source == source && !LocalAudio.hasStoredCopy(it.localUri) }
         var dropped = emptySet<Long>()
         val conflicts = findFormatConflicts(pending.map { CacheCandidate(it.id, it.folderId, it.title) })
         for (conflict in conflicts) {
@@ -673,18 +862,19 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             dropped = dropped + idsToDrop(conflict, keep)
         }
         val count = graph.downloads.enqueue(pending.filter { it.id !in dropped })
-        graph.messages.value = if (count == 0) "没有需要下载的音频" else "已加入 $count 个下载任务"
+        if (count == 0) graph.show(R.string.library_no_audio_to_download)
+        else graph.show(R.string.library_added_download_count, count)
     }
 
     fun addSelectionToPlaylist(playlistId: Long) = launch {
         val tracks = selectedTracks()
         clearSelection()
         if (tracks.isEmpty()) {
-            graph.messages.value = "没有可加入的音频"
+            graph.show(R.string.library_no_audio_to_add)
             return@launch
         }
         graph.library.addTracksToPlaylist(playlistId, tracks.map { it.id })
-        graph.messages.value = "已加入播放列表"
+        graph.show(R.string.library_added_playlist)
     }
 
     fun toggleSort() {
@@ -748,7 +938,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         val tracks = selectedTracks()
         clearSelection()
         if (tracks.isEmpty()) {
-            graph.messages.value = "没有可加入的音频"
+            graph.show(R.string.library_no_audio_to_add)
             return@launch
         }
         graph.player.playNext(tracks)
@@ -758,7 +948,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         val tracks = selectedTracks()
         clearSelection()
         if (tracks.isEmpty()) {
-            graph.messages.value = "没有可加入的音频"
+            graph.show(R.string.library_no_audio_to_add)
             return@launch
         }
         graph.player.append(tracks)
@@ -816,12 +1006,14 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             busyCounter.begin()
             try {
                 block()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (error: BilibiliException) {
-                graph.messages.value = error.message
+                graph.showRaw(appContext.resolveNoUrl(error.userText, R.string.bilibili_error_read_failed))
             } catch (error: AsmrException) {
-                graph.messages.value = error.message
+                graph.showRaw(appContext.resolveNoUrl(error.userText, R.string.library_refresh_failed))
             } catch (error: Exception) {
-                graph.messages.value = error.message ?: "操作失败"
+                graph.showError(error, R.string.library_operation_failed)
             } finally {
                 busyCounter.end()
             }
@@ -994,10 +1186,12 @@ private fun FolderEntity.matchesRj(digits: String): Boolean {
 private fun rjNumber(raw: String): String =
     raw.uppercase().removePrefix("RJ").removePrefix("VJ").filter { it.isDigit() }.trimStart('0').ifEmpty { "0" }
 
-internal fun deleteDownloadedNotice(result: DeleteResult): String = buildList {
-    if (result.deleted > 0) add("已删除 ${result.deleted} 个已下载文件")
-    if (result.unlinked > 0) add("已取消 ${result.unlinked} 首曲目的本地关联，手机原文件已保留")
-    if (result.changed > 0) add("已跳过 ${result.changed} 首本地路径已变化或已移除的曲目")
-}.joinToString("。").ifEmpty {
-    "没有可删除的下载副本或可取消的本地关联"
+internal fun deleteDownloadedNotice(result: DeleteResult): TextRef {
+    val parts = buildList {
+        if (result.deleted > 0) add(TextRef.Res(R.string.library_deleted_downloads, listOf(result.deleted)))
+        if (result.unlinked > 0) add(TextRef.Res(R.string.library_unlinked_tracks, listOf(result.unlinked)))
+        if (result.changed > 0) add(TextRef.Res(R.string.library_skipped_changed, listOf(result.changed)))
+    }
+    return if (parts.isEmpty()) TextRef.Res(R.string.library_nothing_to_delete)
+    else TextRef.Joined(parts, separator = "。")
 }

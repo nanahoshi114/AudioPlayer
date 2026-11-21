@@ -1,5 +1,8 @@
 package com.nanahoshi.audioplayer.ui.components
 
+import com.nanahoshi.audioplayer.R
+import androidx.compose.ui.res.stringResource
+
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -39,7 +42,7 @@ internal fun WorkFileBrowser(
             Column(Modifier.fillMaxWidth().height(pageHeight).nestedScroll(connection)) {
                 controls()
                 if (loading) {
-                    LoadingState("正在读取文件…", Modifier.weight(1f))
+                    LoadingState(stringResource(R.string.stored_loading), Modifier.weight(1f))
                 } else {
                     LazyColumn(state = state, modifier = Modifier.fillMaxWidth().weight(1f),
                         contentPadding = bottomPadding, content = files)

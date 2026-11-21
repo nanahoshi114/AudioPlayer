@@ -1,10 +1,14 @@
 package com.nanahoshi.audioplayer.ui.bilibili
 
+import androidx.annotation.StringRes
+import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.bilibili.BiliVideoHit
 import kotlin.random.Random
 
-enum class CollectionSort(val label: String) {
-    FORWARD("正序"), REVERSE("倒序"), RANDOM("随机")
+enum class CollectionSort(@param:StringRes val labelRes: Int) {
+    FORWARD(R.string.bilibili_sort_forward),
+    REVERSE(R.string.bilibili_sort_reverse),
+    RANDOM(R.string.bilibili_sort_random),
 }
 
 internal fun orderCollectionVideos(

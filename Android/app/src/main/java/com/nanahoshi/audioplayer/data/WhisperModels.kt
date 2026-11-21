@@ -1,5 +1,9 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.text.TextRef
+import android.content.Context
+import androidx.annotation.StringRes
+import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.data.db.DownloadStatus
 import com.nanahoshi.audioplayer.data.db.WhisperJobEntity
 import com.nanahoshi.audioplayer.playback.GeneratedSubtitles
@@ -19,13 +23,17 @@ internal const val QWEN_POLL_TIMEOUT_MS = 30 * 60 * 1000L
 
 internal const val QWEN_WHISPER_BASE = "https://dashscope.aliyuncs.com"
 
-internal fun whisperModelLabel(model: String): String = when (model) {
-    WHISPER_MODEL_QWEN -> WHISPER_MODEL_QWEN
-    WHISPER_MODEL_QWEN3 -> "Qwen3-ASR"
-    SENSE_VOICE_MODEL -> "SenseVoiceSmall"
-    PARAKEET_MODEL -> "Parakeet 0.6B 日语（CTC）"
-    else -> SENSE_VOICE_MODEL
+@StringRes
+internal fun whisperModelLabelRes(model: String): Int? = when (model) {
+    WHISPER_MODEL_QWEN -> R.string.settings_model_qwen_audio
+    WHISPER_MODEL_QWEN3 -> R.string.settings_model_qwen3
+    SENSE_VOICE_MODEL -> R.string.settings_model_sensevoice
+    PARAKEET_MODEL -> R.string.settings_model_parakeet
+    else -> null
 }
+
+internal fun whisperModelLabel(context: Context, model: String): String =
+    whisperModelLabelRes(model)?.let { context.getString(it) } ?: SENSE_VOICE_MODEL
 
 internal fun knownWhisperModel(model: String?): String? =
     model?.takeIf {
@@ -36,11 +44,14 @@ internal fun knownWhisperModel(model: String?): String? =
 
 internal fun isCloudWhisperModel(model: String?): Boolean = model == WHISPER_MODEL_QWEN
 
-/** 完全在本机运行的听写模型：没有地址和口令，模型文件下载到手机里。 */
+/** 完全在本机运行的听写模型：没有地址和 API Key，模型文件下载到手机里。 */
 internal fun isOnDeviceWhisperModel(model: String?): Boolean = OfflineWhisperModel.fromId(model) != null
 
-internal fun missingOfflineWhisperModelMessage(model: String): String =
-    "请先在「设置 → 听写和翻译」下载 ${whisperModelLabel(model)} 模型。"
+internal fun missingOfflineWhisperModelMessage(model: String): TextRef =
+    TextRef.Res(
+        R.string.whisper_error_download_model_first,
+        listOf(whisperModelLabelRes(model)?.let { TextRef.Res(it) } ?: TextRef.Raw(SENSE_VOICE_MODEL)),
+    )
 
 internal fun hasActiveOfflineWhisperJob(jobs: List<WhisperJobEntity>, model: OfflineWhisperModel): Boolean =
     jobs.any {
@@ -103,7 +114,7 @@ internal fun resolveQwen3Model(ids: List<String>): String {
     return cleaned.firstOrNull { it.contains("qwen3-asr", ignoreCase = true) }
         ?: cleaned.singleOrNull()
         ?: if (cleaned.isEmpty()) QWEN3_ASR_MODEL
-        else throw WhisperException("听写服务返回了多个模型，但没有名称包含 qwen3-asr 的模型，请检查服务配置")
+        else throw WhisperException(TextRef.Res(R.string.whisper_error_model_ambiguous))
 }
 
 internal fun qwen3TranscriptText(raw: String): String {
@@ -115,7 +126,7 @@ internal fun qwen3TranscriptText(raw: String): String {
 internal fun cueFromWholeTranscript(text: String, durationMs: Long): List<WhisperCue> {
     val line = qwen3TranscriptText(text)
     if (line.isEmpty()) return emptyList()
-    if (durationMs <= 1L) throw WhisperException("没有分段时间")
+    if (durationMs <= 1L) throw WhisperException(TextRef.Res(R.string.whisper_error_no_timestamps))
     return listOf(WhisperCue(0L, durationMs, line))
 }
 

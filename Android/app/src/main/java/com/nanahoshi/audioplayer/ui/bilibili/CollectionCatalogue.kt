@@ -1,5 +1,9 @@
 package com.nanahoshi.audioplayer.ui.bilibili
 
+import com.nanahoshi.audioplayer.text.resolveNoUrl
+import androidx.compose.ui.platform.LocalContext
+import com.nanahoshi.audioplayer.R
+import androidx.compose.ui.res.stringResource
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
@@ -22,22 +26,24 @@ internal fun CollectionCatalogue(model: BiliBrowserViewModel, open: (BiliCollect
     }
     Column(modifier) {
         if (page.loading) Row(Modifier.fillMaxWidth()) {
-            Text("正在读取合集…", Modifier.weight(1f).padding(16.dp))
-            TextButton(onClick = page::cancel) { Text("中止") }
+            Text(stringResource(R.string.bilibili_reading_collections), Modifier.weight(1f).padding(16.dp))
+            TextButton(onClick = page::cancel) { Text(stringResource(R.string.common_stop)) }
         }
-        if (page.items.isEmpty() && !page.loading && page.error == null) EmptyState(title = "没有合集或系列", message = "可以刷新后重试。")
+        if (page.items.isEmpty() && !page.loading && page.error == null) EmptyState(
+            title = stringResource(R.string.bilibili_catalogue_empty_title),
+        )
         LazyColumn(state = state, modifier = Modifier.weight(1f)) {
             items(page.items, key = { it.key }) { collection ->
                 ListItem(headlineContent = { Text(collection.title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
-                    supportingContent = { Text("${collection.label} · ${collection.total} 个视频") },
+                    supportingContent = { Text(stringResource(R.string.bilibili_collection_summary, stringResource(collection.kind.labelRes), collection.total)) },
                     leadingContent = { CoverImage(collection.coverUrl) }, modifier = Modifier.clickable { open(collection) })
             }
             page.error?.let { message -> item(key = "error") {
-                Text(message, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error)
-                TextButton(onClick = page::loadMore) { Text("重试当前页") }
+                Text(LocalContext.current.resolveNoUrl(message, R.string.bilibili_error_page_network), Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error)
+                TextButton(onClick = page::loadMore) { Text(stringResource(R.string.bilibili_retry_page)) }
             } }
             if (page.hasMore && !page.loading && page.error == null) item(key = "more") {
-                TextButton(onClick = page::loadMore, modifier = Modifier.fillMaxWidth()) { Text("加载更多") }
+                TextButton(onClick = page::loadMore, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.bilibili_load_more)) }
             }
         }
     }

@@ -1,5 +1,8 @@
 package com.nanahoshi.audioplayer.asmr
 
+import com.nanahoshi.audioplayer.R
+import com.nanahoshi.audioplayer.data.RemoteTextPreview
+import com.nanahoshi.audioplayer.data.readRemoteTextPreview
 import com.nanahoshi.audioplayer.data.withResponse
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -12,10 +15,20 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
-import java.io.IOException
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.text.UserFacingError
 import java.util.concurrent.TimeUnit
 
-class AsmrException(message: String) : Exception(message)
+
+enum class AsmrErrorKind { NOT_FOUND, INVALID_RJ, OTHER }
+
+class AsmrException(
+    override val userText: TextRef,
+    val kind: AsmrErrorKind = AsmrErrorKind.OTHER,
+    cause: Throwable? = null,
+) : Exception(userText.debugString(), cause), UserFacingError {
+    constructor(message: String) : this(TextRef.Raw(message))
+}
 
 sealed class CatalogLookup {
     data class Found(val item: AsmrCatalogItem) : CatalogLookup()
@@ -67,6 +80,7 @@ data class WorkFacts(
     val tags: List<String>,
     val release: String,
     val sourceId: String,
+    val asmrAvailable: Boolean = false,
 ) {
     fun toJson(): String = JSONObject()
         .put("title", title)
@@ -75,6 +89,7 @@ data class WorkFacts(
         .put("tags", JSONArray(tags))
         .put("release", release)
         .put("sourceId", sourceId)
+        .apply { if (asmrAvailable) put("asmrAvailable", true) }
         .toString()
 
     companion object {
@@ -89,6 +104,7 @@ data class WorkFacts(
                     tags = obj.optJSONArray("tags").toStrings(),
                     release = obj.optString("release"),
                     sourceId = obj.optString("sourceId"),
+                    asmrAvailable = obj.optBoolean("asmrAvailable"),
                 )
             } catch (_: Exception) {
                 null
@@ -165,8 +181,8 @@ class AsmrClient {
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: AsmrException) {
-            when (error.message) {
-                "未找到该作品", "RJ 号不正确" -> CatalogLookup.Missing
+            when (error.kind) {
+                AsmrErrorKind.NOT_FOUND, AsmrErrorKind.INVALID_RJ -> CatalogLookup.Missing
                 else -> CatalogLookup.Unknown
             }
         } catch (_: Exception) {
@@ -178,7 +194,7 @@ class AsmrClient {
         val code = extractCode(input)
         val info = JSONObject(get("/api/workInfo/$code"))
         val id = info.optLong("id")
-        if (id <= 0L) throw AsmrException("没有读到作品编号")
+        if (id <= 0L) throw AsmrException(TextRef.Res(R.string.asmr_error_work_id_missing))
         val sourceId = info.optString("source_id").ifBlank { code }.uppercase()
         val circle = info.optJSONObject("circle")?.optString("name").orEmpty()
             .ifBlank { info.optString("name") }
@@ -235,7 +251,7 @@ class AsmrClient {
         parseNodes(JSONArray(get("/api/tracks/$workId?v=2")))
     }
 
-    suspend fun readText(url: String, limit: Int = TEXT_LIMIT): String = withContext(Dispatchers.IO) {
+    internal suspend fun readText(url: String, limit: Int = TEXT_LIMIT): RemoteTextPreview = withContext(Dispatchers.IO) {
         val request = Request.Builder()
             .url(url)
             .header("User-Agent", USER_AGENT)
@@ -243,18 +259,8 @@ class AsmrClient {
             .header("Origin", ORIGIN)
             .build()
         client.newCall(request).withResponse { response ->
-            if (!response.isSuccessful) throw AsmrException("无法打开这个文件")
-            val input = response.body?.byteStream() ?: return@withResponse ""
-            val buffer = ByteArray(limit + 1)
-            var total = 0
-            while (total < buffer.size) {
-                val read = input.read(buffer, total, buffer.size - total)
-                if (read < 0) break
-                total += read
-            }
-            val clipped = total > limit
-            val text = buffer.copyOf(minOf(total, limit)).toString(Charsets.UTF_8)
-            if (clipped) text + "\n…（只显示前面一段）" else text
+            if (!response.isSuccessful) throw AsmrException(TextRef.Res(R.string.dlsite_error_file_open))
+            response.body?.byteStream()?.readRemoteTextPreview(limit) ?: RemoteTextPreview("")
         }
     }
 
@@ -265,7 +271,7 @@ class AsmrClient {
     private suspend fun post(path: String, json: String): String = call(path, json)
 
     private suspend fun call(path: String, json: String?): String {
-        var last: Exception? = null
+        var last: TextRef? = null
         for (base in MIRRORS) {
             try {
                 val builder = Request.Builder()
@@ -283,14 +289,18 @@ class AsmrClient {
                     val body = response.body?.string().orEmpty()
                     if (!response.isSuccessful) {
                         val server = runCatching { JSONObject(body).optString("error") }.getOrNull().orEmpty()
-                        val message = when {
-                            response.code == 404 -> "未找到该作品"
-                            response.code == 400 && "workInfo" in path -> "RJ 号不正确"
-                            server.isNotBlank() -> server
-                            else -> "暂时无法连接 asmr.one"
+                        val fallback = TextRef.Res(R.string.asmr_error_connection)
+                        val serverError = server.takeIf(String::isNotBlank)?.let(TextRef::Raw) ?: fallback
+                        when {
+                            response.code == 404 -> throw AsmrException(
+                                TextRef.Res(R.string.asmr_error_work_missing), AsmrErrorKind.NOT_FOUND,
+                            )
+                            response.code == 400 && "workInfo" in path -> throw AsmrException(
+                                TextRef.Res(R.string.asmr_error_invalid_rj), AsmrErrorKind.INVALID_RJ,
+                            )
+                            response.code == 400 -> throw AsmrException(serverError)
+                            else -> last = serverError
                         }
-                        if (response.code == 404 || response.code == 400) throw AsmrException(message)
-                        last = IOException(message)
                         return@withResponse null
                     }
                     body
@@ -300,11 +310,11 @@ class AsmrClient {
                 throw cancelled
             } catch (error: AsmrException) {
                 throw error
-            } catch (error: Exception) {
-                last = error
+            } catch (_: Exception) {
+                last = TextRef.Res(R.string.asmr_error_connection)
             }
         }
-        throw AsmrException(last?.message ?: "暂时无法连接 asmr.one")
+        throw AsmrException(last ?: TextRef.Res(R.string.asmr_error_connection))
     }
 
     private fun parsePage(body: String): AsmrPage {
@@ -338,7 +348,7 @@ class AsmrClient {
             if (match != null) return match.value.uppercase()
             val digits = input.filter { it.isDigit() }
             if (digits.isNotEmpty()) return "RJ$digits"
-            throw AsmrException("请输入 RJ 号")
+            throw AsmrException(TextRef.Res(R.string.asmr_error_enter_rj))
         }
 
         fun findStream(nodes: List<AsmrNode>, hash: String?, title: String): String? {

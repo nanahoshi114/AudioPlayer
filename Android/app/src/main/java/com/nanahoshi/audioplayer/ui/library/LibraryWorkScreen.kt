@@ -1,5 +1,8 @@
 package com.nanahoshi.audioplayer.ui.library
 
+import com.nanahoshi.audioplayer.R
+import androidx.compose.ui.res.stringResource
+import com.nanahoshi.audioplayer.ui.asmr.workLabel
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -57,6 +60,8 @@ fun LibraryWorkScreen(
     onBack: () -> Unit,
     onOpenPreview: (Long) -> Unit,
     onOpenOnline: (String) -> Unit,
+    onVerifyJaDownload: (String) -> Unit = {},
+    onVerifyJaRefresh: (String) -> Unit = {},
     viewModel: LibraryViewModel = viewModel(),
 ) {
     LaunchedEffect(folderId) { viewModel.openWork(folderId) }
@@ -118,14 +123,14 @@ fun LibraryWorkScreen(
                 count = selectedTracks.size + selectedFolders.size,
                 onClose = viewModel::clearSelection,
                 actions = listOfNotNull(
-                    SelectionAction("接下来播放", Icons.Default.SkipNext, viewModel::playNextSelection),
-                    SelectionAction("加入播放队列", Icons.AutoMirrored.Filled.PlaylistAdd, viewModel::appendSelection),
-                    SelectionAction("下载", Icons.Default.Download, viewModel::downloadSelection),
-                    SelectionAction("加入播放列表", Icons.AutoMirrored.Filled.QueueMusic, {
-                        if (playlists.isEmpty()) viewModel.note("请先新建播放列表") else pickingPlaylist = true
+                    SelectionAction(context.getString(R.string.library_play_next), Icons.Default.SkipNext, viewModel::playNextSelection),
+                    SelectionAction(context.getString(R.string.library_add_queue), Icons.AutoMirrored.Filled.PlaylistAdd, viewModel::appendSelection),
+                    SelectionAction(context.getString(R.string.library_download_selected), Icons.Default.Download, viewModel::downloadSelection),
+                    SelectionAction(context.getString(R.string.library_add_playlist), Icons.AutoMirrored.Filled.QueueMusic, {
+                        if (playlists.isEmpty()) viewModel.note(context.getString(R.string.library_create_playlist_first)) else pickingPlaylist = true
                     }),
                     removalTargets?.let { targets ->
-                        SelectionAction(targets.label, Icons.Default.Delete, {
+                        SelectionAction(context.getString(targets.labelRes), Icons.Default.Delete, {
                             viewModel.deleteDownloadedSelection(removalSelection, targets)
                         }, destructive = true)
                     },
@@ -133,16 +138,16 @@ fun LibraryWorkScreen(
             )
         } else {
             AppTopBar(
-                title = "作品",
+                title = stringResource(R.string.library_work_title),
                 onBack = { leaveOrUp() },
                 actions = {
                     IconButton(onClick = { menu = true }) {
-                        Icon(Icons.Default.MoreVert, contentDescription = "更多")
+                        Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.a11y_work_actions))
                     }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                         if (sourceId.isNotBlank()) {
                             DropdownMenuItem(
-                                text = { Text("在线详情") },
+                                text = { Text(stringResource(R.string.library_work_online_details)) },
                                 onClick = {
                                     menu = false
                                     onOpenOnline(sourceId)
@@ -150,7 +155,7 @@ fun LibraryWorkScreen(
                             )
                         }
                         DropdownMenuItem(
-                            text = { Text("从音频库移除") },
+                            text = { Text(stringResource(R.string.library_remove_from_library)) },
                             onClick = {
                                 menu = false
                                 confirmRemoveWork = true
@@ -161,9 +166,14 @@ fun LibraryWorkScreen(
             )
         }
         if (workMissing) {
-            EmptyState("没有找到这部作品", modifier = Modifier.fillMaxSize(), actionLabel = "返回", onAction = onBack)
+            EmptyState(
+                stringResource(R.string.library_work_not_found),
+                modifier = Modifier.fillMaxSize(),
+                actionLabel = stringResource(R.string.common_back),
+                onAction = onBack,
+            )
         } else if (headerFolder == null || facts == null) {
-            LoadingState("正在读取作品…")
+            LoadingState(stringResource(R.string.library_work_loading))
         } else {
             com.nanahoshi.audioplayer.ui.components.WorkFileBrowser(
                 state = listState,
@@ -179,35 +189,35 @@ fun LibraryWorkScreen(
                         ) {
                 FilledTonalButton(
                     onClick = { viewModel.cacheFolder(headerFolder.id) },
-                ) { Text("下载到本地") }
-                OutlinedButton(
-                    onClick = { openTree.launch(null) },
-                ) { Text("关联本地文件夹") }
+                ) { Text(stringResource(R.string.library_download_whole_work)) }
+                if (TrackSource.JAPANESE_ASMR in workSources) {
+                    OutlinedButton(onClick = { viewModel.refreshJapaneseArticles(headerFolder.id) }) { Text(stringResource(R.string.library_refresh_ja)) }
+                }
+                if (workFileSource != TrackSource.JAPANESE_ASMR) {
+                    OutlinedButton(onClick = { openTree.launch(null) }) { Text(stringResource(R.string.library_link_local_folder)) }
+                }
             }
         }
     },
     controls = {
-        SectionHeader("文件")
-        if (workSources) {
+        SectionHeader(stringResource(R.string.library_files_section))
+        if (workSources.size > 1) {
             SingleChoiceSegmentedButtonRow(
                 Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
             ) {
-                SegmentedButton(
-                    selected = workFileSource == TrackSource.DLSITE,
-                    onClick = { viewModel.useWorkSource(TrackSource.DLSITE) },
-                    shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-                ) { Text("DLsite Play") }
-                SegmentedButton(
-                    selected = workFileSource == TrackSource.ASMR,
-                    onClick = { viewModel.useWorkSource(TrackSource.ASMR) },
-                    shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-                ) { Text("asmr.one") }
+                workSources.forEachIndexed { index, source ->
+                    SegmentedButton(
+                        selected = workFileSource == source,
+                        onClick = { viewModel.useWorkSource(source) },
+                        shape = SegmentedButtonDefaults.itemShape(index = index, count = workSources.size),
+                    ) { Text(source.workLabel()) }
+                }
             }
         }
         val subfolderTrail = location?.path.orEmpty().drop(1).map { LibraryCrumb(it.id, it.name) }
         LibraryBreadcrumb(
             trail = subfolderTrail,
-            rootLabel = "根目录",
+            rootLabel = stringResource(R.string.library_root_label),
             onRoot = { viewModel.goToWorkAncestor(headerFolder.id) },
             onCrumb = { index -> viewModel.goToWorkAncestor(subfolderTrail[index].id) },
             revealCurrent = true,
@@ -216,7 +226,10 @@ fun LibraryWorkScreen(
 ) {
                 if (folders.isEmpty() && entries.isEmpty()) {
                     item(key = "empty") {
-                        EmptyState(title = "这个文件夹是空的")
+                        EmptyState(
+                            title = stringResource(R.string.library_empty_folder_title),
+                            message = stringResource(R.string.library_work_folder_empty_message),
+                        )
                     }
                 }
                 items(folders, key = { "folder-${it.id}" }) { folder ->
@@ -258,6 +271,7 @@ fun LibraryWorkScreen(
                                 onDownload = if (
                                     track.source == TrackSource.ASMR ||
                                     track.source == TrackSource.DLSITE ||
+                                    track.source == TrackSource.JAPANESE_ASMR ||
                                     (track.source == TrackSource.BILIBILI || track.source == TrackSource.YOUTUBE)
                                 ) {
                                     { viewModel.downloadTrack(track) }
@@ -267,6 +281,7 @@ fun LibraryWorkScreen(
                                 onDeleteDownloaded = if (
                                     track.source == TrackSource.ASMR ||
                                     track.source == TrackSource.DLSITE ||
+                                    track.source == TrackSource.JAPANESE_ASMR ||
                                     (track.source == TrackSource.BILIBILI || track.source == TrackSource.YOUTUBE)
                                 ) {
                                     { viewModel.deleteDownloadedTrack(track) }
@@ -288,7 +303,7 @@ fun LibraryWorkScreen(
         }
     }
 
-    CachePromptDialog(cachePrompt, viewModel::answerCache)
+    CachePromptDialog(cachePrompt, viewModel::answerCache, viewModel::cancelCacheWait, onVerifyJaDownload, onVerifyJaRefresh)
 
     if (pickingPlaylist) {
         PlaylistPickDialog(
@@ -302,7 +317,7 @@ fun LibraryWorkScreen(
     }
     if (confirmRemoveWork) {
         ConfirmRemoveDialog(
-            message = "这个作品和里面的内容会从音频库移除。已下载文件和手机上的原文件都会保留。",
+            message = stringResource(R.string.library_remove_work_message),
             onConfirm = {
                 confirmRemoveWork = false
                 viewModel.deleteFolder(headerFolder?.id ?: folderId)

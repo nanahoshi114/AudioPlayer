@@ -1,10 +1,12 @@
 package com.nanahoshi.audioplayer.ui.theme
 
+import androidx.annotation.StringRes
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import com.nanahoshi.audioplayer.R
 
 /** 主题色的来源。`System` 在 Android 12 以下退回 `Default`。 */
 sealed interface ThemeAccent {
@@ -13,20 +15,20 @@ sealed interface ThemeAccent {
     data class Seed(val color: Color) : ThemeAccent
 }
 
-class AccentPreset(val id: String, val name: String, val color: Color, val builtIn: Boolean = false)
+class AccentPreset(val id: String, @param:StringRes val nameRes: Int, val color: Color, val builtIn: Boolean = false)
 
 val AccentPresets = listOf(
-    AccentPreset("indigo", "靛蓝", Color(0xFF4F5FD6), builtIn = true),
-    AccentPreset("blue", "天蓝", Color(0xFF1E88E5)),
-    AccentPreset("teal", "青绿", Color(0xFF00897B)),
-    AccentPreset("green", "草绿", Color(0xFF43A047)),
-    AccentPreset("amber", "琥珀", Color(0xFFF9A825)),
-    AccentPreset("orange", "橙", Color(0xFFF4511E)),
-    AccentPreset("red", "绯红", Color(0xFFD32F2F)),
-    AccentPreset("pink", "粉", Color(0xFFD81B60)),
-    AccentPreset("purple", "紫", Color(0xFF8E24AA)),
-    AccentPreset("brown", "棕", Color(0xFF795548)),
-    AccentPreset("slate", "灰蓝", Color(0xFF607D8B)),
+    AccentPreset("indigo", R.string.appearance_accent_indigo, Color(0xFF4F5FD6), builtIn = true),
+    AccentPreset("blue", R.string.appearance_accent_blue, Color(0xFF1E88E5)),
+    AccentPreset("teal", R.string.appearance_accent_teal, Color(0xFF00897B)),
+    AccentPreset("green", R.string.appearance_accent_green, Color(0xFF43A047)),
+    AccentPreset("amber", R.string.appearance_accent_amber, Color(0xFFF9A825)),
+    AccentPreset("orange", R.string.appearance_accent_orange, Color(0xFFF4511E)),
+    AccentPreset("red", R.string.appearance_accent_red, Color(0xFFD32F2F)),
+    AccentPreset("pink", R.string.appearance_accent_pink, Color(0xFFD81B60)),
+    AccentPreset("purple", R.string.appearance_accent_purple, Color(0xFF8E24AA)),
+    AccentPreset("brown", R.string.appearance_accent_brown, Color(0xFF795548)),
+    AccentPreset("slate", R.string.appearance_accent_slate, Color(0xFF607D8B)),
 )
 
 fun accentPreset(id: String): AccentPreset = AccentPresets.firstOrNull { it.id == id } ?: AccentPresets.first()

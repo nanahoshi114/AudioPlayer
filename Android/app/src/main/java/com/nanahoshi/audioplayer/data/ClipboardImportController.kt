@@ -1,11 +1,15 @@
 package com.nanahoshi.audioplayer.data
 
 import androidx.compose.runtime.*
+import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.asmr.CatalogLookup
 import com.nanahoshi.audioplayer.bilibili.BiliPart
 import com.nanahoshi.audioplayer.dlsite.DlsiteException
 import com.nanahoshi.audioplayer.dlsite.DlsiteShowcase
 import com.nanahoshi.audioplayer.youtube.YouTubeVideo
+import com.nanahoshi.audioplayer.japaneseasmr.JaArticle
+import com.nanahoshi.audioplayer.japaneseasmr.JapaneseAsmrException
+import com.nanahoshi.audioplayer.text.TextRef
 import kotlinx.coroutines.*
 import java.io.IOException
 
@@ -16,12 +20,17 @@ internal data class ClipboardImportPreview(
     val parts: List<BiliPart> = emptyList(), val youtubeVideo: YouTubeVideo? = null,
     val biliVideo: com.nanahoshi.audioplayer.bilibili.BiliVideoHit? = null,
     val dlsiteWork: ClipboardDlsiteWork? = null,
+    val jaArticle: JaArticle? = null,
+    val jaExternalUrl: String? = null,
+    val jaDetailsOnly: Boolean = false,
+    val jaVerificationPage: String? = null,
 ) {
-    val detailsOnly get() = dlsiteWork?.purchased == false
+    val jaBrowserUrl get() = jaVerificationPage ?: jaExternalUrl
+    val detailsOnly get() = dlsiteWork?.purchased == false || jaDetailsOnly || jaBrowserUrl != null
 }
 internal data class ClipboardImportState(
     val preview: ClipboardImportPreview,
-    val selected: Set<Long> = emptySet(), val saving: Boolean = false, val error: String? = null,
+    val selected: Set<Long> = emptySet(), val saving: Boolean = false, val error: TextRef? = null,
 ) {
     val canImport: Boolean
         get() {
@@ -59,7 +68,7 @@ internal class ClipboardImportController(
     private val backend: ClipboardImportBackend,
     private val lastHandled: () -> String?,
     private val rememberHandled: (String) -> Unit,
-    private val message: (String) -> Unit,
+    private val message: (TextRef) -> Unit,
 ) {
     var state by mutableStateOf<ClipboardImportState?>(null); private set
     var pendingLookup by mutableStateOf<ClipboardImportCandidate?>(null); private set
@@ -102,7 +111,7 @@ internal class ClipboardImportController(
                 if (preview != null) {
                     state = ClipboardImportState(preview, selected = preview.parts.map { it.cid }.toSet())
                 } else if (candidate.requiresLookupConfirmation) {
-                    message("没有找到这部作品")
+                    message(TextRef.Res(R.string.clipboard_no_work))
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -110,9 +119,15 @@ internal class ClipboardImportController(
                 if (token == generation) {
                     val source = candidate.target.source
                     message(when {
-                        error is DlsiteException && error.statusCode == 401 -> "DLsite 登录已失效，请重新登录"
-                        source == ClipboardSource.ASMR -> "asmr.one/DLsite连接失败，请检查网络"
-                        else -> "${source.label} 视频读取失败，请检查网络后重试"
+                        error is DlsiteException && error.statusCode == 401 -> TextRef.Res(R.string.clipboard_dlsite_login_expired)
+                        error is JapaneseAsmrException -> TextRef.Res(R.string.clipboard_ja_prefix, listOf(error.userText))
+                        source == ClipboardSource.JAPANESE_ASMR -> TextRef.Res(R.string.clipboard_ja_read_failed)
+                        source == ClipboardSource.ASMR -> TextRef.Res(R.string.clipboard_asmr_connection_failed)
+                        source == ClipboardSource.BILIBILI -> TextRef.Res(R.string.clipboard_bilibili_read_failed)
+                        else -> TextRef.Res(
+                            R.string.clipboard_source_read_failed,
+                            listOf(TextRef.Res(source.labelRes)),
+                        )
                     })
                 }
             } finally {
@@ -149,11 +164,11 @@ internal class ClipboardImportController(
                 val result = backend.save(preview, preview.parts.filter { it.cid in current.selected })
                 if (token == generation) {
                     if (result == null) state = current.copy(saving = false, error = null)
-                    else { state = null; message(result) }
+                    else { state = null; message(TextRef.Raw(result)) }
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) {
-                if (token == generation) state = current.copy(error = "导入失败，请重试")
+                if (token == generation) state = current.copy(error = TextRef.Res(R.string.clipboard_add_failed))
             }
         }
     }

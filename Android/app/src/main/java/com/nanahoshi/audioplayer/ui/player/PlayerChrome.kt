@@ -1,5 +1,9 @@
 package com.nanahoshi.audioplayer.ui.player
 
+import com.nanahoshi.audioplayer.text.asString
+import com.nanahoshi.audioplayer.R
+import androidx.compose.ui.res.stringResource
+import androidx.compose.foundation.lazy.items
 import com.nanahoshi.audioplayer.data.db.DownloadStatus
 import com.nanahoshi.audioplayer.data.matches
 import com.nanahoshi.audioplayer.data.operation
@@ -52,6 +56,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.OpenInBrowser
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
@@ -107,6 +112,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nanahoshi.audioplayer.playback.PlayerUiState
+import com.nanahoshi.audioplayer.data.TrackSource
+import com.nanahoshi.audioplayer.japaneseasmr.JapaneseAsmrClient
 import com.nanahoshi.audioplayer.playback.SubtitleCue
 import com.nanahoshi.audioplayer.playback.hasTranslation
 import com.nanahoshi.audioplayer.playback.indexAt
@@ -162,6 +169,7 @@ private fun MiniPlayerCard(
     val openInteraction = remember { MutableInteractionSource() }
     val playInteraction = remember { MutableInteractionSource() }
     val reduce = LocalReduceMotion.current
+    val nowPlaying = stringResource(R.string.player_now_playing)
     val fraction = if (state.durationMs > 0) state.positionMs / state.durationMs.toFloat() else 0f
     val progress by animateFloatAsState(
         targetValue = fraction.coerceIn(0f, 1f),
@@ -184,7 +192,7 @@ private fun MiniPlayerCard(
                 CoverImage(state.coverUri, modifier = coverModifier, size = 44.dp)
                 Column(Modifier.weight(1f).padding(horizontal = 10.dp)) {
                     Text(
-                        state.title.ifBlank { "正在播放" },
+                        state.title.ifBlank { nowPlaying },
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         style = MaterialTheme.typography.titleMedium,
@@ -204,11 +212,11 @@ private fun MiniPlayerCard(
                 ) {
                     Icon(
                         if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                        contentDescription = if (state.isPlaying) "暂停" else "播放",
+                        contentDescription = stringResource(if (state.isPlaying) R.string.a11y_pause else R.string.a11y_play),
                     )
                 }
                 IconButton(onClick = viewModel.client::next) {
-                    Icon(Icons.Default.SkipNext, contentDescription = "下一首")
+                    Icon(Icons.Default.SkipNext, contentDescription = stringResource(R.string.a11y_next))
                 }
             }
             LinearProgressIndicator(
@@ -224,11 +232,34 @@ private fun MiniPlayerCard(
 @Composable
 fun NowPlayingScreen(
     onBack: () -> Unit,
+    onVerifyJapaneseAsmr: (String, Long, String?) -> Unit,
     viewModel: PlayerViewModel = viewModel(),
     coverModifier: Modifier = Modifier,
     onOpenCollection: (com.nanahoshi.audioplayer.bilibili.BiliCollection) -> Unit = {},
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val jaFailure by viewModel.client.jaPlaybackFailure.collectAsStateWithLifecycle()
+    jaFailure?.takeIf { it.queueId == state.queueItemId }?.let { failure ->
+        val verifyPost = failure.postId?.takeIf { failure.reason == com.nanahoshi.audioplayer.japaneseasmr.JaFailure.VERIFY }
+        val close = { viewModel.client.dismissJaPlaybackFailure(failure) }
+        AlertDialog(
+            onDismissRequest = close,
+            text = { Text(stringResource(failure.messageRes)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    close()
+                    if (verifyPost != null) {
+                        onVerifyJapaneseAsmr(JapaneseAsmrClient.postUrl(verifyPost), failure.queueId, failure.mediaKey)
+                    }
+                }) {
+                    Text(stringResource(if (verifyPost != null) R.string.download_verify_continue else R.string.common_close))
+                }
+            },
+            dismissButton = {
+                if (verifyPost != null) TextButton(onClick = close) { Text(stringResource(R.string.common_close)) }
+            },
+        )
+    }
     val collectionLink by viewModel.collectionLink.collectAsStateWithLifecycle()
     val queue by viewModel.queue.collectAsStateWithLifecycle(emptyList())
     val remaining by viewModel.client.sleepRemainingMs.collectAsStateWithLifecycle()
@@ -251,6 +282,39 @@ fun NowPlayingScreen(
     val selected = subtitleSelection.queueItemId == state.queueItemId
     val loaded = if (selected) subtitleState.forItem(state.queueItemId) else null
     val current = queue.find { it.queueItemId == state.queueItemId }
+    var chapters by remember(current?.queueItemId) {
+        mutableStateOf(emptyList<com.nanahoshi.audioplayer.japaneseasmr.JaChapter>())
+    }
+    var chaptersOpen by remember(current?.queueItemId) { mutableStateOf(false) }
+    val chapter = chapters.lastOrNull { it.startMs <= state.positionMs }
+    LaunchedEffect(current?.queueItemId, current?.workno, current?.fileKey) {
+        chapters = viewModel.chapters(current)
+    }
+    if (chaptersOpen && chapters.isNotEmpty()) {
+        ModalBottomSheet(
+            onDismissRequest = { chaptersOpen = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            dragHandle = null,
+            sheetGesturesEnabled = false,
+        ) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(stringResource(R.string.player_chapters), Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
+                TextButton(onClick = { chaptersOpen = false }) { Text(stringResource(R.string.common_close)) }
+            }
+            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp)) {
+                items(chapters, key = { it.startMs }) { entry ->
+                    ListItem(
+                        headlineContent = { Text(entry.title) },
+                        supportingContent = { Text(com.nanahoshi.audioplayer.ui.formatDuration(entry.startMs)) },
+                        colors = androidx.compose.material3.ListItemDefaults.colors(
+                            containerColor = if (entry == chapter) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surface,
+                        ),
+                        modifier = Modifier.clickable { viewModel.client.seekTo(entry.startMs) },
+                    )
+                }
+            }
+        }
+    }
     val translationJobs by viewModel.translationJobs.collectAsStateWithLifecycle(emptyList())
     val subtitleTask = current?.let { row ->
         translationJobs.firstOrNull {
@@ -274,7 +338,7 @@ fun NowPlayingScreen(
     if (fullTitle) {
         AlertDialog(
             onDismissRequest = { fullTitle = false },
-            title = { Text("标题与作者") },
+            title = { Text(stringResource(R.string.player_edit_title)) },
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
                     Text(state.title, style = MaterialTheme.typography.titleMedium)
@@ -283,57 +347,66 @@ fun NowPlayingScreen(
                     }
                 }
             },
-            confirmButton = { TextButton(onClick = { fullTitle = false }) { Text("关闭") } },
+            confirmButton = { TextButton(onClick = { fullTitle = false }) { Text(stringResource(R.string.common_close)) } },
         )
     }
     if (discardPrompt) {
         AlertDialog(
             onDismissRequest = { discardPrompt = false },
-            text = { Text("删除这首的字幕？可以之后重新生成。") },
+            text = { Text(stringResource(R.string.player_delete_subtitle_confirm)) },
             confirmButton = {
                 TextButton(onClick = {
                     discardPrompt = false
                     showSubtitles = false
                     viewModel.discardSubtitles()
-                }) { Text("删除") }
+                }) { Text(stringResource(R.string.common_delete)) }
             },
             dismissButton = {
-                TextButton(onClick = { discardPrompt = false }) { Text("取消") }
+                TextButton(onClick = { discardPrompt = false }) { Text(stringResource(R.string.common_cancel)) }
             },
         )
     }
     if (confirmClear) {
         AlertDialog(
             onDismissRequest = { confirmClear = false },
-            text = { Text("清空当前播放队列？") },
+            text = { Text(stringResource(R.string.player_clear_queue_confirm)) },
             confirmButton = {
                 TextButton(onClick = {
                     confirmClear = false
                     viewModel.client.clearQueue()
                     closeQueue()
-                }) { Text("清空") }
+                }) { Text(stringResource(R.string.player_clear_queue)) }
             },
             dismissButton = {
-                TextButton(onClick = { confirmClear = false }) { Text("取消") }
+                TextButton(onClick = { confirmClear = false }) { Text(stringResource(R.string.common_cancel)) }
             },
         )
     }
     Box(Modifier.fillMaxSize()) {
         if (!state.hasMedia) {
             Column(Modifier.fillMaxSize()) {
-                AppTopBar(title = "正在播放", onBack = onBack)
+                AppTopBar(title = stringResource(R.string.player_now_playing), onBack = onBack)
                 EmptyState(
-                    title = "当前没有正在播放的音频",
-                    message = "从音频库点一首，或播放一个列表。",
+                    title = stringResource(R.string.player_empty_no_track_title),
+                    message = stringResource(R.string.player_empty_no_track_message),
                     modifier = Modifier.fillMaxSize(),
                 )
             }
         } else {
             Column(Modifier.fillMaxSize()) {
                 AppTopBar(
-                    title = "正在播放",
+                    title = stringResource(R.string.player_now_playing),
                     onBack = onBack,
                     actions = {
+                        current?.takeIf { it.source == TrackSource.JAPANESE_ASMR }?.let { row ->
+                            val postId = row.workno?.takeIf { id -> id.isNotEmpty() && id.all { it in '0'..'9' } }
+                                ?: return@let
+                            IconButton(onClick = {
+                                onVerifyJapaneseAsmr(JapaneseAsmrClient.postUrl(postId), row.queueItemId, row.fileKey)
+                            }) {
+                                Icon(Icons.Default.OpenInBrowser, contentDescription = stringResource(R.string.a11y_verify_current_post))
+                            }
+                        }
                         current?.let { SourceBadge(it.source, Modifier.padding(end = 12.dp)) }
                     },
                 )
@@ -365,7 +438,7 @@ fun NowPlayingScreen(
                             overflow = TextOverflow.Ellipsis,
                             textAlign = TextAlign.Center,
                             modifier = Modifier.padding(top = 16.dp)
-                                .clickable(onClickLabel = "查看完整标题") { fullTitle = true }
+                                .clickable(onClickLabel = stringResource(R.string.player_view_full_title)) { fullTitle = true }
                                 .padding(vertical = 4.dp),
                         )
                         Text(
@@ -383,7 +456,7 @@ fun NowPlayingScreen(
                                 .padding(vertical = 12.dp)
                                 .then(
                                     if (cues.isNotEmpty()) {
-                                        Modifier.clickable(onClickLabel = "查看字幕全文") { showSubtitles = true }
+                                        Modifier.clickable(onClickLabel = stringResource(R.string.player_view_full_subtitle)) { showSubtitles = true }
                                     } else {
                                         Modifier
                                     },
@@ -395,11 +468,11 @@ fun NowPlayingScreen(
                                 cues.isNotEmpty() -> Unit
                                 loaded?.generatedEmpty == true -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                     Text(
-                                        "未检测到人声",
+                                        stringResource(R.string.player_no_voice),
                                         textAlign = TextAlign.Center,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
-                                    TextButton(onClick = { discardPrompt = true }) { Text("删除字幕") }
+                                    TextButton(onClick = { discardPrompt = true }) { Text(stringResource(R.string.player_delete_subtitle)) }
                                 }
                                 loaded != null -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                     loaded.notice?.let { notice ->
@@ -423,7 +496,7 @@ fun NowPlayingScreen(
                                                 }
                                             },
                                         ) {
-                                            Text("生成字幕和翻译", textAlign = TextAlign.Center)
+                                            Text(stringResource(R.string.player_generate_subtitle_translate), textAlign = TextAlign.Center)
                                         }
                                         OutlinedButton(
                                             onClick = {
@@ -432,7 +505,7 @@ fun NowPlayingScreen(
                                                 }
                                             },
                                         ) {
-                                            Text("生成字幕", textAlign = TextAlign.Center)
+                                            Text(stringResource(R.string.player_generate_subtitle), textAlign = TextAlign.Center)
                                         }
                                     }
                                 }
@@ -444,11 +517,11 @@ fun NowPlayingScreen(
                     SeekBar(state, onSeek = viewModel.client::seekTo)
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = viewModel.client::previous, modifier = Modifier.size(56.dp)) {
-                            Icon(Icons.Default.SkipPrevious, contentDescription = "上一首", modifier = Modifier.size(32.dp))
+                            Icon(Icons.Default.SkipPrevious, contentDescription = stringResource(R.string.a11y_previous), modifier = Modifier.size(32.dp))
                         }
                         PlayButton(playing = state.isPlaying, onClick = viewModel.client::toggle)
                         IconButton(onClick = viewModel.client::next, modifier = Modifier.size(56.dp)) {
-                            Icon(Icons.Default.SkipNext, contentDescription = "下一首", modifier = Modifier.size(32.dp))
+                            Icon(Icons.Default.SkipNext, contentDescription = stringResource(R.string.a11y_next), modifier = Modifier.size(32.dp))
                         }
                     }
                     FlowRow(
@@ -458,22 +531,29 @@ fun NowPlayingScreen(
                     ) {
                         SecondaryAction(
                             icon = { Icon(Icons.Outlined.Timer, contentDescription = null) },
-                            label = remaining?.let { formatDuration(it) } ?: "定时关闭",
+                            label = remaining?.let { formatDuration(it) } ?: stringResource(R.string.player_sleep_timer),
                             onClick = { sleepDialog = true },
                         )
                         if (remaining != null) {
                             SecondaryAction(
                                 icon = { Text("×", style = MaterialTheme.typography.titleMedium) },
-                                label = "取消定时",
+                                label = stringResource(R.string.player_cancel_timer),
                                 onClick = viewModel.client::cancelSleepTimer,
                             )
                         }
                         SecondaryAction(
                             icon = { Icon(Icons.AutoMirrored.Filled.QueueMusic, contentDescription = null) },
-                            label = "队列",
+                            label = stringResource(R.string.player_queue),
                             onClick = { queueExpanded = true },
                         )
                         PlayerCollectionAction(current, collectionLink, onOpenCollection)
+                        if (chapters.isNotEmpty()) SecondaryAction(
+                            icon = { Icon(Icons.Default.CollectionsBookmark, contentDescription = null) },
+                            label = chapter?.let { stringResource(R.string.player_chapter_label, it.title) } ?: stringResource(R.string.player_chapters),
+                            onClick = { chaptersOpen = true },
+                            modifier = Modifier.widthIn(max = 240.dp),
+                            maxLines = 2,
+                        )
                     }
                 }
             }
@@ -528,14 +608,18 @@ fun NowPlayingScreen(
                 Modifier.fillMaxWidth().padding(horizontal = 8.dp).padding(top = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("播放队列", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f).padding(start = 16.dp))
-                TextButton(onClick = { confirmClear = true }, enabled = queue.isNotEmpty()) { Text("清空") }
+                Text(stringResource(R.string.player_queue_title), style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f).padding(start = 16.dp))
+                TextButton(onClick = { confirmClear = true }, enabled = queue.isNotEmpty()) { Text(stringResource(R.string.player_clear_queue)) }
                 IconButton(onClick = { closeQueue() }) {
-                    Icon(Icons.Default.Close, contentDescription = "关闭")
+                    Icon(Icons.Default.Close, contentDescription = stringResource(R.string.a11y_close))
                 }
             }
             if (queue.isEmpty()) {
-                EmptyState(title = "队列是空的", modifier = Modifier.padding(bottom = 24.dp))
+                EmptyState(
+                    title = stringResource(R.string.player_queue_empty_title),
+                    message = stringResource(R.string.player_queue_empty_message),
+                    modifier = Modifier.padding(bottom = 24.dp),
+                )
             } else {
                 LazyColumn(
                     state = listState,
@@ -550,13 +634,13 @@ fun NowPlayingScreen(
                                 leadingContent = {
                                     Icon(
                                         Icons.Default.DragHandle,
-                                        contentDescription = "拖动排序",
+                                        contentDescription = stringResource(R.string.a11y_drag_sort),
                                         modifier = Modifier.size(48.dp).draggableHandle().padding(12.dp),
                                     )
                                 },
                                 trailingContent = {
                                     IconButton(onClick = { viewModel.client.remove(index, item.queueItemId) }) {
-                                        Icon(Icons.Default.Delete, contentDescription = "从队列移除")
+                                        Icon(Icons.Default.Delete, contentDescription = stringResource(R.string.a11y_queue_remove))
                                     }
                                 },
                                 modifier = Modifier.clickable { viewModel.client.playQueueItem(item.queueItemId) },
@@ -615,7 +699,7 @@ private fun PlayButton(playing: Boolean, onClick: () -> Unit) {
     ) {
         Icon(
             if (playing) Icons.Default.Pause else Icons.Default.PlayArrow,
-            contentDescription = if (playing) "暂停" else "播放",
+            contentDescription = stringResource(if (playing) R.string.a11y_pause else R.string.a11y_play),
             tint = MaterialTheme.colorScheme.onPrimary,
             modifier = Modifier.size(36.dp),
         )
@@ -631,7 +715,7 @@ internal fun PlayerCollectionAction(
     val collection = com.nanahoshi.audioplayer.playback.playingBiliCollection(row, link) ?: return
     SecondaryAction(
         icon = { Icon(Icons.Default.CollectionsBookmark, contentDescription = null) },
-        label = "合集：${collection.title}",
+        label = stringResource(R.string.player_collection_label, collection.title),
         onClick = { onOpen(collection) },
         modifier = Modifier.widthIn(max = 240.dp),
         maxLines = 2,
@@ -707,22 +791,22 @@ internal fun SubtitleReader(
     }
     Column(Modifier.fillMaxSize()) {
         AppTopBar(
-            title = "字幕",
+            title = stringResource(R.string.player_subtitles),
             onBack = onBack,
             actions = {
                 when {
-                    polishing -> TextButton(onClick = onStopPolish) { Text("中止") }
-                    translating -> TextButton(onClick = onStop) { Text("中止") }
-                    cues.hasTranslation() -> TextButton(onClick = onPolish) { Text("润色") }
-                    cues.isNotEmpty() && canTranslate -> TextButton(onClick = onTranslate) { Text("生成翻译") }
+                    polishing -> TextButton(onClick = onStopPolish) { Text(stringResource(R.string.common_stop)) }
+                    translating -> TextButton(onClick = onStop) { Text(stringResource(R.string.common_stop)) }
+                    cues.hasTranslation() -> TextButton(onClick = onPolish) { Text(stringResource(R.string.player_polish)) }
+                    cues.isNotEmpty() && canTranslate -> TextButton(onClick = onTranslate) { Text(stringResource(R.string.player_translate)) }
                 }
                 if (canDelete) {
                     IconButton(onClick = { menu = true }) {
-                        Icon(Icons.Default.MoreVert, contentDescription = "更多")
+                        Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.a11y_subtitle_actions))
                     }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                         DropdownMenuItem(
-                            text = { Text("删除", color = MaterialTheme.colorScheme.error) },
+                            text = { Text(stringResource(R.string.common_delete), color = MaterialTheme.colorScheme.error) },
                             onClick = {
                                 menu = false
                                 onDelete()
@@ -738,16 +822,19 @@ internal fun SubtitleReader(
                     selected = chinese,
                     onClick = onChinese,
                     shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-                ) { Text("中文") }
+                ) { Text(stringResource(R.string.player_chinese)) }
                 SegmentedButton(
                     selected = !chinese,
                     onClick = onJapanese,
                     shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-                ) { Text("日文") }
+                ) { Text(stringResource(R.string.player_japanese)) }
             }
         }
         if (cues.isEmpty()) {
-            EmptyState(title = "这首没有字幕")
+            EmptyState(
+                title = stringResource(R.string.player_subtitle_empty_title),
+                message = stringResource(R.string.player_subtitle_empty_message),
+            )
         } else {
             Box(Modifier.weight(1f).fillMaxWidth()) {
             LazyColumn(
@@ -779,7 +866,7 @@ internal fun SubtitleReader(
                 FilledTonalButton(
                     onClick = follow::resume,
                     modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp),
-                ) { Text("回到当前句") }
+                ) { Text(stringResource(R.string.player_back_to_current)) }
             }
             }
         }
@@ -799,20 +886,20 @@ private fun SleepTimerDialog(onDismiss: () -> Unit, onStart: (Long) -> Unit) {
     var seconds by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("定时关闭") },
+        title = { Text(stringResource(R.string.player_sleep_timer)) },
         text = {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
                     value = minutes,
                     onValueChange = { minutes = it.filter(Char::isDigit).take(4) },
-                    label = { Text("分") },
+                    label = { Text(stringResource(R.string.player_timer_minutes)) },
                     singleLine = true,
                     modifier = Modifier.weight(1f),
                 )
                 OutlinedTextField(
                     value = seconds,
                     onValueChange = { seconds = it.filter(Char::isDigit).take(2) },
-                    label = { Text("秒") },
+                    label = { Text(stringResource(R.string.player_timer_seconds)) },
                     singleLine = true,
                     modifier = Modifier.weight(1f),
                 )
@@ -824,9 +911,9 @@ private fun SleepTimerDialog(onDismiss: () -> Unit, onStart: (Long) -> Unit) {
                 val secondValue = (seconds.toLongOrNull() ?: 0L).coerceIn(0L, 59L)
                 val totalMs = minuteValue * 60_000L + secondValue * 1000L
                 if (totalMs > 0L) onStart(totalMs)
-            }) { Text("开始倒计时") }
+            }) { Text(stringResource(R.string.player_start_timer)) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) } },
     )
 }
 
@@ -835,26 +922,26 @@ private fun WhisperPromptDialog(viewModel: PlayerViewModel) {
     when (val prompt = viewModel.whisperPrompt) {
         WhisperPrompt.NeedSettings -> AlertDialog(
             onDismissRequest = viewModel::dismissWhisperPrompt,
-            text = { Text("请先在「设置 → 听写和翻译」保存听写设置（线上模型填 API Key，自部署模型填地址和 API Key）。") },
+            text = { Text(stringResource(R.string.player_whisper_setup_help)) },
             confirmButton = {
-                TextButton(onClick = viewModel::dismissWhisperPrompt) { Text("知道了") }
+                TextButton(onClick = viewModel::dismissWhisperPrompt) { Text(stringResource(R.string.player_got_it)) }
             },
         )
         is WhisperPrompt.NeedModelDownload -> AlertDialog(
             onDismissRequest = viewModel::dismissWhisperPrompt,
-            text = { Text(com.nanahoshi.audioplayer.data.missingOfflineWhisperModelMessage(prompt.model)) },
+            text = { Text(com.nanahoshi.audioplayer.data.missingOfflineWhisperModelMessage(prompt.model).asString()) },
             confirmButton = {
-                TextButton(onClick = viewModel::dismissWhisperPrompt) { Text("知道了") }
+                TextButton(onClick = viewModel::dismissWhisperPrompt) { Text(stringResource(R.string.player_got_it)) }
             },
         )
         is WhisperPrompt.NeedDownload -> AlertDialog(
             onDismissRequest = viewModel::dismissWhisperPrompt,
-            text = { Text("生成字幕需要先下载这首歌的音频，是否下载？") },
+            text = { Text(stringResource(R.string.player_download_for_subtitle)) },
             confirmButton = {
-                TextButton(onClick = viewModel::confirmWhisperDownload) { Text("下载") }
+                TextButton(onClick = viewModel::confirmWhisperDownload) { Text(stringResource(R.string.common_download)) }
             },
             dismissButton = {
-                TextButton(onClick = viewModel::dismissWhisperPrompt) { Text("取消") }
+                TextButton(onClick = viewModel::dismissWhisperPrompt) { Text(stringResource(R.string.common_cancel)) }
             },
         )
         null -> Unit
@@ -862,9 +949,9 @@ private fun WhisperPromptDialog(viewModel: PlayerViewModel) {
     if (viewModel.translatePrompt) {
         AlertDialog(
             onDismissRequest = viewModel::dismissTranslatePrompt,
-            text = { Text("请先在「设置 → 听写和翻译」选择翻译平台并填写 API Key。") },
+            text = { Text(stringResource(R.string.player_translate_setup_help)) },
             confirmButton = {
-                TextButton(onClick = viewModel::dismissTranslatePrompt) { Text("知道了") }
+                TextButton(onClick = viewModel::dismissTranslatePrompt) { Text(stringResource(R.string.player_got_it)) }
             },
         )
     }

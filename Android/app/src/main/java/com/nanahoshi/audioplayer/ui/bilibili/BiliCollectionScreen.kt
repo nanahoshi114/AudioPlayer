@@ -1,5 +1,8 @@
 package com.nanahoshi.audioplayer.ui.bilibili
 
+import com.nanahoshi.audioplayer.bilibili.BiliCollectionKind
+import com.nanahoshi.audioplayer.R
+import androidx.compose.ui.res.stringResource
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
@@ -47,8 +50,10 @@ fun BiliCollectionScreen(
     val state = rememberLazyListState()
     val collection = model.collection
     Column(Modifier.fillMaxSize()) {
-        AppTopBar(collection?.label ?: "合集", onBack = back, actions = {
-            IconButton(onClick = { menu = true }, enabled = !model.busy) { Icon(Icons.Default.MoreVert, "更多") }
+        AppTopBar(stringResource(collection?.kind?.labelRes ?: R.string.bilibili_collection_fallback), onBack = back, actions = {
+            IconButton(onClick = { menu = true }, enabled = !model.busy) {
+                Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.bilibili_collection_actions))
+            }
             DropdownMenu(menu, { menu = false }) {
                 CollectionMenuItems(model.savedId != null,
                     onAction = { action -> menu = false; model.prepare(action) },
@@ -59,7 +64,7 @@ fun BiliCollectionScreen(
             LinearProgressIndicator(Modifier.fillMaxWidth())
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(model.progress, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                if (!model.committing) TextButton(onClick = { if (model.preparing) model.cancelPreparation() else model.stopRefresh() }) { Text("中止") }
+                if (!model.committing) TextButton(onClick = { if (model.preparing) model.cancelPreparation() else model.stopRefresh() }) { Text(stringResource(R.string.common_stop)) }
             }
         }
         LazyColumn(state = state, modifier = Modifier.weight(1f)) {
@@ -69,39 +74,57 @@ fun BiliCollectionScreen(
                         CoverImage(collection.coverUrl, size = 88.dp)
                         Column(Modifier.weight(1f).padding(start = 12.dp)) {
                             Text(collection.title, style = MaterialTheme.typography.titleLarge)
-                            Text("${collection.label} · UID ${collection.mid}", style = MaterialTheme.typography.bodySmall)
-                            Text(if (model.complete) "${model.videos.size} 个视频" else "已读取 ${model.videos.size} 个视频 · 目录尚未完整",
+                            Text(stringResource(R.string.bilibili_collection_owner, stringResource(collection.kind.labelRes), collection.mid), style = MaterialTheme.typography.bodySmall)
+                            Text(
+                                stringResource(
+                                    if (model.complete) R.string.bilibili_video_count
+                                    else R.string.bilibili_video_count_incomplete,
+                                    model.videos.size,
+                                ),
                                 style = MaterialTheme.typography.bodySmall)
                         }
                     }
                     if (collection.description.isNotBlank()) Text(collection.description, Modifier.padding(horizontal = 16.dp), maxLines = 4, overflow = TextOverflow.Ellipsis)
                     Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (model.savedId == null) TextButton(onClick = model::bookmark, enabled = !model.busy) { Text("收藏在线列表") }
-                        else Text("已收藏在线列表", Modifier.padding(vertical = 12.dp), style = MaterialTheme.typography.bodySmall)
-                        TextButton(onClick = model::refresh, enabled = !model.busy && !model.loading) { Text("刷新") }
+                        if (model.savedId == null) TextButton(onClick = model::bookmark, enabled = !model.busy) { Text(stringResource(R.string.bilibili_bookmark)) }
+                        else Text(stringResource(R.string.bilibili_bookmarked), Modifier.padding(vertical = 12.dp), style = MaterialTheme.typography.bodySmall)
+                        TextButton(onClick = model::refresh, enabled = !model.busy && !model.loading) { Text(stringResource(R.string.bilibili_refresh_catalogue)) }
                     }
                     CollectionPlaybackActions(model.selected.isNotEmpty(), !model.busy, onAction = { model.prepare(it) })
                 }
                 model.error?.let {
                     Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error)
-                    TextButton(onClick = model::refresh, enabled = !model.busy && !model.loading) { Text("重试读取目录") }
+                    TextButton(onClick = model::refresh, enabled = !model.busy && !model.loading) { Text(stringResource(R.string.bilibili_retry_read)) }
                 }
-                if (model.complete && model.videos.isEmpty()) Text("这个合集暂时没有视频", Modifier.padding(16.dp))
+                if (model.complete && model.videos.isEmpty()) Text(
+                    stringResource(
+                        when (collection?.kind) {
+                            BiliCollectionKind.SEASON -> R.string.bilibili_collection_empty_season
+                            BiliCollectionKind.SERIES -> R.string.bilibili_collection_empty_series
+                            null -> R.string.bilibili_collection_empty_online
+                        },
+                    ),
+                    Modifier.padding(16.dp),
+                )
             }
             item(key = "selection") {
                 Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(if (model.selected.isEmpty()) "视频" else "已选 ${model.selected.size} 个", Modifier.weight(1f))
+                        Text(
+                            if (model.selected.isEmpty()) stringResource(R.string.bilibili_videos)
+                            else stringResource(R.string.bilibili_selected_count, model.selected.size),
+                            Modifier.weight(1f),
+                        )
                         val allSelected = model.videos.isNotEmpty() && model.selected.size == model.videos.size
                         TextButton(onClick = model::selectAll, enabled = !model.busy) {
-                            Text(if (allSelected) "取消全选" else "全选已加载")
+                            Text(stringResource(if (allSelected) R.string.bilibili_deselect_all else R.string.bilibili_select_all_loaded))
                         }
                     }
                     CollectionSortSelector(model.sort, model::updateSort, enabled = !model.busy)
                     if (model.selected.isNotEmpty()) FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = { model.prepareSelection(CollectionAction.PLAY) }, enabled = !model.busy) { Text("播放") }
-                        TextButton(onClick = { model.prepareSelection(CollectionAction.APPEND) }, enabled = !model.busy) { Text("加入播放队列") }
-                        TextButton(onClick = { model.prepareSelection(CollectionAction.SAVE) }, enabled = !model.busy) { Text("加入音频库") }
+                        TextButton(onClick = { model.prepareSelection(CollectionAction.PLAY) }, enabled = !model.busy) { Text(stringResource(R.string.bilibili_play_selected)) }
+                        TextButton(onClick = { model.prepareSelection(CollectionAction.APPEND) }, enabled = !model.busy) { Text(stringResource(R.string.bilibili_add_queue)) }
+                        TextButton(onClick = { model.prepareSelection(CollectionAction.SAVE) }, enabled = !model.busy) { Text(stringResource(R.string.common_add_to_library)) }
                     }
                 }
             }
@@ -114,9 +137,9 @@ fun BiliCollectionScreen(
                         else Checkbox(video.bvid in model.selected, onCheckedChange = { if (!model.busy) model.toggle(video.bvid) })
                     }, trailingContent = {
                         Box {
-                            IconButton(onClick = { rowMenu = true }, enabled = !model.busy) { Icon(Icons.Default.MoreVert, "视频操作") }
+                            IconButton(onClick = { rowMenu = true }, enabled = !model.busy) { Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.bilibili_video_actions)) }
                             DropdownMenu(rowMenu, { rowMenu = false }) {
-                                DropdownMenuItem(text = { Text("加入音频库") }, onClick = {
+                                DropdownMenuItem(text = { Text(stringResource(R.string.common_add_to_library)) }, onClick = {
                                     rowMenu = false
                                     model.prepare(CollectionAction.SAVE, listOf(video))
                                 })
@@ -131,37 +154,37 @@ fun BiliCollectionScreen(
     model.pending?.let { prepared ->
         CollectionFailureDialog(prepared, model::continuePending, model::retryPending, model::cancelPreparation)
     }
-    if (model.singleParts.isNotEmpty()) AlertDialog(onDismissRequest = model::dismissParts, title = { Text("选择分 P") },
+    if (model.singleParts.isNotEmpty()) AlertDialog(onDismissRequest = model::dismissParts, title = { Text(stringResource(R.string.bilibili_select_parts)) },
         text = { LazyColumn { items(model.singleParts, key = { it.cid }) { part -> TextButton(onClick = { model.playPart(part) }) { Text("P${part.page} · ${part.title}") } } } },
-        confirmButton = { TextButton(onClick = model::dismissParts) { Text("取消") } })
+        confirmButton = { TextButton(onClick = model::dismissParts) { Text(stringResource(R.string.common_cancel)) } })
     model.copyName?.let { initialName ->
         var name by remember(initialName) { mutableStateOf(initialName) }
-        AlertDialog(onDismissRequest = model::dismissCopy, title = { Text("复制为普通播放列表") },
+        AlertDialog(onDismissRequest = model::dismissCopy, title = { Text(stringResource(R.string.bilibili_copy_playlist)) },
             text = {
                 Column {
-                    OutlinedTextField(name, { name = it }, singleLine = true, label = { Text("列表名称") })
-                    Text("不会随 B 站更新，之后可以自行编辑。", style = MaterialTheme.typography.bodySmall)
+                    OutlinedTextField(name, { name = it }, singleLine = true, label = { Text(stringResource(R.string.bilibili_playlist_name)) })
+                    Text(stringResource(R.string.bilibili_copy_help), style = MaterialTheme.typography.bodySmall)
                 }
             },
-            confirmButton = { TextButton(onClick = { model.confirmCopy(name) }, enabled = name.isNotBlank()) { Text("下一步：选择内容") } },
-            dismissButton = { TextButton(onClick = model::dismissCopy) { Text("取消") } })
+            confirmButton = { TextButton(onClick = { model.confirmCopy(name) }, enabled = name.isNotBlank()) { Text(stringResource(R.string.bilibili_next_choose)) } },
+            dismissButton = { TextButton(onClick = model::dismissCopy) { Text(stringResource(R.string.common_cancel)) } })
     }
-    if (removing) AlertDialog(onDismissRequest = { removing = false }, title = { Text("取消收藏在线列表") },
-        text = { Text("仅移除在线列表收藏和本地目录缓存；已加入音频库的曲目、下载文件及当前队列会保留。") },
-        confirmButton = { TextButton(onClick = { removing = false; model.unbookmark() }) { Text("取消收藏") } },
-        dismissButton = { TextButton(onClick = { removing = false }) { Text("保留收藏") } })
+    if (removing) AlertDialog(onDismissRequest = { removing = false }, title = { Text(stringResource(R.string.bilibili_remove_playlist)) },
+        text = { Text(stringResource(R.string.bilibili_remove_playlist_message)) },
+        confirmButton = { TextButton(onClick = { removing = false; model.unbookmark() }) { Text(stringResource(R.string.bilibili_remove)) } },
+        dismissButton = { TextButton(onClick = { removing = false }) { Text(stringResource(R.string.common_keep)) } })
 }
 
 /** 路由参数解码失败时的兜底页：保留顶栏与返回，不再白屏。 */
 @Composable
 internal fun BiliCollectionRouteError(onBack: () -> Unit) {
     Column(Modifier.fillMaxSize()) {
-        AppTopBar("B 站合集", onBack = onBack)
+        AppTopBar(stringResource(R.string.bilibili_collection_title), onBack = onBack)
         EmptyState(
-            title = "无法打开这个合集",
-            message = "链接参数无效，请返回后重试",
+            title = stringResource(R.string.bilibili_collection_open_failed_title),
+            message = stringResource(R.string.bilibili_collection_open_failed_message),
             icon = Icons.Outlined.ErrorOutline,
-            actionLabel = "返回",
+            actionLabel = stringResource(R.string.common_back),
             onAction = onBack,
         )
     }
@@ -175,22 +198,22 @@ internal fun CollectionFailureDialog(
     onCancel: () -> Unit,
 ) {
     AlertDialog(onDismissRequest = onCancel,
-        title = { Text(if (prepared.details.isEmpty()) "视频读取失败" else "部分视频读取失败") },
+        title = { Text(stringResource(if (prepared.details.isEmpty()) R.string.bilibili_video_read_failed else R.string.bilibili_video_partial_read_failed)) },
         text = { LazyColumn { items(prepared.failed) { Text(it, Modifier.padding(vertical = 4.dp)) } } },
         confirmButton = {
             if (prepared.details.isNotEmpty()) {
-                TextButton(onClick = onContinue) { Text("继续处理其余 ${prepared.details.size} 个视频") }
+                TextButton(onClick = onContinue) { Text(stringResource(R.string.bilibili_continue_remaining, prepared.details.size)) }
             }
         },
-        dismissButton = { Row { TextButton(onClick = onRetry) { Text("重试") }; TextButton(onClick = onCancel) { Text("取消") } } })
+        dismissButton = { Row { TextButton(onClick = onRetry) { Text(stringResource(R.string.common_retry)) }; TextButton(onClick = onCancel) { Text(stringResource(R.string.common_cancel)) } } })
 }
 
 @Composable
 internal fun CollectionPlaybackActions(selecting: Boolean, enabled: Boolean, onAction: (CollectionAction) -> Unit) {
     if (selecting) return
     Row(Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Button(onClick = { onAction(CollectionAction.PLAY) }, enabled = enabled, modifier = Modifier.weight(1f)) { Text("按当前排序播放全部") }
-        OutlinedButton(onClick = { onAction(CollectionAction.APPEND) }, enabled = enabled, modifier = Modifier.weight(1f)) { Text("加入播放队列") }
+        Button(onClick = { onAction(CollectionAction.PLAY) }, enabled = enabled, modifier = Modifier.weight(1f)) { Text(stringResource(R.string.bilibili_play_all_sorted)) }
+        OutlinedButton(onClick = { onAction(CollectionAction.APPEND) }, enabled = enabled, modifier = Modifier.weight(1f)) { Text(stringResource(R.string.bilibili_add_queue)) }
     }
 }
 
@@ -199,15 +222,15 @@ internal fun CollectionSortSelector(sort: CollectionSort, onSort: (CollectionSor
     var expanded by remember { mutableStateOf(false) }
     Box {
         TextButton(onClick = { expanded = true }, enabled = enabled) {
-            Text("排序：${sort.label}")
+            Text(stringResource(R.string.bilibili_sort_label, stringResource(sort.labelRes)))
             Icon(Icons.Default.ArrowDropDown, contentDescription = null)
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             for (option in CollectionSort.entries) {
-                DropdownMenuItem(text = { Text(option.label) }, onClick = {
+                DropdownMenuItem(text = { Text(stringResource(option.labelRes)) }, onClick = {
                     expanded = false
                     onSort(option)
-                }, trailingIcon = { if (option == sort) Icon(Icons.Default.Check, contentDescription = "已选") })
+                }, trailingIcon = { if (option == sort) Icon(Icons.Default.Check, contentDescription = stringResource(R.string.a11y_selected)) })
             }
         }
     }
@@ -215,9 +238,9 @@ internal fun CollectionSortSelector(sort: CollectionSort, onSort: (CollectionSor
 
 @Composable
 internal fun CollectionMenuItems(saved: Boolean, onAction: (CollectionAction) -> Unit, onUnbookmark: () -> Unit) {
-    for ((label, action) in listOf("加入音频库" to CollectionAction.SAVE,
-        "复制为普通播放列表" to CollectionAction.COPY)) {
+    for ((label, action) in listOf(stringResource(R.string.bilibili_add_to_library) to CollectionAction.SAVE,
+        stringResource(R.string.bilibili_copy_playlist) to CollectionAction.COPY)) {
         DropdownMenuItem(text = { Text(label) }, onClick = { onAction(action) })
     }
-    if (saved) DropdownMenuItem(text = { Text("取消收藏") }, onClick = onUnbookmark)
+    if (saved) DropdownMenuItem(text = { Text(stringResource(R.string.bilibili_remove_playlist)) }, onClick = onUnbookmark)
 }

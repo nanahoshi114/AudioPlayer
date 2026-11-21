@@ -1,5 +1,8 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.text.UserFacingException
+import com.nanahoshi.audioplayer.R
+import com.nanahoshi.audioplayer.text.TextRef
 import android.content.Context
 import androidx.room.withTransaction
 import com.nanahoshi.audioplayer.bilibili.*
@@ -55,7 +58,9 @@ class BiliCollectionRepository(
     suspend fun refresh(collection: BiliCollection, id: Long?, valid: () -> Boolean,
                         progress: (List<BiliVideoHit>) -> Unit): BiliCollectionPage {
         val revision = if (id == null) null else db.withTransaction {
-            check(db.collections().get(id) != null) { "合集已取消收藏" }
+            if (db.collections().get(id) == null) {
+                throw UserFacingException(TextRef.Res(R.string.bilibili_error_collection_removed))
+            }
             db.collections().invalidate(id)
             db.collections().get(id)!!.revision
         }
@@ -63,7 +68,9 @@ class BiliCollectionRepository(
         coroutineContext.ensureActive()
         if (id != null && snapshot.complete) db.withTransaction {
             val current = db.collections().get(id)
-            check(valid() && current?.revision == revision) { "合集读取已过时，请重试" }
+            if (!valid() || current?.revision != revision) {
+                throw UserFacingException(TextRef.Res(R.string.bilibili_error_collection_obsolete))
+            }
             val old = db.collections().videos(id).associateBy { it.bvid }
             db.collections().clearVideos(id)
             db.collections().insertVideos(snapshot.videos.mapIndexed { position, video ->
@@ -93,7 +100,7 @@ class BiliCollectionRepository(
                 }
             }
             throw BilibiliException((error as? BilibiliException)?.code ?: 0,
-                (error as? BilibiliException)?.message ?: "无法读取分 P；离线播放需要之前读取过的分 P 信息和本地音轨")
+                (error as? BilibiliException)?.userText ?: TextRef.Res(R.string.bilibili_error_collection_parts_offline))
         }
     }
 

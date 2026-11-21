@@ -1,8 +1,13 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.data.db.FolderEntity
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.text.UserFacingError
 
-class LibraryRemovalRejected : IllegalStateException("作品内部的内容不能单独移除，请移除整部作品")
+class LibraryRemovalRejected(
+    override val userText: TextRef = TextRef.Res(R.string.library_removal_rejected),
+) : IllegalStateException(userText.debugString()), UserFacingError
 
 class LibraryRemovalPolicy(folders: List<FolderEntity>) {
     private val byId = folders.associateBy { it.id }

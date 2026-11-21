@@ -1,5 +1,8 @@
 package com.nanahoshi.audioplayer.dlsite
 
+import com.nanahoshi.audioplayer.data.RemoteTextPreview
+import com.nanahoshi.audioplayer.data.readRemoteTextPreview
+import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.data.withResponse
 
 import com.nanahoshi.audioplayer.asmr.WorkFacts
@@ -25,9 +28,20 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.net.URLEncoder
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.text.UserFacingError
 import java.util.concurrent.TimeUnit
 
-class DlsiteException(message: String, internal val statusCode: Int? = null) : Exception(message)
+enum class DlsiteFailureKind { AUTH, OTHER }
+
+class DlsiteException(
+    override val userText: TextRef,
+    internal val statusCode: Int? = null,
+    internal val kind: DlsiteFailureKind = if (statusCode == 401) DlsiteFailureKind.AUTH else DlsiteFailureKind.OTHER,
+    cause: Throwable? = null,
+) : Exception(userText.debugString(), cause), UserFacingError {
+    constructor(message: String, statusCode: Int? = null) : this(TextRef.Raw(message), statusCode)
+}
 
 data class DlsiteHit(
     val workno: String,
@@ -244,13 +258,13 @@ class DlsiteClient(private val credentials: CredentialStore) {
                 trials = trials,
             )
         } else {
-            throw DlsiteException("DLsite 上没有这个作品")
+            throw DlsiteException(TextRef.Res(R.string.dlsite_error_work_missing))
         }
     }
 
     suspend fun loginWithCookie(raw: String, loadPurchases: Boolean = true) = withContext(Dispatchers.IO) {
         val cookie = mergeDlsiteCookies(raw)
-        if (cookie.isBlank() || !cookie.contains("=")) throw DlsiteException("请粘贴 Cookie")
+        if (cookie.isBlank() || !cookie.contains("=")) throw DlsiteException(TextRef.Res(R.string.dlsite_error_cookie_required))
         credentials.saveDlsiteCookie(withAdult(cookie))
         try {
             execute(request("https://play.dlsite.com/login/", PLAY_REFERER, acceptJson = false, authed = true))
@@ -352,7 +366,7 @@ class DlsiteClient(private val credentials: CredentialStore) {
 
     fun playCookie(): String? = playAccessCookie ?: cookieHeader()
 
-    suspend fun readText(url: String, referer: String, authed: Boolean, limit: Int = TEXT_LIMIT): String =
+    internal suspend fun readText(url: String, referer: String, authed: Boolean, limit: Int = TEXT_LIMIT): RemoteTextPreview =
         withContext(Dispatchers.IO) {
             val request = request(
                 url,
@@ -362,19 +376,9 @@ class DlsiteClient(private val credentials: CredentialStore) {
                 cookieOverride = if (authed) playCookie() else null,
             )
             client.newCall(request).execute().use { response ->
-                if (response.code == 401) throw DlsiteException("登录已失效，请重新登录")
-                if (!response.isSuccessful) throw DlsiteException("无法打开这个文件")
-                val input = response.body?.byteStream() ?: return@withContext ""
-                val buffer = ByteArray(limit + 1)
-                var total = 0
-                while (total < buffer.size) {
-                    val read = input.read(buffer, total, buffer.size - total)
-                    if (read < 0) break
-                    total += read
-                }
-                val clipped = total > limit
-                val text = buffer.copyOf(minOf(total, limit)).toString(Charsets.UTF_8)
-                if (clipped) text + "\n…（只显示前面一段）" else text
+                if (response.code == 401) throw DlsiteException(TextRef.Res(R.string.dlsite_error_login_expired), statusCode = 401)
+                if (!response.isSuccessful) throw DlsiteException(TextRef.Res(R.string.dlsite_error_file_open))
+                response.body?.byteStream()?.readRemoteTextPreview(limit) ?: RemoteTextPreview("")
             }
         }
 
@@ -403,11 +407,11 @@ class DlsiteClient(private val credentials: CredentialStore) {
             try {
                 return signOnce(id)
             } catch (error: DlsiteException) {
-                if (error.message?.contains("登录") == true) throw error
+                if (error.kind == DlsiteFailureKind.AUTH) throw error
                 last = error
             }
         }
-        throw last ?: DlsiteException("没有可播放的地址")
+        throw last ?: DlsiteException(TextRef.Res(R.string.dlsite_error_no_play_url))
     }
 
     private suspend fun signOnce(workno: String): DownloadToken {
@@ -419,11 +423,11 @@ class DlsiteClient(private val credentials: CredentialStore) {
         )
         return client.newCall(call).withResponse { response ->
             val body = response.body?.string().orEmpty()
-            if (response.code == 401) throw DlsiteException("登录已失效，请重新登录")
-            if (!response.isSuccessful) throw DlsiteException("暂时无法连接 DLsite")
+            if (response.code == 401) throw DlsiteException(TextRef.Res(R.string.dlsite_error_login_expired), statusCode = 401)
+            if (!response.isSuccessful) throw DlsiteException(TextRef.Res(R.string.dlsite_error_connection))
             val root = JSONObject(body)
             val url = root.optString("url")
-            if (url.isBlank()) throw DlsiteException("没有可播放的地址")
+            if (url.isBlank()) throw DlsiteException(TextRef.Res(R.string.dlsite_error_no_play_url))
             val directory = if (url.endsWith("/")) url else "$url/"
             val extras = buildList {
                 add(cookiesOf(root.optJSONObject("cookies")))
@@ -550,7 +554,7 @@ class DlsiteClient(private val credentials: CredentialStore) {
         if (acceptJson) builder.header("Accept", "application/json")
         val cookie = when {
             !cookieOverride.isNullOrBlank() -> cookieOverride
-            authed -> cookieHeader() ?: throw DlsiteException("请先登录 DLsite")
+            authed -> cookieHeader() ?: throw DlsiteException(TextRef.Res(R.string.dlsite_error_login_required), statusCode = 401)
             else -> withAdult(credentials.dlsiteCookie().orEmpty())
         }
         if (cookie.isNotBlank()) builder.header("Cookie", cookie)
@@ -561,14 +565,14 @@ class DlsiteClient(private val credentials: CredentialStore) {
         try {
             client.newCall(request).execute().use { response ->
                 val body = response.body?.string().orEmpty()
-                if (response.code == 401) throw DlsiteException("登录已失效，请重新登录", response.code)
-                if (!response.isSuccessful) throw DlsiteException("暂时无法连接 DLsite", response.code)
+                if (response.code == 401) throw DlsiteException(TextRef.Res(R.string.dlsite_error_login_expired), response.code)
+                if (!response.isSuccessful) throw DlsiteException(TextRef.Res(R.string.dlsite_error_connection), response.code)
                 return body
             }
         } catch (error: DlsiteException) {
             throw error
         } catch (_: IOException) {
-            throw DlsiteException("暂时无法连接 DLsite")
+            throw DlsiteException(TextRef.Res(R.string.dlsite_error_connection))
         }
     }
 
@@ -598,7 +602,7 @@ class DlsiteClient(private val credentials: CredentialStore) {
             if (match != null) return match.value.uppercase()
             val digits = input.filter { it.isDigit() }
             if (digits.isNotEmpty()) return "RJ$digits"
-            throw DlsiteException("没有作品编号")
+            throw DlsiteException(TextRef.Res(R.string.dlsite_error_work_id_missing))
         }
 
         internal fun worknoCandidates(workno: String): List<String> {

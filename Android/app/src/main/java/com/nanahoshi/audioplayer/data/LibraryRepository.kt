@@ -1,10 +1,27 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.text.UserFacingException
+import com.nanahoshi.audioplayer.data.db.JapaneseAsmrMediaEntity
+import com.nanahoshi.audioplayer.data.db.JapaneseAsmrPostEntity
+import com.nanahoshi.audioplayer.japaneseasmr.JaArticle
+import com.nanahoshi.audioplayer.japaneseasmr.JaPostRef
+import com.nanahoshi.audioplayer.japaneseasmr.JapaneseAsmrClient
+import com.nanahoshi.audioplayer.japaneseasmr.resolveStoredJaMatches
+import com.nanahoshi.audioplayer.japaneseasmr.JaMatchResult
+import com.nanahoshi.audioplayer.japaneseasmr.resolveQueuedJaMatch
+import com.nanahoshi.audioplayer.japaneseasmr.matchOldJaQueue
+import com.nanahoshi.audioplayer.R
+import com.nanahoshi.audioplayer.playback.biliLocalCache
+import com.nanahoshi.audioplayer.text.PersistedErrors
+import com.nanahoshi.audioplayer.text.resolve
+import kotlinx.serialization.json.Json
 import com.nanahoshi.audioplayer.youtube.YouTubeVideo
 import com.nanahoshi.audioplayer.youtube.readyYouTubeAudio
 
 import android.content.Context
 import android.net.Uri
+import java.io.File
 import com.nanahoshi.audioplayer.asmr.AsmrClient
 import com.nanahoshi.audioplayer.asmr.AsmrNode
 import com.nanahoshi.audioplayer.asmr.AsmrWork
@@ -65,6 +82,7 @@ data class WorkSources(
     val purchased: Boolean?,
     val hasPlay: Boolean,
     val hasAsmr: Boolean,
+    val hasJapaneseAsmr: Boolean = false,
 )
 
 class LibraryRepository(
@@ -73,6 +91,7 @@ class LibraryRepository(
     private val bilibili: BilibiliClient,
     private val asmr: AsmrClient,
     private val dlsite: DlsiteClient,
+    internal val japaneseAsmr: JapaneseAsmrClient = JapaneseAsmrClient(),
 ) {
     internal val biliLibrary = BiliLibraryStore(context, db, ::upsertBili)
 
@@ -185,14 +204,14 @@ class LibraryRepository(
     suspend fun prepareWorkSources(folderId: Long): WorkSources? = withContext(Dispatchers.IO) {
         val folder = db.folders().get(folderId) ?: return@withContext null
         val sourceId = folder.asmrSourceId ?: return@withContext null
-        val workId = workIdOf(folder)
         backfillContentSources(folderId)
-        val hasPlay = workHasSource(workId, TrackSource.DLSITE)
+        val hasPlay = workHasSource(folderId, TrackSource.DLSITE)
         WorkSources(
             // 有 Play 文件就不必再问 DLsite；离线时那一步会一直等到超时。
             purchased = if (hasPlay) null else dlsite.cachedPurchased(sourceId),
             hasPlay = hasPlay,
-            hasAsmr = workHasSource(workId, TrackSource.ASMR),
+            hasAsmr = workHasSource(folderId, TrackSource.ASMR) || WorkFacts.fromJson(folder.workMeta)?.asmrAvailable == true,
+            hasJapaneseAsmr = db.japaneseAsmr().postsForRoot(folderId).isNotEmpty(),
         )
     }
 
@@ -214,7 +233,33 @@ class LibraryRepository(
         val folder = db.folders().get(folderId) ?: return@withContext WorkFill.UNCHANGED
         val sourceId = folder.asmrSourceId ?: return@withContext WorkFill.UNCHANGED
         val workId = workIdOf(folder)
-        if (workHasSource(workId, source)) return@withContext WorkFill.UNCHANGED
+        if (source == TrackSource.JAPANESE_ASMR) {
+            val posts = db.japaneseAsmr().postsForRoot(folderId)
+            if (posts.any { post -> db.japaneseAsmr().mediaForPost(post.postId).any { it.trackId?.let { id -> db.tracks().getById(id) } != null } }) {
+                return@withContext WorkFill.UNCHANGED
+            }
+            for (post in posts) {
+                val article = try {
+                    japaneseAsmr.article(post.postId, post.rj)
+                } catch (failure: com.nanahoshi.audioplayer.japaneseasmr.JapaneseAsmrException) {
+                    if (failure.failure in setOf(
+                            com.nanahoshi.audioplayer.japaneseasmr.JaFailure.MISSING,
+                            com.nanahoshi.audioplayer.japaneseasmr.JaFailure.IDENTITY,
+                            com.nanahoshi.audioplayer.japaneseasmr.JaFailure.LEGACY,
+                        )) continue
+                    throw failure
+                }
+                if (article.media.isNotEmpty()) {
+                    db.withTransaction {
+                        check(db.folders().get(folderId) != null) { context.getString(R.string.library_work_removed) }
+                        fillJapaneseAsmrArticle(folder, article)
+                    }
+                    return@withContext WorkFill.FILLED
+                }
+            }
+            return@withContext WorkFill.EMPTY
+        }
+        if (workHasSource(folderId, source)) return@withContext WorkFill.UNCHANGED
         val facts = WorkFacts.fromJson(folder.workMeta) ?: WorkFacts(
             title = folder.name,
             circle = "",
@@ -285,7 +330,8 @@ class LibraryRepository(
         }.distinctUntilChanged()
 
     private fun observeWorkTreeChanges() =
-        db.invalidationTracker.createFlow("folders", "dlsite_original_works", "dlsite_original_entries")
+        db.invalidationTracker.createFlow("folders", "dlsite_original_works", "dlsite_original_entries", "japaneseasmr_posts", "japaneseasmr_media",
+            "japaneseasmr_download_works", "japaneseasmr_download_entries")
 
     internal fun observeLocalRemovalTracks(
         trackIds: Set<Long>,
@@ -357,7 +403,7 @@ class LibraryRepository(
 
     suspend fun createFolder(parentId: Long?, name: String): Long = withContext(Dispatchers.IO) {
         val trimmed = name.trim()
-        if (trimmed.isEmpty()) error("请填写文件夹名称")
+        if (trimmed.isEmpty()) error(context.getString(R.string.library_folder_name_required))
         val position = db.folders().maxPosition(parentId) + 1
         db.folders().insert(
             FolderEntity(
@@ -378,7 +424,7 @@ class LibraryRepository(
         val hidden = descendantFolderIds(folders, excludedFolderIds)
         val byId = folders.associateBy { it.id }
         buildList {
-            add(FolderChoice(id = null, label = "音频库"))
+            add(FolderChoice(id = null, label = context.getString(R.string.nav_library)))
             folders.filter { it.id !in hidden }
                 .map { folder -> FolderChoice(folder.id, folderPath(folder, byId)) }
                 .sortedBy { it.label }
@@ -390,7 +436,7 @@ class LibraryRepository(
         val folders = db.folders().all()
         val movedFolders = descendantFolderIds(folders, folderIds.toSet())
         if (targetFolderId != null && targetFolderId in movedFolders) {
-            error("不能移动到自己里面")
+            error(context.getString(R.string.library_move_into_self))
         }
         folderIds.forEach { db.folders().setParent(it, targetFolderId) }
         val carried = trackIdsIn(movedFolders)
@@ -415,6 +461,7 @@ class LibraryRepository(
                     db.downloads().stopActive(job.id, DOWNLOAD_LIBRARY_REQUIRED)
                 }
             }
+            if (removedFolders.isNotEmpty()) db.downloads().invalidateJaWorkVerification(removedFolders.toList())
             folderIds.forEach { db.folders().delete(it) }
             trackIds.forEach { db.tracks().delete(it) }
             compactQueue()
@@ -452,28 +499,28 @@ class LibraryRepository(
 
     suspend fun recognizeLocalFolder(folderId: Long, input: String): String = withContext(Dispatchers.IO) {
         val code = input.trim()
-        if (code.isEmpty()) error("请填写 RJ 号")
-        val root = db.folders().get(folderId) ?: error("找不到文件夹")
-        if (root.asmrSourceId != null || root.asmrWorkId != null) error("这个文件夹已经是作品")
+        if (code.isEmpty()) error(context.getString(R.string.library_rj_required))
+        val root = db.folders().get(folderId) ?: error(context.getString(R.string.library_folder_not_found))
+        if (root.asmrSourceId != null || root.asmrWorkId != null) error(context.getString(R.string.library_folder_is_work))
         var parentId = root.parentId
         while (parentId != null) {
             val parent = db.folders().get(parentId) ?: break
-            if (parent.asmrSourceId != null || parent.asmrWorkId != null) error("这个文件夹已经在作品里面")
+            if (parent.asmrSourceId != null || parent.asmrWorkId != null) error(context.getString(R.string.library_folder_inside_work))
             parentId = parent.parentId
         }
         val local = localLevel(folderId)
-        if (!local.hasMatchableFile()) error("这个文件夹里没有可对照的文件")
-        if (folderBySource(code) != null) error("这部作品已经在音频库")
+        if (!local.hasMatchableFile()) error(context.getString(R.string.library_no_matchable_files))
+        if (folderBySource(code) != null) error(context.getString(R.string.library_work_already_in_library))
         val dlsiteCatalog = dlsiteCatalog(code)
         var extraPath: String? = null
         if (dlsiteCatalog is DlsiteCatalog.Ready) {
             when (val fit = fitLocalFolder(local, dlsiteMatchTree(dlsiteCatalog.nodes))) {
                 is FolderFit.Ready -> {
                     adoptDlsite(root, dlsiteCatalog.workno, fit.assignment)
-                    return@withContext recognizeNotice(CatalogSide.Matched, asmrMatched = false)
+                    return@withContext context.resolve(recognizeNotice(CatalogSide.Matched, asmrMatched = false))
                 }
                 is FolderFit.Extra -> extraPath = fit.path
-                FolderFit.Empty -> error("这个文件夹里没有可对照的文件")
+                FolderFit.Empty -> error(context.getString(R.string.library_no_matchable_files))
             }
         }
         val asmrWork = try {
@@ -484,14 +531,14 @@ class LibraryRepository(
             null
         }
         if (asmrWork != null) {
-            if (folderBySource(asmrWork.sourceId) != null) error("这部作品已经在音频库")
+            if (folderBySource(asmrWork.sourceId) != null) error(context.getString(R.string.library_work_already_in_library))
             when (val fit = fitLocalFolder(local, asmrMatchTree(asmrWork.nodes))) {
                 is FolderFit.Ready -> {
                     adoptAsmr(root, asmrWork, fit.assignment)
-                    return@withContext recognizeNotice(CatalogSide.Missed, asmrMatched = true)
+                    return@withContext context.resolve(recognizeNotice(CatalogSide.Missed, asmrMatched = true))
                 }
                 is FolderFit.Extra -> extraPath = fit.path
-                FolderFit.Empty -> error("这个文件夹里没有可对照的文件")
+                FolderFit.Empty -> error(context.getString(R.string.library_no_matchable_files))
             }
         }
         val side = when (dlsiteCatalog) {
@@ -499,7 +546,7 @@ class LibraryRepository(
             DlsiteCatalog.Unreachable -> CatalogSide.Unreachable
             DlsiteCatalog.NotPurchased -> CatalogSide.NotPurchased
         }
-        error(recognizeNotice(side, asmrMatched = false, extraPath = extraPath))
+        error(context.resolve(recognizeNotice(side, asmrMatched = false, extraPath = extraPath)))
     }
 
     /**
@@ -508,14 +555,14 @@ class LibraryRepository(
      */
     suspend fun recognizeLocalTree(workFolderId: Long, treeUri: Uri, preferred: TrackSource?): String =
         withContext(Dispatchers.IO) {
-            val root = db.folders().get(workFolderId) ?: error("找不到作品")
-            if (root.asmrSourceId == null) error("这不是作品")
+            val root = db.folders().get(workFolderId) ?: throw UserFacingException(TextRef.Res(R.string.library_work_not_found_short))
+            if (root.asmrSourceId == null) throw UserFacingException(TextRef.Res(R.string.library_not_a_work))
             backfillContentSources(workFolderId)
-            val workId = workIdOf(root)
-            val source = preferred?.takeIf { workHasSource(workId, it) }
-                ?: if (workHasSource(workId, TrackSource.DLSITE)) TrackSource.DLSITE else TrackSource.ASMR
+            val source = preferred?.takeIf { it in setOf(TrackSource.ASMR, TrackSource.DLSITE) &&
+                workHasSource(root.id, it) }
+                ?: if (workHasSource(root.id, TrackSource.DLSITE)) TrackSource.DLSITE else TrackSource.ASMR
             val tree = LocalAudio.readTree(context, treeUri)
-            if (tree == null || tree.allFiles().isEmpty()) error("这个文件夹里没有可对照的文件")
+            if (tree == null || tree.allFiles().isEmpty()) throw UserFacingException(TextRef.Res(R.string.library_no_matchable_files))
 
             val children = db.folders().all().groupBy { it.parentId }
             suspend fun workLevel(folderId: Long): WorkLevel {
@@ -528,7 +575,7 @@ class LibraryRepository(
                 return WorkLevel(files, folders)
             }
             val work = workLevel(workFolderId)
-            if (work.files.isEmpty() && work.folders.isEmpty()) error("这个作品还没有找到文件")
+            if (work.files.isEmpty() && work.folders.isEmpty()) throw UserFacingException(TextRef.Res(R.string.library_work_no_files))
 
             val picked = HashMap<Long, Uri>()
             var counter = 0L
@@ -541,8 +588,10 @@ class LibraryRepository(
                 folders = node.children.map { child -> LocalMatchFolder(counter++, child.name, localLevel(child)) },
             )
             when (val fit = fitLocalFolder(localLevel(tree), work)) {
-                FolderFit.Empty -> error("这个文件夹里没有可对照的文件")
-                is FolderFit.Extra -> error("对不上，多出来的内容：${fit.path}")
+                FolderFit.Empty -> throw UserFacingException(TextRef.Res(R.string.library_no_matchable_files))
+                is FolderFit.Extra -> throw UserFacingException(
+                    TextRef.Res(R.string.library_folder_extra_content, listOf(fit.path)),
+                )
                 is FolderFit.Ready -> {
                     var linked = 0
                     var busy = 0
@@ -564,14 +613,14 @@ class LibraryRepository(
                             }
                         }
                     } catch (failure: Exception) {
-                        if (failure.hasConstraint()) error("这个文件夹里的文件已经挂在其他曲目上，没有改动")
+                        if (failure.hasConstraint()) throw UserFacingException(TextRef.Res(R.string.library_folder_files_owned))
                         throw failure
                     }
                     val name = if (source == TrackSource.DLSITE) "DLsite" else "asmr.one"
                     when {
-                        busy == 0 -> "$name 匹配成功，已关联 $linked 首"
-                        linked == 0 -> "$name 匹配成功，但有 $busy 首的文件已经挂在其他曲目上，没有改动；可先取消那边的识别"
-                        else -> "$name 匹配成功，已关联 $linked 首；$busy 首的文件已经挂在其他曲目上，没有改动"
+                        busy == 0 -> context.getString(R.string.library_linked_count, name, linked)
+                        linked == 0 -> context.getString(R.string.library_folder_files_owned)
+                        else -> context.getString(R.string.library_linked_with_busy, name, linked, busy)
                     }
                 }
             }
@@ -581,13 +630,13 @@ class LibraryRepository(
         workImportLock.withLock {
             try {
                 val work = asmr.loadWork(input)
-                if (db.folders().findBySourceId(work.sourceId) != null) error("已经在音频库")
+                if (db.folders().findBySourceId(work.sourceId) != null) error(context.getString(R.string.library_already_in_library))
                 insertAsmrWork(work, parentId)
                 restoreOriginalCopy(work.sourceId)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                if (failure.hasConstraint()) error("这部作品已经在音频库")
+                if (failure.hasConstraint()) error(context.getString(R.string.library_work_already_in_library))
                 throw failure
             }
         }
@@ -606,7 +655,7 @@ class LibraryRepository(
         withContext(Dispatchers.IO) {
             workImportLock.withLock {
                 try {
-                    if (folderBySource(facts.sourceId) != null) error("已经在音频库")
+                    if (folderBySource(facts.sourceId) != null) error(context.getString(R.string.library_already_in_library))
                     val workId = facts.sourceId.filter { it.isDigit() }.toLongOrNull() ?: 0L
                     db.withTransaction {
                         val rootId = db.folders().insert(
@@ -627,7 +676,7 @@ class LibraryRepository(
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (failure: Exception) {
-                    if (failure.hasConstraint()) error("这部作品已经在音频库")
+                    if (failure.hasConstraint()) error(context.getString(R.string.library_work_already_in_library))
                     throw failure
                 }
             }
@@ -649,6 +698,9 @@ class LibraryRepository(
         db.files().listIn(folderId)
     }
 
+    internal suspend fun hasSavedAsmr(root: FolderEntity): Boolean =
+        workHasSource(root.id, TrackSource.ASMR)
+
     suspend fun asmrTrack(workId: Long, hash: String): TrackEntity? = withContext(Dispatchers.IO) {
         db.tracks().findAsmr(workId, hash)
     }
@@ -657,12 +709,348 @@ class LibraryRepository(
         db.files().findAsmr(workId, hash)
     }
 
-    /** Returns the work's root folder. Inserts it under the library root when it is not there yet. */
-    suspend fun ensureAsmrWork(work: AsmrWork): Long = withContext(Dispatchers.IO) {
-        val id = db.withTransaction { db.folders().findBySourceId(work.sourceId)?.id ?: insertAsmrWork(work, null) }
-        val old = db.dlsiteOriginals().work(DlsiteClient.canonicalWorkno(work.sourceId))
-        if (old != null && old.rootFolderId != id) restoreOriginalCopy(work.sourceId)
+    /** Reuses the shared work root and adds the available source selected by the caller. */
+    suspend fun ensureAsmrWork(work: AsmrWork): Long = saveOnlineWork(
+        work.facts(), work.coverUrl, work, emptyList(), emptyList(), prefer = TrackSource.ASMR, playChecked = false,
+    )
+
+    internal val jaWorkFiles = JaWorkFiles(db, context.filesDir)
+
+    internal data class JapaneseAsmrImport(val rootId: Long, val added: Int, val retained: Int)
+
+    internal data class JaRefreshResult(
+        val added: Int,
+        val removed: Int,
+        val retained: Int,
+        val queueIds: List<Long>,
+        val playlistItems: Int,
+        val complete: Boolean,
+    ) {
+        fun message(context: Context): String = buildString {
+            append(context.getString(R.string.library_ja_change_summary, added, removed, retained))
+            if (queueIds.isNotEmpty()) append(context.getString(R.string.library_ja_change_queue, queueIds.size))
+            if (playlistItems > 0) append(context.getString(R.string.library_ja_change_playlist, playlistItems))
+            if (!complete) append(context.getString(R.string.library_ja_incomplete))
+        }
+    }
+
+    internal suspend fun refreshJapaneseAsmrPost(
+        postId: String,
+        rootId: Long,
+        cleanup: Boolean,
+        article: JaArticle? = null,
+        currentQueueId: () -> Long = { -1 },
+    ): JaRefreshResult = withContext(Dispatchers.IO) {
+        val dao = db.japaneseAsmr()
+        val expected = dao.post(postId)?.takeIf { it.rootFolderId == rootId } ?: error(PersistedErrors.JA_POST_REMOVED)
+        val updated = article ?: japaneseAsmr.article(postId, expected.rj, refresh = true)
+        check(updated.post.postId == postId && updated.post.rj.equals(expected.rj, ignoreCase = true)) { context.getString(R.string.library_ja_post_id_changed) }
+        workImportLock.withLock {
+            db.withTransaction {
+                val root = db.folders().get(rootId)
+                check(root?.asmrSourceId?.let(DlsiteClient::canonicalWorkno) == DlsiteClient.canonicalWorkno(expected.rj) &&
+                    dao.post(postId)?.rootFolderId == rootId) { PersistedErrors.JA_POST_REMOVED }
+                val rows = dao.mediaForPost(postId)
+                val matches = resolveStoredJaMatches(updated, postId, dao)
+                val visible = updated.media.map { it.key }.toSet()
+                val sync = if (updated.media.isEmpty()) null else fillJapaneseAsmrArticle(requireNotNull(root), updated)
+                val queue = db.queue().snapshot()
+                val stored = resolveStoredJaMatches(updated, postId, dao)
+                for (item in queue) {
+                    val key = item.fileKey ?: continue
+                    if (item.trackId != null || item.workno != postId || item.source != TrackSource.JAPANESE_ASMR) continue
+                    val media = resolveQueuedJaMatch(updated, key, item.mediaPathHash, stored, queue).media ?: continue
+                    if (item.mediaKind != media.kind.name) db.queue().setJaMediaKind(item.queueItemId, media.kind.name)
+                }
+                val gone = rows.filter { matches[it.mediaKey] == JaMatchResult.Gone }
+                val queueIds = linkedSetOf<Long>()
+                var playlistItems = 0
+                var removed = 0
+                val playlists = mutableSetOf<Long>()
+                if (cleanup && updated.complete) {
+                    val online = queue.filter {
+                        it.source == TrackSource.JAPANESE_ASMR && it.trackId == null &&
+                            it.workno == postId && it.fileKey != null
+                    }
+                    val candidates = matchOldJaQueue(rows, online)
+                    val removedKeys = mutableSetOf<String>()
+                    if (visible != rows.map { it.mediaKey }.toSet()) {
+                        for (media in gone) {
+                            val track = media.trackId?.let { db.tracks().getById(it) }
+                            if (track == null) {
+                                dao.deleteMedia(postId, media.mediaKey)
+                                removedKeys += media.mediaKey
+                                continue
+                            }
+                            val related = queue.filter { it.trackId == track.id }.map { it.queueItemId }
+                            val onlineRelated = online.filter { media.mediaKey in candidates.getValue(it.queueItemId).mediaKeys }
+                            if (track.biliLocalCache(context) != null ||
+                                onlineRelated.any { candidates.getValue(it.queueItemId).ambiguous }
+                            ) continue
+                            val listItems = db.playlists().itemsForTrack(track.id)
+                            val current = currentQueueId()
+                            if (current in related || onlineRelated.any { it.queueItemId == current }) continue
+                            failJaTrackTasks(track.id, related)
+                            db.tracks().delete(track.id)
+                            dao.deleteMedia(postId, media.mediaKey)
+                            removedKeys += media.mediaKey
+                            queueIds += related
+                            playlistItems += listItems.size
+                            playlists += listItems.map { it.playlistId }
+                            removed++
+                        }
+                    }
+                    val cachedKeys = if (online.isEmpty()) emptySet() else db.downloads()
+                        .finishedForWork(TrackSource.JAPANESE_ASMR.name, postId)
+                        .mapNotNull { job ->
+                            val file = job.localPath?.let(::File)
+                            job.fileKey?.takeIf { file != null && file.isFile && file.length() > 0 }
+                        }.toSet()
+                    val removableOnline = online.filter { item ->
+                        val old = candidates.getValue(item.queueItemId)
+                        item.queueItemId != currentQueueId() && !old.ambiguous && item.fileKey !in cachedKeys &&
+                            old.mediaKeys.all { it in removedKeys } &&
+                            resolveQueuedJaMatch(updated, requireNotNull(item.fileKey), item.mediaPathHash, matches, queue) == JaMatchResult.Gone
+                    }.map { it.queueItemId }
+                    for (id in removableOnline) {
+                        if (id == currentQueueId()) continue
+                        db.translations().failForRemovedAudio(null, listOf(id), context.getString(R.string.library_ja_track_invalid))
+                        db.queue().delete(id)
+                        queueIds += id
+                    }
+                }
+                if (queueIds.isNotEmpty()) compactQueue()
+                playlists.forEach { compactPlaylist(it) }
+                val retained = rows.count { matches[it.mediaKey]?.media == null } - removed
+                JaRefreshResult(sync?.added ?: 0, removed, retained, queueIds.toList(), playlistItems, updated.complete)
+            }
+        }
+    }
+
+    internal suspend fun jaQueueMatches(article: JaArticle, queueId: Long, key: String?): Boolean =
+        withContext(Dispatchers.IO) {
+            val expected = db.japaneseAsmr().post(article.post.postId)?.rj
+            if (expected != null && !expected.equals(article.post.rj, ignoreCase = true)) return@withContext false
+            val queue = db.queue().snapshot()
+            val item = queue.firstOrNull { it.queueItemId == queueId && it.workno == article.post.postId &&
+                it.fileKey == key } ?: return@withContext false
+            val stored = resolveStoredJaMatches(article, article.post.postId, db.japaneseAsmr())
+            resolveQueuedJaMatch(article, item.fileKey ?: return@withContext false, item.mediaPathHash, stored, queue).media != null
+        }
+
+    private suspend fun failJaTrackTasks(trackId: Long, queueIds: List<Long>) {
+        val message = context.getString(R.string.library_ja_track_invalid)
+        db.downloads().activeForTrack(trackId)?.let { db.downloads().stopActive(it.id, message) }
+        db.whisper().failActiveForTrack(trackId, message)
+        db.whisper().failTranslationForTrack(trackId, message)
+        db.translations().failForRemovedAudio(trackId, queueIds, message)
+    }
+
+    internal suspend fun importJapaneseAsmrPost(
+        article: JaArticle,
+        expectedRoot: Long? = null,
+    ): JapaneseAsmrImport = withContext(Dispatchers.IO) {
+        require(article.media.isNotEmpty()) { context.getString(R.string.library_article_unavailable) }
+        workImportLock.withLock {
+            try {
+                db.withTransaction {
+                    val post = article.post
+                    val existing = folderBySource(post.rj)
+                    check(expectedRoot == null || existing?.id == expectedRoot) { context.getString(R.string.library_work_removed) }
+                    val root = existing ?: createOnlineRoot(
+                        WorkFacts(post.title, "", article.voiceActors, emptyList(), "", post.rj), post.coverUri,
+                    )
+                    fillJapaneseAsmrArticle(root, article).also {
+                        jaWorkFiles.restore(root, post.rj)
+                    }
+                }
+            } catch (failure: Exception) {
+                if (failure.hasConstraint()) error(context.getString(R.string.library_work_already_in_library))
+                throw failure
+            }
+        }
+    }
+
+    internal suspend fun rememberJapanesePosts(rootId: Long, posts: List<JaPostRef>) {
+        if (posts.isEmpty()) return
+        workImportLock.withLock {
+            db.withTransaction {
+                val rj = db.folders().get(rootId)?.asmrSourceId ?: return@withTransaction
+                val key = DlsiteClient.canonicalWorkno(rj)
+                for (post in posts.filter { DlsiteClient.canonicalWorkno(it.rj) == key }.distinctBy { it.postId }) {
+                    val saved = db.japaneseAsmr().post(post.postId)
+                    if (saved?.rootFolderId != rootId) db.japaneseAsmr().upsertPost(post.entity(rootId))
+                }
+            }
+        }
+    }
+
+    internal suspend fun saveOnlineWork(
+        facts: WorkFacts,
+        cover: String?,
+        asmrWork: AsmrWork?,
+        play: List<PlayEntry>,
+        candidates: List<JaPostRef>,
+        prefer: TrackSource,
+        selectedArticle: JaArticle? = null,
+        playChecked: Boolean = true,
+    ): Long = withContext(Dispatchers.IO) {
+        val id = workImportLock.withLock {
+            val posts = candidates.ifEmpty {
+                folderBySource(facts.sourceId)?.let { root -> db.japaneseAsmr().postsForRoot(root.id).map { it.ref() } }.orEmpty()
+            }
+            val playNodes = if (!playChecked && dlsite.cachedPurchased(facts.sourceId) != false) {
+                try {
+                    if (dlsite.isPurchased(facts.sourceId)) dlsite.playTree(facts.sourceId, facts.circle, cover)
+                    else emptyList()
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    emptyList()
+                }
+            } else play
+            var article = selectedArticle?.takeIf { it.media.isNotEmpty() }
+            if (article == null && (prefer == TrackSource.JAPANESE_ASMR || asmrWork?.nodes.isNullOrEmpty() && playNodes.isEmpty())) {
+                for (post in posts) {
+                    try {
+                        article = japaneseAsmr.article(post.postId, facts.sourceId).takeIf { it.media.isNotEmpty() }
+                        if (article != null) break
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        // Other articles and sources may still be available.
+                    }
+                }
+            }
+            try {
+                db.withTransaction {
+                    val existing = folderBySource(facts.sourceId)
+                    val hasAsmr = !asmrWork?.nodes.isNullOrEmpty()
+                    check(existing != null || hasAsmr || playNodes.isNotEmpty() || article != null) { context.getString(R.string.library_no_valid_source) }
+                    val sourceFacts = facts.copy(asmrAvailable = hasAsmr || facts.asmrAvailable)
+                    val root = existing ?: createOnlineRoot(sourceFacts, cover, asmrWork?.id)
+                    if (existing != null && hasAsmr) db.folders().setWorkMeta(root.id, sourceFacts.toJson())
+                    (posts + listOfNotNull(article?.post)).distinctBy { it.postId }.forEach { post ->
+                        val previous = db.japaneseAsmr().post(post.postId)
+                        if (previous?.rootFolderId != root.id) {
+                            db.japaneseAsmr().upsertPost(post.entity(root.id))
+                        }
+                    }
+                    val source = when {
+                        prefer == TrackSource.JAPANESE_ASMR && article != null -> TrackSource.JAPANESE_ASMR
+                        prefer == TrackSource.ASMR && hasAsmr -> TrackSource.ASMR
+                        playNodes.isNotEmpty() -> TrackSource.DLSITE
+                        hasAsmr -> TrackSource.ASMR
+                        article != null -> TrackSource.JAPANESE_ASMR
+                        else -> null
+                    }
+                    val workId = workIdOf(root)
+                    when (source) {
+                        TrackSource.ASMR -> if (!workHasSource(root.id, TrackSource.ASMR)) {
+                            importAsmrNodes(requireNotNull(asmrWork).nodes, root.id, asmrWork, "")
+                        }
+                        TrackSource.DLSITE -> if (!workHasSource(root.id, TrackSource.DLSITE)) {
+                            importPlayNodes(playNodes, root.id, workId, facts, cover, "")
+                        }
+                        TrackSource.JAPANESE_ASMR -> fillJapaneseAsmrArticle(root, requireNotNull(article))
+                        else -> Unit
+                    }
+                    jaWorkFiles.restore(root, facts.sourceId)
+                    root.id
+                }
+            } catch (failure: Exception) {
+                if (failure.hasConstraint()) error(context.getString(R.string.library_work_already_in_library))
+                throw failure
+            }
+        }
+        val old = db.dlsiteOriginals().work(DlsiteClient.canonicalWorkno(facts.sourceId))
+        if (old != null && old.rootFolderId != id) restoreOriginalCopy(facts.sourceId)
         id
+    }
+
+    private suspend fun createOnlineRoot(facts: WorkFacts, cover: String?, workId: Long? = null): FolderEntity {
+        val root = FolderEntity(
+            name = sanitizeEntryName("${facts.sourceId} ${facts.title}"),
+            position = db.folders().maxPosition(null) + 1, addedAt = System.currentTimeMillis(),
+            asmrWorkId = workId ?: facts.sourceId.filter(Char::isDigit).toLongOrNull() ?: 0L,
+            asmrSourceId = facts.sourceId, coverUri = cover, workMeta = facts.toJson(),
+        )
+        return root.copy(id = db.folders().insert(root))
+    }
+
+    private fun JaPostRef.entity(rootId: Long) = JapaneseAsmrPostEntity(
+        postId, rootId, null, rj, title, coverUri, publishedAt, url, null,
+    )
+
+    private suspend fun fillJapaneseAsmrArticle(root: FolderEntity, article: JaArticle): JapaneseAsmrImport {
+        val dao = db.japaneseAsmr()
+        val post = article.post
+        val previous = dao.post(post.postId)?.takeIf { it.rootFolderId == root.id }
+        val entry = post.entity(root.id).copy(
+            coverUri = post.coverUri ?: previous?.coverUri,
+            publishedAt = post.publishedAt ?: previous?.publishedAt,
+            articleFolderId = previous?.articleFolderId,
+            refreshedAt = System.currentTimeMillis(),
+        )
+        dao.upsertPost(entry)
+        val filled = dao.postsForRoot(root.id).filter { candidate ->
+            candidate.postId == post.postId || dao.mediaForPost(candidate.postId).any { row ->
+                row.trackId?.let { db.tracks().getById(it) } != null
+            }
+        }
+        var destination = root.id
+        if (filled.size > 1) {
+            for (candidate in filled) {
+                val folderId = candidate.articleFolderId?.takeIf { db.folders().get(it)?.parentId == root.id }
+                    ?: db.folders().insert(
+                        FolderEntity(
+                            parentId = root.id, name = sanitizeEntryName(candidate.title),
+                            position = db.folders().maxPosition(root.id) + 1, asmrWorkId = root.asmrWorkId,
+                            coverUri = candidate.coverUri, contentSource = TrackSource.JAPANESE_ASMR.name,
+                        ),
+                    )
+                dao.upsertPost(candidate.copy(articleFolderId = folderId))
+                dao.mediaForPost(candidate.postId).forEach { media ->
+                    media.trackId?.let { db.tracks().setFolder(it, folderId) }
+                }
+                if (candidate.postId == post.postId) destination = folderId
+            }
+        }
+        val old = dao.mediaForPost(post.postId).associateBy { it.mediaKey }
+        val matches = resolveStoredJaMatches(article, post.postId, dao)
+        val matchedKeys = matches.entries.mapNotNull { (key, match) -> match.media?.let { it.key to key } }.toMap()
+        val downloaded = db.downloads().finishedForWork(TrackSource.JAPANESE_ASMR.name, post.postId)
+            .sortedByDescending { it.id }.groupBy { it.fileKey }
+        var added = 0
+        for (media in article.media) {
+            if (media.key in article.duplicateKeys && media.key in old) continue
+            val key = matchedKeys[media.key] ?: media.key
+            val saved = old[key]?.trackId?.let { db.tracks().getById(it) }
+            val title = if (media.hasTitle) media.title else saved?.title ?: old[key]?.title ?: media.title
+            val availablePath = downloaded[key].orEmpty().firstNotNullOfOrNull { it.localPath?.takeIf { path ->
+                java.io.File(path).let { file -> file.isFile && file.length() > 0 }
+            } }?.takeIf { db.tracks().findByLocalUri(it) == null }
+            val track = saved?.copy(title = title, coverUri = entry.coverUri, folderId = destination,
+                localUri = saved.localUri ?: availablePath) ?: TrackEntity(
+                source = TrackSource.JAPANESE_ASMR, title = title, artist = article.voiceActors.joinToString(" / ").ifBlank { null },
+                durationMs = old[key]?.durationMs ?: 0, coverUri = entry.coverUri,
+                localUri = availablePath, bvid = null, cid = null, page = null, addedAt = System.currentTimeMillis(),
+                folderId = destination,
+            )
+            val trackId = if (saved != null) {
+                db.tracks().update(track)
+                saved.id
+            } else {
+                added++
+                db.tracks().insert(track)
+            }
+            dao.upsertMedia(JapaneseAsmrMediaEntity(
+                post.postId, key, trackId, media.kind.name, title, track.durationMs,
+                media.chapters.takeIf { it.isNotEmpty() }?.let { Json.encodeToString(it) },
+                pathHash = media.pathHash ?: old[key]?.pathHash,
+            ))
+        }
+        return JapaneseAsmrImport(root.id, added, matches.values.count { it.media == null })
     }
 
     private suspend fun insertAsmrWork(work: AsmrWork, parentId: Long?): Long = db.withTransaction {
@@ -684,7 +1072,7 @@ class LibraryRepository(
     }
 
     suspend fun asmrTracksInTree(folderId: Long): List<TrackEntity> =
-        tracksInTree(folderId).filter { it.source == TrackSource.ASMR || it.source == TrackSource.DLSITE }
+        tracksInTree(folderId).filter { it.source in setOf(TrackSource.ASMR, TrackSource.DLSITE, TrackSource.JAPANESE_ASMR) }
 
     internal suspend fun tracksInTree(folderId: Long): List<TrackEntity> = withContext(Dispatchers.IO) {
         val folders = db.folders().all()
@@ -714,24 +1102,24 @@ class LibraryRepository(
     }
 
     internal suspend fun completeYouTubeDownload(jobId: Long, videoId: String, path: String) = db.withTransaction {
-        val job = db.downloads().get(jobId) ?: error("下载任务已经移除")
+        val job = db.downloads().get(jobId) ?: error(context.getString(R.string.library_download_task_removed))
         if (job.status != com.nanahoshi.audioplayer.data.db.DownloadStatus.RUNNING) throw CancellationException()
         val track = db.tracks().findYouTube(videoId)?.takeIf { it.id == job.trackId }
             ?: error(DOWNLOAD_LIBRARY_REQUIRED)
         val size = java.io.File(path).length()
-        check(size > 0) { "音轨文件不存在，请重试" }
+        check(size > 0) { context.getString(R.string.library_track_file_missing) }
         db.tracks().updateLocalUri(track.id, path)
         db.downloads().setLocalPath(jobId, path)
         db.downloads().finish(jobId, size, size)
     }
 
     internal suspend fun completeBiliDownload(jobId: Long, bvid: String, cid: Long, path: String) = db.withTransaction {
-        val job = db.downloads().get(jobId) ?: error("下载任务已经移除")
-        check(job.status == com.nanahoshi.audioplayer.data.db.DownloadStatus.RUNNING) { "下载任务已经结束，请重试" }
+        val job = db.downloads().get(jobId) ?: error(context.getString(R.string.library_download_task_removed))
+        check(job.status == com.nanahoshi.audioplayer.data.db.DownloadStatus.RUNNING) { context.getString(R.string.library_download_task_ended) }
         val track = db.tracks().findByBvid(bvid, cid)?.takeIf { it.id == job.trackId }
             ?: error(DOWNLOAD_LIBRARY_REQUIRED)
         val size = java.io.File(path).length()
-        check(size > 0) { "音轨文件不存在，请重试" }
+        check(size > 0) { context.getString(R.string.library_track_file_missing) }
         db.tracks().updateLocalUri(track.id, path)
         db.downloads().setLocalPath(jobId, path)
         db.downloads().setPendingBiliSubtitle(jobId, true)
@@ -750,7 +1138,7 @@ class LibraryRepository(
     suspend fun publishBiliPlaylist(name: String, parts: List<BiliPart>): Long? = withContext(Dispatchers.IO) {
         db.withTransaction {
             val ids = parts.distinctBy { it.bvid to it.cid }.map { part ->
-                checkNotNull(db.tracks().findByBvid(part.bvid, part.cid)) { "复制所选分 P 时未找到曲目" }.id
+                checkNotNull(db.tracks().findByBvid(part.bvid, part.cid)) { context.getString(R.string.library_bili_part_track_missing) }.id
             }
             if (ids.isEmpty()) return@withTransaction null
             val id = createPlaylist(name)
@@ -760,7 +1148,7 @@ class LibraryRepository(
     }
 
     suspend fun renamePlaylist(id: Long, name: String) = withContext(Dispatchers.IO) {
-        check(db.collections().get(id) == null) { "在线播放列表不能编辑，请先复制为自建列表" }
+        check(db.collections().get(id) == null) { context.getString(R.string.library_online_playlist_readonly) }
         db.playlists().rename(id, name.trim(), System.currentTimeMillis())
     }
 
@@ -769,7 +1157,7 @@ class LibraryRepository(
     }
 
     suspend fun addTracksToPlaylist(playlistId: Long, trackIds: List<Long>) = withContext(Dispatchers.IO) {
-        check(db.collections().get(playlistId) == null) { "在线播放列表不能编辑，请先复制为自建列表" }
+        check(db.collections().get(playlistId) == null) { context.getString(R.string.library_online_playlist_readonly) }
         db.withTransaction {
             val existing = db.playlists().trackIds(playlistId).toSet()
             var position = db.playlists().maxPosition(playlistId)
@@ -784,7 +1172,7 @@ class LibraryRepository(
     }
 
     suspend fun removePlaylistItem(playlistId: Long, itemId: Long) = withContext(Dispatchers.IO) {
-        check(db.collections().get(playlistId) == null) { "在线播放列表不能编辑，请先复制为自建列表" }
+        check(db.collections().get(playlistId) == null) { context.getString(R.string.library_online_playlist_readonly) }
         db.withTransaction {
             db.playlists().deleteItem(itemId)
             compactPlaylist(playlistId)
@@ -793,7 +1181,7 @@ class LibraryRepository(
     }
 
     suspend fun movePlaylistItem(playlistId: Long, from: Int, to: Int) = withContext(Dispatchers.IO) {
-        check(db.collections().get(playlistId) == null) { "在线播放列表不能编辑，请先复制为自建列表" }
+        check(db.collections().get(playlistId) == null) { context.getString(R.string.library_online_playlist_readonly) }
         db.withTransaction {
             reorder(db.playlists().items(playlistId), from, to) { id, position ->
                 db.playlists().updatePosition(id, position)
@@ -865,6 +1253,8 @@ class LibraryRepository(
                         referer = item.referer,
                         workno = item.workno,
                         fileKey = item.fileKey,
+                        mediaKind = item.mediaKind,
+                        mediaPathHash = item.mediaPathHash,
                     ),
                 )
             }
@@ -906,7 +1296,7 @@ class LibraryRepository(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
-            if (error.message?.contains("登录") == true) throw error
+            if (error is com.nanahoshi.audioplayer.dlsite.DlsiteException && error.statusCode == 401) throw error
             return if (cannotReachDlsite(error)) DlsiteCatalog.Unreachable else DlsiteCatalog.NotPurchased
         }
         if (!purchased) return DlsiteCatalog.NotPurchased
@@ -922,7 +1312,7 @@ class LibraryRepository(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
-            if (error.message?.contains("登录") == true) throw error
+            if (error is com.nanahoshi.audioplayer.dlsite.DlsiteException && error.statusCode == 401) throw error
             return if (cannotReachDlsite(error)) DlsiteCatalog.Unreachable else DlsiteCatalog.NotPurchased
         }
         return DlsiteCatalog.Ready(workno, nodes)
@@ -932,7 +1322,7 @@ class LibraryRepository(
         var current: Throwable? = error
         while (current != null) {
             if (current is java.io.IOException) return true
-            if (current.message?.contains("无法连接") == true) return true
+            if (current is com.nanahoshi.audioplayer.dlsite.DlsiteException && current.statusCode == null) return true
             current = current.cause
         }
         return false
@@ -1003,7 +1393,7 @@ class LibraryRepository(
             db.tracks().getByIds(assignment.tracks.keys.toList())
         }
         val foreign = tracks.firstOrNull { it.source != TrackSource.LOCAL }
-        if (foreign != null) error("「${foreign.title}」不是本地导入的音频")
+        if (foreign != null) error(context.getString(R.string.library_not_local_import, foreign.title))
         try {
             db.withTransaction {
                 db.folders().markAsWork(
@@ -1042,7 +1432,7 @@ class LibraryRepository(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {
-            if (failure.hasConstraint()) error("这部作品已经在音频库")
+            if (failure.hasConstraint()) error(context.getString(R.string.library_work_already_in_library))
             throw failure
         }
     }
@@ -1106,7 +1496,7 @@ class LibraryRepository(
                 folderId = folderId,
             ),
         )
-        return db.tracks().getById(id) ?: error("保存音频失败")
+        return db.tracks().getById(id) ?: error(context.getString(R.string.library_save_audio_failed))
     }
 
     private suspend fun importPlayNodes(
@@ -1266,7 +1656,7 @@ class LibraryRepository(
                 folderId = group?.id ?: folderId,
             ),
         )
-        return db.tracks().getById(id) ?: error("保存音频失败")
+        return db.tracks().getById(id) ?: error(context.getString(R.string.library_save_audio_failed))
     }
 
     private suspend fun trackIdsIn(folderIds: Set<Long>): Set<Long> {
@@ -1277,9 +1667,12 @@ class LibraryRepository(
     private fun workIdOf(folder: FolderEntity): Long =
         folder.asmrWorkId ?: folder.asmrSourceId?.filter { it.isDigit() }?.toLongOrNull() ?: 0L
 
-    private suspend fun workHasSource(workId: Long, source: TrackSource): Boolean {
-        if (db.tracks().countByWorkSource(workId, source) > 0) return true
-        return db.files().forWork(workId).any { libraryFileSource(it.fileHash) == source }
+    private suspend fun workHasSource(rootId: Long, source: TrackSource): Boolean {
+        val folders = descendantFolderIds(db.folders().all(), setOf(rootId))
+        return folders.chunked(500).any { ids ->
+            db.tracks().inFolders(ids).any { it.source == source } ||
+                db.files().inFolders(ids).any { libraryFileSource(it.fileHash) == source }
+        }
     }
 
     private suspend fun backfillContentSources(rootId: Long) {
@@ -1349,7 +1742,7 @@ class LibraryRepository(
             when (item) {
                 is QueueItemEntity -> item.id
                 is PlaylistItemEntity -> item.id
-                else -> error("未知列表项")
+                else -> error(context.getString(R.string.library_unknown_list_item))
             }
         }.toMutableList()
         val moved = ids.removeAt(from)

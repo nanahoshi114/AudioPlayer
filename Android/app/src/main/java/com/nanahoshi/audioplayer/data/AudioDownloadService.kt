@@ -1,5 +1,8 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.text.persistedErrorText
+import com.nanahoshi.audioplayer.text.PersistedErrors
+import com.nanahoshi.audioplayer.R
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -17,6 +20,8 @@ import com.nanahoshi.audioplayer.MainActivity
 import com.nanahoshi.audioplayer.data.db.DownloadEntity
 import com.nanahoshi.audioplayer.data.db.DownloadStatus
 import com.nanahoshi.audioplayer.graph
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.text.UserFacingError
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -24,15 +29,21 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
 
-internal const val AUDIO_DOWNLOAD_START_FAILED = "无法启动后台下载，请回到 App 重试"
-internal const val AUDIO_DOWNLOAD_INTERRUPTED = "下载中断，请重试"
-internal const val AUDIO_DOWNLOAD_TIMEOUT = "后台下载超时，请重试"
+internal const val AUDIO_DOWNLOAD_START_FAILED = PersistedErrors.AUDIO_DOWNLOAD_START_FAILED
+internal const val AUDIO_DOWNLOAD_INTERRUPTED = PersistedErrors.AUDIO_DOWNLOAD_INTERRUPTED
+internal const val AUDIO_DOWNLOAD_TIMEOUT = PersistedErrors.AUDIO_DOWNLOAD_TIMEOUT
 
-internal class AudioDownloadStopped(message: String) : CancellationException(message)
+internal class AudioDownloadStopped(
+    val persistedError: String,
+) : CancellationException(persistedError), UserFacingError {
+    override val userText = persistedErrorText(persistedError) ?: TextRef.Raw(persistedError)
+}
 
 internal class AudioDownloadService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -40,6 +51,7 @@ internal class AudioDownloadService : Service() {
     private val notifications by lazy { getSystemService(NotificationManager::class.java) }
     private var worker: Job? = null
     private val preparing = mutableMapOf<Int, Job>()
+    private val triedSubtitles = java.util.concurrent.ConcurrentHashMap.newKeySet<Long>()
     private var stopping = false
     private var generation = 0L
     @Volatile private var activeIds = emptyList<Long>()
@@ -82,7 +94,7 @@ internal class AudioDownloadService : Service() {
             try {
                 do {
                     val observed = generation
-                    downloads.drainQueue { activeIds = it }
+                    downloads.drainQueue(triedSubtitles) { activeIds = it }
                 } while (observed != generation)
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -99,14 +111,14 @@ internal class AudioDownloadService : Service() {
     private fun promote(): Boolean {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             notifications.createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "音频下载", NotificationManager.IMPORTANCE_LOW),
+                NotificationChannel(CHANNEL_ID, getString(R.string.channel_audio_downloads), NotificationManager.IMPORTANCE_LOW),
             )
         }
         try {
             ServiceCompat.startForeground(
                 this,
                 NOTIFICATION_ID,
-                notification(emptyList()).build(),
+                notification(AudioProgressNotification()).build(),
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
             )
         } catch (_: IllegalStateException) {
@@ -122,14 +134,18 @@ internal class AudioDownloadService : Service() {
                 acquire(TimeUnit.HOURS.toMillis(6))
             }
         scope.launch {
-            downloads.observeActive().conflate().collect { jobs ->
-                notifications.notify(NOTIFICATION_ID, notification(jobs).build())
-            }
+            combine(
+                downloads.observeActive().map { rows -> rows.map { it.copy(bytesDone = 0, bytesTotal = 0, progressSummary = null) } }.distinctUntilChanged(),
+                application.graph().taskProgress.snapshots,
+            ) { jobs, snapshots -> audioNotificationState(this@AudioDownloadService, jobs, snapshots) }
+                .distinctUntilChanged().collect { state ->
+                    notifications.notify(NOTIFICATION_ID, notification(state).build())
+                }
         }
         return true
     }
 
-    private fun notification(jobs: List<DownloadEntity>): NotificationCompat.Builder {
+    private fun notification(state: AudioProgressNotification): NotificationCompat.Builder {
         val openDownloads = PendingIntent.getActivity(
             this,
             NOTIFICATION_ID,
@@ -138,23 +154,10 @@ internal class AudioDownloadService : Service() {
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_IMMUTABLE,
         )
-        val active = jobs.firstOrNull { it.status == DownloadStatus.RUNNING }
-        val queued = jobs.count { it.status == DownloadStatus.QUEUED }
-        val subtitle = jobs.firstOrNull { it.status == DownloadStatus.DONE && it.pendingBiliSubtitle == true }
-        val phase = when (active?.phase) {
-            "RESOLVING" -> "解析下载地址"
-            "EXTRACTING" -> "解压中"
-            "IMPORTING" -> "整理入库"
-            else -> "获取 B 站字幕".takeIf { active == null && subtitle != null }
-        }
-        val total = active?.bytesTotal ?: 0
-        val percent = if (total > 0L) {
-            ((active?.bytesDone ?: 0L).coerceIn(0L, total) * 100.0 / total).toInt()
-        } else 0
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentTitle("正在下载音频")
-            .setContentText(active?.title ?: subtitle?.title ?: "准备下载")
+            .setContentTitle(getString(R.string.notification_audio_title))
+            .setContentText(state.title)
             .setContentIntent(openDownloads)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
@@ -162,9 +165,8 @@ internal class AudioDownloadService : Service() {
             .setOnlyAlertOnce(true)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setProgress(100, percent, total == 0L || phase != null)
-        val detail = listOfNotNull(phase, "排队 $queued 项".takeIf { queued > 0 }).joinToString(" · ")
-        if (detail.isNotEmpty()) builder.setSubText(detail)
+            .setProgress(100, state.percent ?: 0, state.percent == null)
+        builder.setSubText(state.detail)
         return builder
     }
 
@@ -188,6 +190,36 @@ internal class AudioDownloadService : Service() {
         private const val EXTRA_REQUEST = "request"
         private const val CHANNEL_ID = "audio_downloads"
         private const val NOTIFICATION_ID = 0x4155
+
+        internal fun updateJaVerificationNotification(context: Context, count: Int) {
+            val manager = context.getSystemService(NotificationManager::class.java)
+            val notificationId = NOTIFICATION_ID + 1
+            if (count == 0) {
+                manager.cancel(notificationId)
+                return
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, context.getString(R.string.channel_audio_downloads), NotificationManager.IMPORTANCE_LOW))
+            }
+            val open = PendingIntent.getActivity(context, notificationId,
+                Intent(context, MainActivity::class.java).setAction(OPEN_DOWNLOADS)
+                    .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                PendingIntent.FLAG_IMMUTABLE)
+            val notice = NotificationCompat.Builder(context, CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.stat_sys_warning)
+                .setContentTitle(context.getString(R.string.notification_ja_work_verification_title))
+                .setContentText(context.getString(R.string.notification_ja_work_verification_message, count))
+                .setContentIntent(open)
+                .setAutoCancel(true)
+                .setOnlyAlertOnce(true)
+                .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+                .build()
+            try {
+                manager.notify(notificationId, notice)
+            } catch (_: SecurityException) {
+                // 系统未授予通知权限时仍可在下载页继续。
+            }
+        }
 
         fun start(context: Context, id: Long = 0L): Boolean = try {
             ContextCompat.startForegroundService(context, Intent(context, AudioDownloadService::class.java).putExtra(EXTRA_REQUEST, id))

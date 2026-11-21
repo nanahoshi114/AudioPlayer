@@ -1,5 +1,8 @@
 package com.nanahoshi.audioplayer.ui.components
 
+import com.nanahoshi.audioplayer.R
+import androidx.compose.ui.res.stringResource
+
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -74,7 +77,7 @@ fun WorkHeader(
                     onClick = { tagsExpanded = !tagsExpanded },
                     modifier = Modifier.padding(top = 2.dp),
                 ) {
-                    Text(if (tagsExpanded) "收起标签" else "展开标签")
+                    Text(stringResource(if (tagsExpanded) R.string.work_tags_collapse else R.string.work_tags_expand))
                 }
             }
         }
@@ -87,7 +90,7 @@ fun WorkHeader(
 private fun WorkHeading(facts: WorkFacts, purchased: Boolean, modifier: Modifier = Modifier) {
     Column(modifier) {
         Text(
-            facts.title.ifBlank { facts.sourceId.ifBlank { "未命名作品" } },
+            facts.title.ifBlank { facts.sourceId.ifBlank { stringResource(R.string.work_unnamed) } },
             style = MaterialTheme.typography.titleLarge,
             maxLines = 4,
             overflow = TextOverflow.Ellipsis,
@@ -98,10 +101,10 @@ private fun WorkHeading(facts: WorkFacts, purchased: Boolean, modifier: Modifier
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             if (facts.sourceId.isNotBlank()) LabelBadge(facts.sourceId, MaterialTheme.colorScheme.primary)
-            if (purchased) LabelBadge("已购买", MaterialTheme.colorScheme.tertiary)
+            if (purchased) LabelBadge(stringResource(R.string.work_purchased), MaterialTheme.colorScheme.tertiary)
         }
-        FactLine(Icons.Outlined.Groups, facts.circle.ifBlank { "社团未知" }, maxLines = 1)
-        FactLine(Icons.Outlined.Mic, facts.vas.joinToString("、").ifBlank { "声优未知" }, maxLines = 2)
+        FactLine(Icons.Outlined.Groups, facts.circle.ifBlank { stringResource(R.string.work_circle_unknown) }, maxLines = 1)
+        FactLine(Icons.Outlined.Mic, facts.vas.joinToString("、").ifBlank { stringResource(R.string.work_va_unknown) }, maxLines = 2)
         if (facts.release.isNotBlank()) FactLine(Icons.Outlined.CalendarMonth, facts.release, maxLines = 1)
     }
 }

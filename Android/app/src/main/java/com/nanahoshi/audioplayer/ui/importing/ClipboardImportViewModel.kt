@@ -1,5 +1,9 @@
 package com.nanahoshi.audioplayer.ui.importing
 
+import com.nanahoshi.audioplayer.text.resolve
+import com.nanahoshi.audioplayer.R
+
+import com.nanahoshi.audioplayer.asmr.WorkFacts
 import android.app.Application
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -13,6 +17,10 @@ import com.nanahoshi.audioplayer.data.*
 import com.nanahoshi.audioplayer.graph
 import com.nanahoshi.audioplayer.youtube.YouTubeException
 import com.nanahoshi.audioplayer.youtube.YouTubeVideo
+import com.nanahoshi.audioplayer.japaneseasmr.JaArticle
+import com.nanahoshi.audioplayer.japaneseasmr.JaFailure
+import com.nanahoshi.audioplayer.japaneseasmr.JapaneseAsmrClient
+import com.nanahoshi.audioplayer.japaneseasmr.JapaneseAsmrException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -59,6 +67,29 @@ class ClipboardImportViewModel(app: Application) : AndroidViewModel(app) {
                     if (saved != null) ClipboardImportPreview(target, saved.name, saved.coverUri, alreadySaved = true)
                     else clipboardWorkPreview(target, graph.asmr::lookupCatalog, graph.dlsite::lookupProduct, graph.dlsite::isPurchased)
                 }
+                ClipboardSource.JAPANESE_ASMR -> {
+                    val post = graph.db.japaneseAsmr().post(target.id)
+                    val root = post?.rootFolderId?.let { graph.library.folder(it) }
+                    if (post != null && root?.asmrSourceId?.equals(post.rj, ignoreCase = true) == true &&
+                        graph.db.japaneseAsmr().mediaForPost(post.postId).any { row -> row.trackId?.let { graph.library.track(it) } != null }
+                    ) {
+                        return@withContext ClipboardImportPreview(target, post.title, post.coverUri, alreadySaved = true,
+                            jaArticle = JaArticle(post.ref(), emptyList(), emptyList()))
+                    }
+                    val article = try {
+                        graph.japaneseAsmr.article(target.id)
+                    } catch (failure: JapaneseAsmrException) {
+                        if (failure.verificationPage != null) {
+                            return@withContext ClipboardImportPreview(target, getApplication<Application>().resolve(failure.userText), null,
+                                jaVerificationPage = failure.verificationPage)
+                        }
+                        if (failure.failure != JaFailure.IDENTITY) throw failure
+                        return@withContext ClipboardImportPreview(target, getApplication<Application>().resolve(failure.userText), null,
+                            jaExternalUrl = JapaneseAsmrClient.postUrl(target.id))
+                    }
+                    ClipboardImportPreview(target, article.post.title, article.post.coverUri,
+                        jaArticle = article, jaDetailsOnly = article.media.isEmpty())
+                }
                 ClipboardSource.YOUTUBE -> {
                     val saved = graph.db.tracks().findYouTube(target.id)
                     val video = saved?.let { YouTubeVideo(target.id, it.title, it.artist.orEmpty(),
@@ -79,7 +110,7 @@ class ClipboardImportViewModel(app: Application) : AndroidViewModel(app) {
                     val details = com.nanahoshi.audioplayer.bilibili.BiliVideoDetails(checkNotNull(preview.biliVideo), preview.parts)
                     val requests = graph.biliImportRequests.choose(listOf(details)) ?: return null
                     requests.forEach { graph.library.importBili(it) }
-                    return "已加入音频库"
+                    return getApplication<Application>().getString(R.string.online_added_to_library)
                 }
                 ClipboardSource.ASMR -> {
                     val work = preview.dlsiteWork
@@ -88,26 +119,43 @@ class ClipboardImportViewModel(app: Application) : AndroidViewModel(app) {
                     } else {
                         check(work.purchased)
                         val id = preview.target.id
-                        if (graph.library.folderBySource(id) != null) return "已在音频库"
+                        if (graph.library.folderBySource(id) != null) return getApplication<Application>().getString(R.string.online_in_library)
                         val product = work.product
                         val nodes = graph.dlsite.playTree(id, product.circle.ifBlank { null }, product.coverUrl)
-                        check(nodes.isNotEmpty())
-                        try {
-                            graph.library.importPlayWork(product.facts().copy(sourceId = id), nodes, product.coverUrl)
-                        } catch (cancelled: CancellationException) {
-                            throw cancelled
-                        } catch (error: Exception) {
-                            if (graph.library.folderBySource(id) == null) throw error
-                            return "已在音频库"
-                        }
+                        graph.library.saveOnlineWork(product.facts().copy(sourceId = id), product.coverUrl,
+                            null, nodes, emptyList(), TrackSource.DLSITE)
                     }
+                }
+                ClipboardSource.JAPANESE_ASMR -> {
+                    val article = checkNotNull(preview.jaArticle)
+                    val post = article.post
+                    val asmr = try {
+                        graph.asmr.loadWork(post.rj)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        null
+                    }
+                    val product = if (asmr != null) null else try {
+                        graph.dlsite.showcase(post.rj)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        null
+                    }
+                    val facts = asmr?.facts() ?: product?.facts()
+                        ?: WorkFacts(post.title, "", article.voiceActors, emptyList(), "", post.rj)
+                    graph.library.saveOnlineWork(facts.copy(sourceId = post.rj),
+                        asmr?.coverUrl ?: product?.coverUrl ?: post.coverUri,
+                        asmr, emptyList(), emptyList(), TrackSource.JAPANESE_ASMR,
+                        selectedArticle = article, playChecked = false)
                 }
                 ClipboardSource.YOUTUBE -> graph.library.saveYouTube(checkNotNull(preview.youtubeVideo))
             }
-            return "已加入音频库"
+            return getApplication<Application>().getString(R.string.online_added_to_library)
         }
     }, lastHandled = { preferences.getString("last_handled", null) },
-        rememberHandled = { preferences.edit().putString("last_handled", it).apply() }, message = { graph.messages.value = it })
+        rememberHandled = { preferences.edit().putString("last_handled", it).apply() }, message = { graph.show(it) })
 
     fun inspectClipboard() {
         if (controller.state?.saving == true) return

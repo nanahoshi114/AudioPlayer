@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.ui.components
 
+import com.nanahoshi.audioplayer.R
+import androidx.compose.ui.res.stringResource
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -38,10 +40,11 @@ fun SourceBadge(source: TrackSource, modifier: Modifier = Modifier) {
     val palette = LocalSourceColors.current
     val (label, color) = when (source) {
         TrackSource.YOUTUBE -> "YouTube" to palette.youtube
-        TrackSource.BILIBILI -> "B 站" to palette.bilibili
+        TrackSource.BILIBILI -> stringResource(R.string.library_badge_bilibili) to palette.bilibili
+        TrackSource.JAPANESE_ASMR -> "Japanese ASMR" to palette.asmr
         TrackSource.ASMR -> "asmr.one" to palette.asmr
         TrackSource.DLSITE -> "DLsite" to palette.dlsite
-        TrackSource.LOCAL -> "本地" to palette.local
+        TrackSource.LOCAL -> stringResource(R.string.online_source_local) to palette.local
     }
     LabelBadge(label, color, modifier)
 }

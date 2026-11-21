@@ -1,5 +1,9 @@
 package com.nanahoshi.audioplayer.data
 
+import androidx.annotation.StringRes
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.text.resIdOrNull
+import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.playback.SubtitleCue
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -35,13 +39,19 @@ fun parseTranslationReply(raw: String, count: Int): List<String>? {
     return (1..count).map { lines.getValue(it) }
 }
 
-class TranslateReply(val lines: List<String>? = null, val raw: String? = null)
+class TranslateReply(
+    val lines: List<String>? = null,
+    val error: TextRef? = null,
+    val raw: String? = null,
+    val diagnostic: TextRef? = null,
+)
 
 internal class RevisedTranslationReply(
     val cues: List<SubtitleCue>? = null,
     val violations: List<String> = emptyList(),
-    val error: String? = null,
+    val error: TextRef? = null,
     val raw: String? = null,
+    val diagnostic: TextRef? = null,
 )
 
 internal const val MAX_MERGED_CHARACTERS = 80
@@ -104,7 +114,7 @@ internal fun japaneseMergeGroups(
 internal class RevisedParse(
     val cues: List<SubtitleCue>?,
     val violations: List<String> = emptyList(),
-    val structuralError: String? = null,
+    val structuralError: TextRef? = null,
 )
 
 internal fun parseRevisedTranslation(
@@ -113,25 +123,25 @@ internal fun parseRevisedTranslation(
     limits: MergeLimits = MergeLimits.DEFAULT,
     locked: BooleanArray = BooleanArray(source.size),
 ): RevisedParse {
-    fun structural(message: String) = RevisedParse(null, structuralError = message)
-    val payload = extractJsonObject(raw) ?: return structural("返回不是可解析的 JSON 对象")
+    fun structural(@StringRes message: Int) = RevisedParse(null, structuralError = TextRef.Res(message))
+    val payload = extractJsonObject(raw) ?: return structural(R.string.translate_detail_unreadable)
     val document = runCatching { Json.parseToJsonElement(payload) }.getOrNull() as? JsonObject
-        ?: return structural("返回不是 JSON 对象")
-    val captions = document["captions"] as? JsonArray ?: return structural("缺少 captions 数组")
+        ?: return structural(R.string.translate_detail_unreadable)
+    val captions = document["captions"] as? JsonArray ?: return structural(R.string.translate_detail_unreadable)
     val violations = mutableListOf<String>()
     val result = mutableListOf<SubtitleCue>()
     var consumed = 0
     for (element in captions) {
-        val caption = element as? JsonObject ?: return structural("captions 含非对象元素")
-        val ids = caption["source"] as? JsonArray ?: return structural("缺少 source 数组")
-        if (ids.isEmpty() || consumed + ids.size > source.size) return structural("source 编号超出范围")
+        val caption = element as? JsonObject ?: return structural(R.string.translate_detail_unreadable)
+        val ids = caption["source"] as? JsonArray ?: return structural(R.string.translate_detail_numbering)
+        if (ids.isEmpty() || consumed + ids.size > source.size) return structural(R.string.translate_detail_numbering)
         if (ids.withIndex().any { (offset, id) ->
                 val number = id as? JsonPrimitive
                 number == null || number.isString || number.intOrNull != consumed + offset + 1
             }
-        ) return structural("source 编号不连续或重复")
-        val japanese = caption.captionText("japanese") ?: return structural("日文为空")
-        val chinese = caption.captionText("chinese") ?: return structural("中文为空")
+        ) return structural(R.string.translate_detail_numbering)
+        val japanese = caption.captionText("japanese") ?: return structural(R.string.translate_detail_missing_japanese)
+        val chinese = caption.captionText("chinese") ?: return structural(R.string.translate_detail_missing_chinese)
         val group = source.subList(consumed, consumed + ids.size)
         val start = group.minOf { it.startMs }
         val end = group.maxOf { it.endMs }
@@ -152,7 +162,7 @@ internal fun parseRevisedTranslation(
         consumed += ids.size
         result += SubtitleCue(start, end, japanese, chinese, sourceCount = ids.size)
     }
-    if (consumed != source.size) return structural("未覆盖全部原编号")
+    if (consumed != source.size) return structural(R.string.translate_detail_missing_lines)
     return RevisedParse(result, violations)
 }
 
@@ -217,10 +227,39 @@ internal fun japaneseCorrectionInput(
 }
 
 /** 组合失败详情：统一清洗地址并裁剪模型原文，独立翻译与听写后翻译两条展示路径行为一致。 */
-internal fun japaneseFailureDetail(error: String?, raw: String?): String {
-    val head = error ?: "翻译结果格式或合并范围不正确"
-    val snippet = raw?.replace(Regex("""\w+://\S+"""), "[地址已略]")?.trim()?.take(1500)
-    return if (snippet.isNullOrEmpty()) head else "$head\n模型返回：$snippet"
+internal fun translationFailureDetail(
+    error: TextRef?,
+    raw: String?,
+    redactedLabel: String,
+    diagnostic: TextRef? = null,
+): TextRef {
+    val head = error ?: TextRef.Res(R.string.translate_error_format_retry)
+    val parts = mutableListOf(head)
+    diagnostic?.let(parts::add)
+    if (head.resIdOrNull() in setOf(R.string.translate_error_format_retry, R.string.translate_error_truncated)) {
+        val snippet = raw?.replace(Regex("""\w+://\S+""")) { redactedLabel }?.trim()?.take(1500)
+        if (!snippet.isNullOrEmpty()) {
+            parts += TextRef.Res(R.string.translate_error_model_response, listOf(TextRef.Raw(snippet)))
+        }
+    }
+    return if (parts.size == 1) head else TextRef.Joined(parts, separator = "\n")
+}
+
+internal fun parseLineCompletion(
+    content: String?,
+    error: TextRef?,
+    count: Int,
+    diagnostic: TextRef? = null,
+): TranslateReply {
+    val lines = content?.let { parseTranslationReply(it, count) }
+    return TranslateReply(
+        lines = lines,
+        error = if (lines == null) error ?: TextRef.Res(R.string.translate_error_format_retry) else null,
+        raw = content?.take(1500),
+        diagnostic = if (lines == null) {
+            diagnostic ?: content?.let { TextRef.Res(R.string.translate_detail_line_format) }
+        } else null,
+    )
 }
 
 class TranslateClient(
@@ -288,8 +327,9 @@ class TranslateClient(
         return RevisedTranslationReply(
             cues = parsed?.cues,
             violations = parsed?.violations.orEmpty(),
-            error = if (parsed?.cues == null) reply.error ?: parsed?.structuralError ?: "翻译结果格式或合并范围不正确" else null,
+            error = if (parsed?.cues == null) reply.error ?: TextRef.Res(R.string.translate_error_format_retry) else null,
             raw = reply.content,
+            diagnostic = if (parsed?.cues == null) reply.diagnostic ?: parsed?.structuralError else null,
         )
     }
 
@@ -320,22 +360,23 @@ class TranslateClient(
         return completeLines(rules, source, count, ticket)
     }
 
-    private data class Completion(val content: String? = null, val error: String? = null)
+    private data class Completion(
+        val content: String? = null,
+        val error: TextRef? = null,
+        val diagnostic: TextRef? = null,
+    )
 
     private fun completeLines(rules: String, source: String, count: Int, ticket: InflightCalls.Ticket): TranslateReply {
         val result = complete(rules, source, ticket)
-        return TranslateReply(
-            lines = result.content?.let { parseTranslationReply(it, count) },
-            raw = result.error ?: result.content?.let(::clip),
-        )
+        return parseLineCompletion(result.content, result.error, count, result.diagnostic)
     }
 
     private fun complete(rules: String, source: String, ticket: InflightCalls.Ticket): Completion {
         val model = credentials.translateModel()
-        val token = credentials.translateToken() ?: return Completion(error = "没有翻译口令")
+        val token = credentials.translateToken() ?: return Completion(error = TextRef.Res(R.string.translate_error_missing_key))
         val url = credentials.translateBaseUrl().toHttpUrlOrNull()
             ?.newBuilder()?.addPathSegment("chat")?.addPathSegment("completions")?.build()
-            ?: return Completion(error = "翻译地址不正确")
+            ?: return Completion(error = TextRef.Res(R.string.translate_error_invalid_address))
         val thinking = credentials.translateThinking()
         val body = JSONObject()
             .put("model", model)
@@ -367,22 +408,24 @@ class TranslateClient(
         if (!calls.begin(ticket, call)) throw CancellationException()
         val text = try {
             call.execute().use { response ->
-                val payload = response.body?.string().orEmpty()
-                if (!response.isSuccessful) return Completion(error = "翻译服务请求失败（HTTP ${response.code}）")
-                payload
+                if (!response.isSuccessful) return Completion(
+                    error = TextRef.Res(R.string.translate_error_server_unavailable),
+                    diagnostic = TextRef.Res(R.string.translate_detail_http_status, listOf(response.code)),
+                )
+                response.body?.string().orEmpty()
             }
         } catch (error: IOException) {
             if (call.isCanceled()) throw CancellationException()
-            return Completion(error = "无法连接翻译服务")
+            return Completion(error = TextRef.Res(R.string.translate_error_connection))
         } finally {
             calls.end(ticket, call)
         }
         val content = messageContent(text)
-        if (content.isNullOrBlank()) return Completion(error = "翻译服务没有返回正文")
+        if (content.isNullOrBlank()) return Completion(error = TextRef.Res(R.string.translate_error_empty_response))
         val truncated = runCatching {
             JSONObject(text).optJSONArray("choices")?.optJSONObject(0)?.optString("finish_reason") == "length"
         }.getOrDefault(false)
-        return Completion(content = content, error = if (truncated) "翻译返回被截断" else null)
+        return Completion(content = content, error = if (truncated) TextRef.Res(R.string.translate_error_truncated) else null)
     }
 
     private fun client(readMinutes: Long): OkHttpClient = OkHttpClient.Builder()
@@ -410,8 +453,6 @@ class TranslateClient(
     } catch (_: Exception) {
         null
     }
-
-    private fun clip(text: String): String = text.take(8_000)
 
     private fun plain(text: String): String =
         text.replace('\n', ' ').replace('\r', ' ').replace("|", " ").replace("｜", " ").trim()

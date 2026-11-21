@@ -1,5 +1,10 @@
 package com.nanahoshi.audioplayer.ui.youtube
 
+import com.nanahoshi.audioplayer.text.resolveUserError
+import com.nanahoshi.audioplayer.R
+import androidx.compose.ui.res.stringResource
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.text.resolve
 import android.app.Application
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -75,7 +80,7 @@ class YouTubeViewModel(app: Application) : AndroidViewModel(app) {
                 if (token == generation) { videos = result.videos; partial = result.partial }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (failure: Exception) {
-                if (token == generation) error = if (failure is YouTubeException) failure.message else "YouTube 读取失败，请稍后重试"
+                if (token == generation) error = getApplication<Application>().resolveUserError(failure, R.string.youtube_error_read_failed)
             } finally { if (token == generation) loading = false }
         }
     }
@@ -86,7 +91,7 @@ class YouTubeViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try { block() }
             catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { graph.messages.value = "YouTube 操作失败，请稍后重试" }
+            catch (_: Exception) { graph.show(R.string.youtube_error_operation_failed) }
         }
     }
     fun play(video: YouTubeVideo) = action {
@@ -97,14 +102,29 @@ class YouTubeViewModel(app: Application) : AndroidViewModel(app) {
         ))
     }
     fun saveSelection() = action {
-        videos.filter { it.id in selected }.forEach { graph.library.saveYouTube(it) }
+        val targets = videos.filter { it.id in selected }
+        var existing = 0
+        for (video in targets) {
+            if (graph.db.tracks().findYouTube(video.id) != null) existing++
+        }
+        targets.forEach { graph.library.saveYouTube(it) }
         clearSelection()
-        graph.messages.value = "已加入音频库"
+        graph.show(
+            when {
+                targets.isEmpty() -> TextRef.Res(R.string.youtube_no_videos_to_add)
+                existing == targets.size -> TextRef.Res(R.string.youtube_selected_in_library)
+                existing == 0 -> TextRef.Res(R.string.youtube_added_count, listOf(targets.size))
+                else -> TextRef.Res(
+                    R.string.youtube_added_partial,
+                    listOf(targets.size - existing, existing),
+                )
+            },
+        )
     }
 
     fun save(video: YouTubeVideo) = action {
         graph.library.saveYouTube(video)
-        graph.messages.value = "已加入音频库"
+        graph.show(R.string.youtube_added_library)
     }
 
 }
@@ -126,12 +146,12 @@ fun YouTubeBrowser(
     BackHandler(viewModel.selected.isNotEmpty()) { viewModel.clearSelection() }
     Column(Modifier.fillMaxSize()) {
         if (onBack != null) AppTopBar(
-            title = if (playlistId == "LL") "喜欢的视频" else "稍后观看", onBack = onBack,
+            title = stringResource(if (playlistId == "LL") R.string.youtube_liked_title else R.string.youtube_watch_later_title), onBack = onBack,
         )
         if (playlistId == null) {
             OutlinedTextField(
                 value = viewModel.query, onValueChange = { viewModel.query = it },
-                label = { Text("关键词、视频或播放列表链接") }, singleLine = true,
+                label = { Text(stringResource(R.string.youtube_search_hint)) }, singleLine = true,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 keyboardActions = KeyboardActions(onSearch = { viewModel.search() }),
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
@@ -139,28 +159,37 @@ fun YouTubeBrowser(
         }
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
             if (viewModel.loading) {
-                Text("正在读取…", Modifier.weight(1f))
-                TextButton(onClick = { viewModel.cancelSearch() }) { Text("中止") }
+                Text(stringResource(R.string.youtube_loading), Modifier.weight(1f))
+                TextButton(onClick = { viewModel.cancelSearch() }) { Text(stringResource(R.string.common_stop)) }
             } else {
-                Text("${viewModel.videos.size} 个视频", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                TextButton(onClick = { viewModel.search(playlistId) }) { Text(if (playlistId == null) "查找" else "刷新") }
+                Text(stringResource(R.string.youtube_video_count, viewModel.videos.size), Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                TextButton(onClick = { viewModel.search(playlistId) }) { Text(stringResource(if (playlistId == null) R.string.youtube_action_search else R.string.youtube_action_refresh)) }
             }
             if (viewModel.videos.isNotEmpty()) TextButton(onClick = viewModel::selectAll) {
-                Text(if (viewModel.selected.size == viewModel.videos.size) "取消全选" else "全选已加载")
+                Text(stringResource(if (viewModel.selected.size == viewModel.videos.size) R.string.youtube_deselect_all else R.string.youtube_select_all_loaded))
             }
         }
         if (viewModel.selected.isNotEmpty()) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("已选 ${viewModel.selected.size} 个", Modifier.weight(1f))
-                TextButton(onClick = viewModel::clearSelection) { Text("取消") }
-                TextButton(onClick = viewModel::saveSelection) { Text("加入音频库") }
+                Text(stringResource(R.string.youtube_selected_count, viewModel.selected.size), Modifier.weight(1f))
+                TextButton(onClick = viewModel::clearSelection) { Text(stringResource(R.string.common_cancel_selection)) }
+                TextButton(onClick = viewModel::saveSelection) { Text(stringResource(R.string.common_add_to_library)) }
             }
         }
         if (viewModel.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         viewModel.error?.let { Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error) }
-        if (viewModel.partial) Text("已显示部分视频，后续列表读取失败，可刷新重试。", Modifier.padding(16.dp), style = MaterialTheme.typography.bodySmall)
+        if (viewModel.partial) Text(stringResource(R.string.youtube_partial), Modifier.padding(16.dp), style = MaterialTheme.typography.bodySmall)
         if (!viewModel.loading && viewModel.videos.isEmpty() && viewModel.error == null) {
-            EmptyState(title = "还没有视频", message = if (playlistId == null) "输入关键词、视频编号或链接，查找后可播放或加入音频库。" else "保存登录信息后点刷新读取列表。")
+            EmptyState(
+                title = stringResource(
+                    if (playlistId == null) R.string.youtube_empty_search_title
+                    else R.string.youtube_empty_playlist_title,
+                ),
+                message = stringResource(
+                    if (playlistId == null) R.string.youtube_empty_search_message
+                    else R.string.youtube_empty_playlist_message,
+                ),
+            )
         }
         LazyColumn(state = listState, modifier = Modifier.weight(1f)) {
             items(viewModel.videos, key = { it.id }) { video ->
@@ -173,7 +202,17 @@ fun YouTubeBrowser(
                     supportingContent = {
                         Column {
                             Text(listOf(video.author, formatDuration(video.durationMs)).filter { it.isNotBlank() }.joinToString(" · "), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(when { downloaded -> "已下载"; downloading -> "下载中"; track != null -> "已在音频库"; else -> "未保存" }, style = MaterialTheme.typography.labelSmall)
+                            Text(
+                                stringResource(
+                                    when {
+                                        downloaded -> R.string.youtube_downloaded
+                                        downloading -> R.string.youtube_downloading
+                                        track != null -> R.string.youtube_in_library
+                                        else -> R.string.youtube_not_in_library
+                                    },
+                                ),
+                                style = MaterialTheme.typography.labelSmall,
+                            )
                         }
                     },
                     leadingContent = {
@@ -182,9 +221,9 @@ fun YouTubeBrowser(
                     trailingContent = {
                         if (viewModel.selected.isEmpty()) {
                             Box {
-                                IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "更多") }
+                                IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.a11y_video_actions)) }
                                 DropdownMenu(menu, { menu = false }) {
-                                    DropdownMenuItem(text = { Text(if (track != null) "已在音频库" else "加入音频库") }, enabled = track == null,
+                                    DropdownMenuItem(text = { Text(stringResource(if (track != null) R.string.youtube_in_library else R.string.youtube_add_to_library)) }, enabled = track == null,
                                         onClick = { menu = false; viewModel.save(video) })
                                 }
                             }
@@ -203,27 +242,33 @@ fun YouTubeBrowser(
 class YouTubeAccountViewModel(app: Application) : AndroidViewModel(app) {
     private val graph = app.graph()
     var saved by mutableStateOf(!graph.credentials.youtubeCookie().isNullOrBlank()); private set
-    var status by mutableStateOf(if (saved) "已保存登录信息" else "还没有保存登录信息"); private set
+    var status by mutableStateOf(
+        app.getString(if (saved) R.string.youtube_saved_login else R.string.youtube_no_login),
+    ); private set
     var busy by mutableStateOf(false); private set
     private var job: Job? = null
     fun savedCookie(): String = graph.credentials.youtubeCookie().orEmpty()
     fun save(raw: String): Boolean {
         val cookie = normalizeYouTubeCookie(raw)
-        if (cookie.isBlank() || !cookie.contains('=')) { status = "请粘贴 youtube.com 的整段 Cookie"; return false }
+        if (cookie.isBlank() || !cookie.contains('=')) {
+            status = getApplication<Application>().getString(R.string.youtube_cookie_hint)
+            return false
+        }
         job?.cancel()
-        graph.credentials.saveYouTubeCookie(cookie); graph.youtube.resetSession(); saved = true; status = "已保存，正在确认登录…"
+        graph.credentials.saveYouTubeCookie(cookie); graph.youtube.resetSession(); saved = true
+        status = getApplication<Application>().getString(R.string.youtube_saved_confirming)
         job = viewModelScope.launch {
             busy = true
-            try { status = graph.youtube.accountStatus() }
+            try { status = getApplication<Application>().resolve(graph.youtube.accountStatus()) }
             catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { status = "已保存，但连不上 YouTube" }
+            catch (_: Exception) { status = getApplication<Application>().getString(R.string.youtube_saved_offline) }
             finally { busy = false }
         }
         return true
     }
     fun clear() {
         job?.cancel(); graph.credentials.saveYouTubeCookie(""); graph.youtube.resetSession()
-        saved = false; busy = false; status = "已退出登录"
+        saved = false; busy = false; status = getApplication<Application>().getString(R.string.youtube_logged_out)
     }
 }
 
@@ -236,29 +281,29 @@ fun YouTubeAccountCard(onOpenList: (String) -> Unit, viewModel: YouTubeAccountVi
             Text("YouTube", style = MaterialTheme.typography.titleMedium)
             Text(viewModel.status, Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodyMedium)
             Row {
-                TextButton(onClick = { editing = true }) { Text(if (viewModel.saved) "更新 Cookie" else "保存 Cookie") }
-                TextButton(onClick = { confirmClear = true }, enabled = viewModel.saved) { Text("退出登录") }
+                TextButton(onClick = { editing = true }) { Text(stringResource(if (viewModel.saved) R.string.youtube_update_cookie else R.string.youtube_save_cookie)) }
+                TextButton(onClick = { confirmClear = true }, enabled = viewModel.saved) { Text(stringResource(R.string.youtube_logout)) }
             }
             Row {
-                TextButton(onClick = { onOpenList("LL") }) { Text("喜欢的视频") }
-                TextButton(onClick = { onOpenList("WL") }) { Text("稍后观看") }
+                TextButton(onClick = { onOpenList("LL") }) { Text(stringResource(R.string.youtube_liked_title)) }
+                TextButton(onClick = { onOpenList("WL") }) { Text(stringResource(R.string.youtube_watch_later_title)) }
             }
-            Text("使用浏览器里 youtube.com 的整段 Cookie。登录信息加密保存在本机，不会自动更新。", style = MaterialTheme.typography.bodySmall)
+            Text(stringResource(R.string.youtube_cookie_help), style = MaterialTheme.typography.bodySmall)
         }
     }
     if (editing) {
         var draft by remember { mutableStateOf(viewModel.savedCookie()) }
-        AlertDialog(onDismissRequest = { editing = false }, title = { Text("YouTube 登录信息") },
-            text = { OutlinedTextField(draft, { draft = it }, label = { Text("整段 Cookie") }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth()) },
-            confirmButton = { TextButton(onClick = { if (viewModel.save(draft)) editing = false }) { Text("保存") } },
-            dismissButton = { TextButton(onClick = { editing = false }) { Text("取消") } },
+        AlertDialog(onDismissRequest = { editing = false }, title = { Text(stringResource(R.string.youtube_login_info_title)) },
+            text = { OutlinedTextField(draft, { draft = it }, label = { Text(stringResource(R.string.youtube_cookie_label)) }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth()) },
+            confirmButton = { TextButton(onClick = { if (viewModel.save(draft)) editing = false }) { Text(stringResource(R.string.common_save)) } },
+            dismissButton = { TextButton(onClick = { editing = false }) { Text(stringResource(R.string.common_cancel)) } },
         )
     }
     if (confirmClear) {
         ConfirmActionDialog(
-            title = "退出 YouTube 登录",
-            message = "「喜欢的视频」和「稍后观看」需要重新保存 Cookie 后才能读取；已加入音频库的曲目和下载文件不受影响。",
-            confirmLabel = "退出登录",
+            title = stringResource(R.string.youtube_logout_title),
+            message = stringResource(R.string.youtube_logout_message),
+            confirmLabel = stringResource(R.string.youtube_logout),
             onConfirm = { confirmClear = false; viewModel.clear() },
             onDismiss = { confirmClear = false },
         )

@@ -1,26 +1,29 @@
 package com.nanahoshi.audioplayer.bilibili
 
+import androidx.annotation.StringRes
+import com.nanahoshi.audioplayer.R
+import com.nanahoshi.audioplayer.text.TextRef
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.*
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 enum class BiliSearchMode { VIDEO, UPLOADER }
 
-enum class BiliVideoOrder(val label: String, val value: String) {
-    TOTAL_RANK("综合排序", "totalrank"),
-    PLAY_COUNT("最多播放", "click"),
-    PUBLISHED("最新发布", "pubdate"),
-    DANMAKU("最多弹幕", "dm"),
-    FAVORITES("最多收藏", "stow"),
-    COMMENTS("最多评论", "scores"),
+enum class BiliVideoOrder(@param:StringRes val labelRes: Int, val value: String) {
+    TOTAL_RANK(R.string.bilibili_order_totalrank, "totalrank"),
+    PLAY_COUNT(R.string.bilibili_order_play_count, "click"),
+    PUBLISHED(R.string.bilibili_order_published, "pubdate"),
+    DANMAKU(R.string.bilibili_order_danmaku, "dm"),
+    FAVORITES(R.string.bilibili_order_favorites, "stow"),
+    COMMENTS(R.string.bilibili_order_comments, "scores"),
 }
 
-enum class BiliVideoDuration(val label: String, val value: String) {
-    ALL("全部时长", "0"),
-    UNDER_TEN("10 分钟以下", "1"),
-    TEN_TO_THIRTY("10–30 分钟", "2"),
-    THIRTY_TO_SIXTY("30–60 分钟", "3"),
-    OVER_SIXTY("60 分钟以上", "4"),
+enum class BiliVideoDuration(@param:StringRes val labelRes: Int, val value: String) {
+    ALL(R.string.bilibili_duration_all, "0"),
+    UNDER_TEN(R.string.bilibili_duration_under_ten, "1"),
+    TEN_TO_THIRTY(R.string.bilibili_duration_ten_thirty, "2"),
+    THIRTY_TO_SIXTY(R.string.bilibili_duration_thirty_sixty, "3"),
+    OVER_SIXTY(R.string.bilibili_duration_over_sixty, "4"),
 }
 
 sealed interface BiliSearchInput {
@@ -42,7 +45,10 @@ data class BiliPage<T>(val items: List<T>, val hasMore: Boolean)
 
 internal fun biliInput(raw: String, mode: BiliSearchMode): BiliSearchInput {
     val text = raw.trim()
-    if (text.isEmpty()) throw BilibiliException(0, "请输入关键词、BV 号或 UP 主")
+    if (text.isEmpty()) throw BilibiliException(0, TextRef.Res(
+        if (mode == BiliSearchMode.UPLOADER) R.string.bilibili_error_uploader_hint
+        else R.string.bilibili_error_video_hint,
+    ))
     Regex("BV[0-9A-Za-z]{10}").find(text)?.let { return BiliSearchInput.Video(it.value) }
     val url = text.toHttpUrlOrNull()
     val uid = when {
@@ -52,7 +58,7 @@ internal fun biliInput(raw: String, mode: BiliSearchMode): BiliSearchInput {
         else -> null
     }
     if (uid != null) return BiliSearchInput.Uploader(uid.toLongOrNull()?.takeIf { it > 0 }
-        ?: throw BilibiliException(0, "请输入正确的 UP 主 UID"))
+        ?: throw BilibiliException(0, TextRef.Res(R.string.bilibili_error_invalid_uid)))
     return BiliSearchInput.Keyword(text, mode)
 }
 
@@ -73,13 +79,13 @@ internal fun biliDuration(raw: String): Long {
     return parts.fold(0L) { sum, part -> sum * 60 + part } * 1000
 }
 
-internal fun biliSearchError(code: Int): String = when (code) {
-    -101, -111, 401 -> "B 站登录信息无效，请在「我的」重新登录"
-    -352, -412, 412, 429 -> "B 站暂时限制了访问，请稍后重试或更换网络"
-    -403 -> "B 站请求验证失败，请重试"
-    -404, 404 -> "没有找到这个视频或 UP 主"
-    else -> "B 站读取失败，请稍后重试"
-}
+internal fun biliSearchError(code: Int): TextRef = TextRef.Res(when (code) {
+    -101, -111, 401 -> R.string.bilibili_error_login_invalid
+    -352, -412, 412, 429 -> R.string.bilibili_error_rate_limited
+    -403 -> R.string.bilibili_error_verify
+    -404, 404 -> R.string.bilibili_error_not_found
+    else -> R.string.bilibili_error_read_failed
+})
 
 /** 只处理可脱敏测试的 JSON；请求和凭证由现有客户端提供。 */
 class BiliSearchApi(
@@ -90,11 +96,12 @@ class BiliSearchApi(
             try {
                 val raw = signedGet(path, params, referer, attempt == 1)
                 val root = try { Json.parseToJsonElement(raw) }
-                catch (_: Exception) { throw BilibiliException(0, "B 站返回的数据无法读取，请重试") }
-                val code = root.number("code")?.toInt() ?: throw BilibiliException(0, "B 站返回的数据无法读取，请重试")
+                catch (_: Exception) { throw BilibiliException(0, TextRef.Res(R.string.bilibili_error_search_failed)) }
+                val code = root.number("code")?.toInt()
+                    ?: throw BilibiliException(0, TextRef.Res(R.string.bilibili_error_search_failed))
                 if (code != 0) throw BilibiliException(code, biliSearchError(code))
                 return root.field("data").takeUnless { it == JsonNull }
-                    ?: throw BilibiliException(0, "B 站没有返回搜索数据，请重试")
+                    ?: throw BilibiliException(0, TextRef.Res(R.string.bilibili_error_no_search_data))
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (error: BilibiliException) {
                 if (error.code != -403 || attempt == 1) throw error
@@ -125,7 +132,7 @@ class BiliSearchApi(
         require(mid > 0 && page > 0)
         val data = data("/x/space/wbi/arc/search", mapOf("mid" to "$mid", "pn" to "$page", "ps" to "30", "order" to "pubdate"), "https://space.bilibili.com/$mid/upload/video")
         val list = data.field("list").field("vlist") as? JsonArray
-            ?: throw BilibiliException(0, "B 站没有返回投稿列表，请重试")
+            ?: throw BilibiliException(0, TextRef.Res(R.string.bilibili_error_no_upload_list))
         val items = list.mapNotNull { video(it, mid) }.distinctBy { it.bvid }
         val count = data.field("page").number("count") ?: 0
         return BiliPage(items, page * 30L < count)
@@ -143,7 +150,7 @@ class BiliSearchApi(
     }
     private fun results(data: JsonElement): List<JsonElement> = when (val result = data.field("result")) {
         is JsonArray -> result
-        else -> if (data.number("numResults") == 0L) emptyList() else throw BilibiliException(0, "B 站没有返回搜索列表，请重试")
+        else -> if (data.number("numResults") == 0L) emptyList() else throw BilibiliException(0, TextRef.Res(R.string.bilibili_error_no_search_list))
     }
     private fun video(item: JsonElement, owner: Long = 0): BiliVideoHit? {
         val bvid = item.text("bvid").takeIf { Regex("BV[0-9A-Za-z]{10}").matches(it) } ?: return null

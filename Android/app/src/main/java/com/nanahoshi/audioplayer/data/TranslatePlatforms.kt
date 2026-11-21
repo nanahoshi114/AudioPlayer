@@ -1,32 +1,34 @@
 package com.nanahoshi.audioplayer.data
 
+import androidx.annotation.StringRes
+import com.nanahoshi.audioplayer.R
 import java.net.URI
 
 enum class TranslatePlatform(
-    val label: String,
+    @param:StringRes val labelRes: Int,
     val baseUrl: String,
     val defaultModel: String,
     val efforts: List<TranslateEffort>,
     val defaultEffort: String,
 ) {
     QWEN(
-        "千问 AI 平台",
+        R.string.settings_platform_qwen,
         "https://maas.qianwenaiapi.com/compatible-mode/v1",
         "qwen3.8-flash",
         listOf(
-            TranslateEffort("low", "低"),
-            TranslateEffort("medium", "中"),
-            TranslateEffort("xhigh", "高"),
+            TranslateEffort("low", R.string.settings_effort_low),
+            TranslateEffort("medium", R.string.settings_effort_medium),
+            TranslateEffort("xhigh", R.string.settings_effort_high),
         ),
         "medium",
     ),
     DEEPSEEK(
-        "DeepSeek",
+        R.string.settings_platform_deepseek,
         "https://api.deepseek.com",
         "deepseek-flash",
         listOf(
-            TranslateEffort("high", "高"),
-            TranslateEffort("max", "最高"),
+            TranslateEffort("high", R.string.settings_effort_high),
+            TranslateEffort("max", R.string.settings_effort_max),
         ),
         "high",
     ),
@@ -36,7 +38,7 @@ enum class TranslatePlatform(
         efforts.firstOrNull { it.value == raw?.trim() }?.value ?: defaultEffort
 }
 
-data class TranslateEffort(val value: String, val label: String)
+data class TranslateEffort(val value: String, @param:StringRes val labelRes: Int)
 
 internal fun translatePlatformOf(raw: String?): TranslatePlatform =
     TranslatePlatform.entries.firstOrNull { it.name == raw } ?: TranslatePlatform.QWEN

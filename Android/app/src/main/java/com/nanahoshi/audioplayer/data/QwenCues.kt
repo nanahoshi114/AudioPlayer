@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.R
+import com.nanahoshi.audioplayer.text.TextRef
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -7,7 +9,7 @@ internal fun cuesFromQwenPayload(text: String): List<WhisperCue> {
     val root = try {
         JSONObject(text)
     } catch (_: Exception) {
-        throw WhisperException("生成失败")
+        throw WhisperException(TextRef.Res(R.string.whisper_error_failed))
     }
     val found = mutableListOf<WhisperCue>()
     val output = root.optJSONObject("output")
@@ -22,19 +24,19 @@ internal fun cuesFromQwenPayload(text: String): List<WhisperCue> {
     }
     if (found.isEmpty()) addSentence(found, output?.optJSONObject("sentence"))
     if (found.isEmpty() && output?.optString("text")?.trim().orEmpty().isNotEmpty()) {
-        throw WhisperException("没有分段时间")
+        throw WhisperException(TextRef.Res(R.string.whisper_error_no_timing))
     }
     return found.sortedBy { it.startMs }
 }
 
-internal fun qwenErrorMessage(text: String): String {
-    val fallback = "生成失败"
+internal fun qwenErrorMessage(text: String): TextRef {
+    val fallback = TextRef.Res(R.string.whisper_error_failed)
     return try {
         val json = JSONObject(text)
-        json.optString("message").takeIf { it.isNotBlank() }?.take(80)?.let { return it }
+        json.optString("message").takeIf { it.isNotBlank() }?.take(80)?.let { return TextRef.Raw(it) }
         when (val error = json.opt("error")) {
-            is String -> error.takeIf { it.isNotBlank() }?.take(80) ?: fallback
-            is JSONObject -> error.optString("message").takeIf { it.isNotBlank() }?.take(80) ?: fallback
+            is String -> error.takeIf { it.isNotBlank() }?.take(80)?.let(TextRef::Raw) ?: fallback
+            is JSONObject -> error.optString("message").takeIf { it.isNotBlank() }?.take(80)?.let(TextRef::Raw) ?: fallback
             else -> fallback
         }
     } catch (_: Exception) {
