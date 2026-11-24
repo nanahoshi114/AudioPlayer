@@ -13,18 +13,21 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Deselect
+import androidx.compose.material.icons.filled.LibraryAdd
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.SelectAll
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
@@ -36,9 +39,14 @@ import com.nanahoshi.audioplayer.data.db.DownloadStatus
 import com.nanahoshi.audioplayer.dlsite.RemotePlayable
 import com.nanahoshi.audioplayer.graph
 import com.nanahoshi.audioplayer.ui.CoverImage
+import com.nanahoshi.audioplayer.ui.components.AccountCard
 import com.nanahoshi.audioplayer.ui.components.AppTopBar
 import com.nanahoshi.audioplayer.ui.components.ConfirmActionDialog
 import com.nanahoshi.audioplayer.ui.components.EmptyState
+import com.nanahoshi.audioplayer.ui.components.SearchField
+import com.nanahoshi.audioplayer.ui.components.SelectionAction
+import com.nanahoshi.audioplayer.ui.components.SelectionTopBar
+import com.nanahoshi.audioplayer.ui.components.TopBarOverride
 import com.nanahoshi.audioplayer.ui.formatDuration
 import com.nanahoshi.audioplayer.youtube.*
 import kotlinx.coroutines.*
@@ -54,6 +62,7 @@ class YouTubeViewModel(app: Application) : AndroidViewModel(app) {
     val tracks = graph.db.tracks().observeAll()
     val downloads = graph.downloads.observe()
     private var request: Job? = null
+    private var saving = false
     var searchRevision by mutableStateOf(0L); private set
     private var generation = 0L
     init {
@@ -101,25 +110,34 @@ class YouTubeViewModel(app: Application) : AndroidViewModel(app) {
                 "https://www.youtube.com/", video.durationMs, video.id, "audio"),
         ))
     }
-    fun saveSelection() = action {
-        val targets = videos.filter { it.id in selected }
-        var existing = 0
-        for (video in targets) {
-            if (graph.db.tracks().findYouTube(video.id) != null) existing++
-        }
-        targets.forEach { graph.library.saveYouTube(it) }
-        clearSelection()
-        graph.show(
-            when {
-                targets.isEmpty() -> TextRef.Res(R.string.youtube_no_videos_to_add)
-                existing == targets.size -> TextRef.Res(R.string.youtube_selected_in_library)
-                existing == 0 -> TextRef.Res(R.string.youtube_added_count, listOf(targets.size))
-                else -> TextRef.Res(
-                    R.string.youtube_added_partial,
-                    listOf(targets.size - existing, existing),
+    fun saveSelection() {
+        if (saving) return
+        saving = true
+        action {
+            try {
+                val targets = videos.filter { it.id in selected }
+                var existing = 0
+                for (video in targets) {
+                    if (graph.db.tracks().findYouTube(video.id) != null) existing++
+                }
+                targets.forEach { graph.library.saveYouTube(it) }
+                // 只移除本次快照中已保存的条目，保留用户在这期间新勾选的内容。
+                selected = selected - targets.map { it.id }.toSet()
+                graph.show(
+                    when {
+                        targets.isEmpty() -> TextRef.Res(R.string.youtube_no_videos_to_add)
+                        existing == targets.size -> TextRef.Res(R.string.youtube_selected_in_library)
+                        existing == 0 -> TextRef.Res(R.string.youtube_added_count, listOf(targets.size))
+                        else -> TextRef.Res(
+                            R.string.youtube_added_partial,
+                            listOf(targets.size - existing, existing),
+                        )
+                    },
                 )
-            },
-        )
+            } finally {
+                saving = false
+            }
+        }
     }
 
     fun save(video: YouTubeVideo) = action {
@@ -134,6 +152,7 @@ class YouTubeViewModel(app: Application) : AndroidViewModel(app) {
 fun YouTubeBrowser(
     playlistId: String? = null,
     onBack: (() -> Unit)? = null,
+    topBarOwnerKey: String? = null,
     viewModel: YouTubeViewModel = viewModel(key = "youtube:${playlistId ?: "search"}"),
 ) {
     val tracks by viewModel.tracks.collectAsStateWithLifecycle(emptyList())
@@ -143,18 +162,44 @@ fun YouTubeBrowser(
     val listState = rememberLazyListState()
     com.nanahoshi.audioplayer.ui.components.ResetOnNewSearch(listState, viewModel.searchRevision)
     LaunchedEffect(playlistId) { if (playlistId != null) viewModel.search(playlistId) }
-    BackHandler(viewModel.selected.isNotEmpty()) { viewModel.clearSelection() }
+    val selecting = viewModel.selected.isNotEmpty()
+    BackHandler(selecting) { viewModel.clearSelection() }
+    val selectionBar: (@Composable () -> Unit)? = if (selecting) {
+        {
+            val allSelected = viewModel.selected.size == viewModel.videos.size
+            SelectionTopBar(
+                count = viewModel.selected.size,
+                onClose = viewModel::clearSelection,
+                actions = listOf(
+                    SelectionAction(
+                        stringResource(if (allSelected) R.string.youtube_deselect_all else R.string.youtube_select_all_loaded),
+                        if (allSelected) Icons.Default.Deselect else Icons.Default.SelectAll,
+                        viewModel::selectAll,
+                    ),
+                    SelectionAction(stringResource(R.string.common_add_to_library), Icons.Default.LibraryAdd, viewModel::saveSelection),
+                ),
+            )
+        }
+    } else {
+        null
+    }
+    val overrideOwner = topBarOwnerKey?.takeIf { playlistId == null }
+    if (overrideOwner != null && selectionBar != null) TopBarOverride(overrideOwner, selectionBar)
     Column(Modifier.fillMaxSize()) {
-        if (onBack != null) AppTopBar(
-            title = stringResource(if (playlistId == "LL") R.string.youtube_liked_title else R.string.youtube_watch_later_title), onBack = onBack,
-        )
+        if (overrideOwner == null) {
+            if (selectionBar != null) selectionBar()
+            else if (onBack != null) AppTopBar(
+                title = stringResource(if (playlistId == "LL") R.string.youtube_liked_title else R.string.youtube_watch_later_title),
+                onBack = onBack,
+            )
+        }
         if (playlistId == null) {
-            OutlinedTextField(
-                value = viewModel.query, onValueChange = { viewModel.query = it },
-                label = { Text(stringResource(R.string.youtube_search_hint)) }, singleLine = true,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                keyboardActions = KeyboardActions(onSearch = { viewModel.search() }),
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            SearchField(
+                value = viewModel.query,
+                onValueChange = { viewModel.query = it },
+                placeholder = stringResource(R.string.youtube_search_hint),
+                onSearch = { viewModel.search() },
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
             )
         }
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -165,15 +210,8 @@ fun YouTubeBrowser(
                 Text(stringResource(R.string.youtube_video_count, viewModel.videos.size), Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                 TextButton(onClick = { viewModel.search(playlistId) }) { Text(stringResource(if (playlistId == null) R.string.youtube_action_search else R.string.youtube_action_refresh)) }
             }
-            if (viewModel.videos.isNotEmpty()) TextButton(onClick = viewModel::selectAll) {
-                Text(stringResource(if (viewModel.selected.size == viewModel.videos.size) R.string.youtube_deselect_all else R.string.youtube_select_all_loaded))
-            }
-        }
-        if (viewModel.selected.isNotEmpty()) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(stringResource(R.string.youtube_selected_count, viewModel.selected.size), Modifier.weight(1f))
-                TextButton(onClick = viewModel::clearSelection) { Text(stringResource(R.string.common_cancel_selection)) }
-                TextButton(onClick = viewModel::saveSelection) { Text(stringResource(R.string.common_add_to_library)) }
+            if (!selecting && viewModel.videos.isNotEmpty()) TextButton(onClick = viewModel::selectAll) {
+                Text(stringResource(R.string.youtube_select_all_loaded))
             }
         }
         if (viewModel.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -189,9 +227,14 @@ fun YouTubeBrowser(
                     if (playlistId == null) R.string.youtube_empty_search_message
                     else R.string.youtube_empty_playlist_message,
                 ),
+                modifier = Modifier.weight(1f).fillMaxWidth(),
             )
-        }
-        LazyColumn(state = listState, modifier = Modifier.weight(1f)) {
+        } else {
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            contentPadding = PaddingValues(bottom = 24.dp),
+        ) {
             items(viewModel.videos, key = { it.id }) { video ->
                 val track = stored[video.id]
                 val downloaded = track?.localUri?.let { it.startsWith("/") && java.io.File(it).isFile } == true
@@ -211,12 +254,15 @@ fun YouTubeBrowser(
                                         else -> R.string.youtube_not_in_library
                                     },
                                 ),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                                 style = MaterialTheme.typography.labelSmall,
                             )
                         }
                     },
                     leadingContent = {
-                        if (viewModel.selected.isNotEmpty()) Checkbox(video.id in viewModel.selected, { viewModel.toggle(video.id) }) else CoverImage(video.coverUrl)
+                        if (viewModel.selected.isNotEmpty()) Checkbox(video.id in viewModel.selected, { viewModel.toggle(video.id) })
+                        else CoverImage(video.coverUrl, shape = MaterialTheme.shapes.small)
                     },
                     trailingContent = {
                         if (viewModel.selected.isEmpty()) {
@@ -235,6 +281,7 @@ fun YouTubeBrowser(
                     ),
                 )
             }
+        }
         }
     }
 }
@@ -276,26 +323,63 @@ class YouTubeAccountViewModel(app: Application) : AndroidViewModel(app) {
 fun YouTubeAccountCard(onOpenList: (String) -> Unit, viewModel: YouTubeAccountViewModel = viewModel()) {
     var editing by rememberSaveable { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
-    Surface(shape = MaterialTheme.shapes.large, tonalElevation = 1.dp, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-        Column(Modifier.padding(16.dp)) {
-            Text("YouTube", style = MaterialTheme.typography.titleMedium)
-            Text(viewModel.status, Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodyMedium)
-            Row {
-                TextButton(onClick = { editing = true }) { Text(stringResource(if (viewModel.saved) R.string.youtube_update_cookie else R.string.youtube_save_cookie)) }
-                TextButton(onClick = { confirmClear = true }, enabled = viewModel.saved) { Text(stringResource(R.string.youtube_logout)) }
-            }
-            Row {
-                TextButton(onClick = { onOpenList("LL") }) { Text(stringResource(R.string.youtube_liked_title)) }
-                TextButton(onClick = { onOpenList("WL") }) { Text(stringResource(R.string.youtube_watch_later_title)) }
-            }
-            Text(stringResource(R.string.youtube_cookie_help), style = MaterialTheme.typography.bodySmall)
+    AccountCard(title = "YouTube", loggedIn = viewModel.saved) {
+        if (viewModel.status.isNotBlank()) {
+            Text(
+                viewModel.status,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp),
+            )
         }
+        Row {
+            TextButton(onClick = { editing = true }) { Text(stringResource(if (viewModel.saved) R.string.youtube_update_cookie else R.string.youtube_save_cookie)) }
+            TextButton(onClick = { confirmClear = true }, enabled = viewModel.saved) { Text(stringResource(R.string.youtube_logout)) }
+        }
+        Row {
+            TextButton(onClick = { onOpenList("LL") }) { Text(stringResource(R.string.youtube_liked_title)) }
+            TextButton(onClick = { onOpenList("WL") }) { Text(stringResource(R.string.youtube_watch_later_title)) }
+        }
+        Text(stringResource(R.string.youtube_cookie_help), style = MaterialTheme.typography.bodySmall)
     }
     if (editing) {
         var draft by remember { mutableStateOf(viewModel.savedCookie()) }
+        var showSecret by rememberSaveable { mutableStateOf(false) }
+        val normalized = normalizeYouTubeCookie(draft)
+        val invalid = draft.isNotBlank() && (normalized.isBlank() || !normalized.contains('='))
         AlertDialog(onDismissRequest = { editing = false }, title = { Text(stringResource(R.string.youtube_login_info_title)) },
-            text = { OutlinedTextField(draft, { draft = it }, label = { Text(stringResource(R.string.youtube_cookie_label)) }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth()) },
-            confirmButton = { TextButton(onClick = { if (viewModel.save(draft)) editing = false }) { Text(stringResource(R.string.common_save)) } },
+            text = {
+                OutlinedTextField(
+                    draft,
+                    { draft = it },
+                    label = { Text(stringResource(R.string.youtube_cookie_label)) },
+                    visualTransformation = if (showSecret) VisualTransformation.None else PasswordVisualTransformation(),
+                    isError = invalid,
+                    supportingText = {
+                        Text(
+                            stringResource(if (invalid) R.string.youtube_cookie_invalid else R.string.youtube_cookie_hint),
+                            color = if (invalid) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    },
+                    trailingIcon = {
+                        IconButton(onClick = { showSecret = !showSecret }) {
+                            Icon(
+                                if (showSecret) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                contentDescription = stringResource(
+                                    if (showSecret) R.string.a11y_hide_password else R.string.a11y_show_password,
+                                ),
+                            )
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = { if (viewModel.save(draft)) editing = false },
+                    enabled = draft.isNotBlank() && !invalid,
+                ) { Text(stringResource(R.string.common_save)) }
+            },
             dismissButton = { TextButton(onClick = { editing = false }) { Text(stringResource(R.string.common_cancel)) } },
         )
     }

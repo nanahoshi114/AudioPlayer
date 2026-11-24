@@ -7,18 +7,21 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nanahoshi.audioplayer.bilibili.BiliImportMode
+import com.nanahoshi.audioplayer.data.BiliImportPrompt
 import com.nanahoshi.audioplayer.data.BiliImportRequests
 
 @Composable
-fun BiliImportDialog(requests: BiliImportRequests) {
-    val current by requests.prompt.collectAsStateWithLifecycle()
-    val prompt = current ?: return
+internal fun BiliImportDialog(
+    requests: BiliImportRequests,
+    prompt: BiliImportPrompt? = requests.prompt.collectAsStateWithLifecycle().value,
+) {
+    if (prompt == null) return
     AlertDialog(
         onDismissRequest = { requests.cancel(prompt.id) },
         title = { Text(stringResource(if (prompt.confirming) R.string.bilibili_import_change_title else R.string.bilibili_import_choose_title)) },
@@ -40,10 +43,14 @@ fun BiliImportDialog(requests: BiliImportRequests) {
                             SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                                 SegmentedButton(selected = option.mode == BiliImportMode.SPLIT,
                                     onClick = { requests.edit(prompt.id, index) { it.copy(mode = BiliImportMode.SPLIT) } },
-                                    shape = SegmentedButtonDefaults.itemShape(0, 2)) { Text(stringResource(R.string.bilibili_import_separate)) }
+                                    shape = SegmentedButtonDefaults.itemShape(0, 2)) {
+                                    Text(stringResource(R.string.bilibili_import_separate), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+                                }
                                 SegmentedButton(selected = option.mode == BiliImportMode.GROUPED,
                                     onClick = { requests.edit(prompt.id, index) { it.copy(mode = BiliImportMode.GROUPED) } },
-                                    shape = SegmentedButtonDefaults.itemShape(1, 2)) { Text(stringResource(R.string.bilibili_import_grouped)) }
+                                    shape = SegmentedButtonDefaults.itemShape(1, 2)) {
+                                    Text(stringResource(R.string.bilibili_import_grouped), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+                                }
                             }
                             if (option.mode == BiliImportMode.GROUPED) Text(
                                 stringResource(R.string.bilibili_import_grouped_summary, option.details.parts.size),

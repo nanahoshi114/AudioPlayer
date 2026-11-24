@@ -9,9 +9,11 @@ import com.nanahoshi.audioplayer.text.TextRef
 import com.nanahoshi.audioplayer.text.UserFacingError
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.JsonObject
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
@@ -23,6 +25,7 @@ import java.io.IOException
 import java.security.MessageDigest
 import java.text.Normalizer
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
 
 internal const val JA_WORK_DOWNLOAD = "JAPANESE_ASMR_WORK"
 internal const val JA_VERIFY_PHASE = "VERIFY"
@@ -82,7 +85,13 @@ internal sealed interface JaFileTransfer {
         val userAgent: String? = null,
         val verificationPage: JaBuzzPage? = null,
     ) : JaFileTransfer
-    data class Mega(val address: HttpUrl, val crypto: JaMegaCrypto) : JaFileTransfer
+    data class Mega(
+        val source: JaMegaFileSource,
+        val crypto: JaMegaCrypto,
+        val initialAddress: HttpUrl? = null,
+    ) : JaFileTransfer {
+        override fun toString(): String = "Mega(source=$source, hasInitialAddress=${initialAddress != null})"
+    }
 }
 
 internal data class JaRemoteFile(
@@ -102,9 +111,21 @@ internal data class JaWorkManifest(
     val verifiedBuzzPages: Map<String, JaVisibleDownload> = emptyMap(),
 ) {
     val bytes: Long? get() = if (files.all { it.size != null }) files.sumOf { it.size ?: 0L } else null
+    val pureMega: Boolean get() = files.isNotEmpty() && files.all { it.transfer is JaFileTransfer.Mega }
+
+    fun forMegaRetention(keepInitialAddress: Boolean): JaWorkManifest = copy(
+        files = if (keepInitialAddress) files else files.map { file ->
+            val transfer = file.transfer as JaFileTransfer.Mega
+            if (transfer.initialAddress == null) file else file.copy(transfer = transfer.copy(initialAddress = null))
+        },
+        sourcePage = null,
+        verifiedBuzzPages = emptyMap(),
+    )
 }
 
 private const val MAX_PAGE = 512_000L
+private const val MAX_MEGA_FOLDER_JSON = 8L * 1024 * 1024
+private val refreshTarget = Regex("""(?i)(?:^|[;,\s])url\s*=\s*(.+)$""")
 private val htmlStart = Regex("""^(?:<!--|<!doctype\s+html|<\?xml|<(?:html|head|body|title|script|meta|div)(?:[\s>/]))""", RegexOption.IGNORE_CASE)
 private val buzzHosts = setOf("buzzheavier.com", "www.buzzheavier.com", "ts.buzzheavier.com", "dd.buzzheavier.com")
 private val megaHosts = setOf("mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz")
@@ -179,7 +200,8 @@ private fun jaDownloadLinks(address: HttpUrl, html: String): List<Pair<String, S
         link to element.text()
     }
     val refresh = page.select("meta[http-equiv=refresh]").mapNotNull {
-        val target = it.attr("content").substringAfter("url=", "").trim().trim('"', '\'')
+        val target = refreshTarget.find(it.attr("content"))?.groupValues?.get(1)
+            ?.trim()?.trim('"', '\'') ?: return@mapNotNull null
         address.resolve(target)?.toString()?.let { link -> link to "" }
     }
     val quoted = Regex("""["'](https://(?:[a-zA-Z0-9.-]+\.)?(?:buzzheavier\.com|mega\.nz|mega\.co\.nz)/[^"'\s<>]+)["']""")
@@ -258,6 +280,7 @@ internal class JaWorkClient(
 ) {
     private val http = http.newBuilder().followRedirects(false).followSslRedirects(false)
         .cookieJar(okhttp3.CookieJar.NO_COOKIES).build()
+    private val megaSeq = AtomicLong(1)
 
     suspend fun manifest(
         entry: JaWorkEntry,
@@ -297,7 +320,11 @@ internal class JaWorkClient(
                     }
                 throw JaBuzzVerification(entry, first, pages, fileLink = link)
             }
-            val file = if (url.host in megaHosts) mega(url) else {
+            val files = if (url.host in megaHosts) {
+                val resolved = mega(url)
+                skipped += resolved.skipped
+                resolved.files
+            } else {
                 var attempt = 0
                 var result: JaRemoteFile? = null
                 while (result == null) {
@@ -311,16 +338,18 @@ internal class JaWorkClient(
                         confirmed.putAll(pages)
                     }
                 }
-                result
+                listOf(result)
             }
-            val path = normalizeJaWorkPath(file.relativePath)
-            val key = path?.let(::jaWorkPathKey)
-            if (key == null || key in accepted || key in directories || parentPaths(key).any { it in accepted }) {
-                skipped++
-                continue
+            for (file in files) {
+                val path = normalizeJaWorkPath(file.relativePath)
+                val key = path?.let(::jaWorkPathKey)
+                if (key == null || key in accepted || key in directories || parentPaths(key).any { it in accepted }) {
+                    skipped++
+                    continue
+                }
+                accepted[key] = file.copy(relativePath = requireNotNull(path))
+                directories.addAll(parentPaths(key))
             }
-            accepted[key] = file.copy(relativePath = requireNotNull(path))
-            directories.addAll(parentPaths(key))
         }
         if (accepted.isEmpty()) unavailable()
         return JaWorkManifest(
@@ -404,19 +433,34 @@ internal class JaWorkClient(
         }
     }
 
-    private suspend fun mega(url: HttpUrl): JaRemoteFile {
-        val share = JaMegaShare.parse(url)
-        val api = requireNotNull("https://g.api.mega.co.nz/cs?id=1".toHttpUrlOrNull())
-        val data = http.newCall(share.request(api)).withResponse { response ->
-            checkMegaResponse(response)
-            share.resolve(response.peekBody(MAX_PAGE).string())
+    private suspend fun mega(url: HttpUrl): JaMegaResolved = when (val share = JaMegaShare.parse(url)) {
+        is JaMegaShare.SingleFile -> JaMegaResolved(listOf(share.resolve(megaApi(share.source::downloadRequest))))
+        is JaMegaShare.Folder -> share.resolveTree(megaApi(share::request, MAX_MEGA_FOLDER_JSON))
+    }
+
+    private suspend fun megaApi(request: (Long) -> Request, limit: Long = MAX_PAGE): JsonObject {
+        val context = currentCoroutineContext()
+        for (attempt in 0..2) {
+            try {
+                return http.newCall(request(megaSeq.getAndIncrement())).withResponse { response ->
+                    checkMegaResponse(response)
+                    val bytes = response.peekBody(limit + 1).bytes()
+                    if (bytes.size > limit) unavailable()
+                    parseMegaResponse(bytes.toString(Charsets.UTF_8))
+                }
+            } catch (failure: IOException) {
+                context.ensureActive()
+                if (attempt == 2 || !retryableMega(failure)) throw failure
+                delay(megaRetryDelay(attempt))
+            }
         }
-        return JaRemoteFile(data.name, data.size, null, JaFileTransfer.Mega(data.address, share.crypto))
+        error("MEGA API retry loop exited without a result")
     }
 
     suspend fun download(file: JaRemoteFile, destination: File, report: (Long) -> Unit) {
         val context = currentCoroutineContext()
-        val version = when (val transfer = file.transfer) {
+        val transfer = file.transfer
+        val version = when (transfer) {
             is JaFileTransfer.Buzz -> file.sha256 ?: transfer.etag?.let(::jaHash)
             is JaFileTransfer.Mega -> transfer.crypto.checksum
         }
@@ -424,6 +468,18 @@ internal class JaWorkClient(
         val token = File(destination.parentFile, destination.name + ".version")
         if (reuseToken == null || !token.isFile || token.readText() != reuseToken) destination.delete()
         if (reuseToken != null) token.writeText(reuseToken)
+        if (transfer is JaFileTransfer.Mega) {
+            context.ensureActive()
+            if (destination.isFile && destination.length() == file.size && verify(file, destination)) {
+                report(destination.length())
+                return
+            }
+            if (destination.length() == requireNotNull(file.size)) destination.delete()
+            transferMega(file, transfer, destination, report)
+            if (verify(file, destination)) return
+            destination.delete()
+            throw JaWorkException(TextRef.Res(R.string.ja_error_file_integrity))
+        }
         try {
             for (attempt in 0..2) {
                 context.ensureActive()
@@ -433,10 +489,7 @@ internal class JaWorkClient(
                 }
                 if (reuseToken == null || file.size == null || destination.length() >= file.size) destination.delete()
                 try {
-                    when (val transfer = file.transfer) {
-                        is JaFileTransfer.Buzz -> transferBuzz(file, transfer, destination, report)
-                        is JaFileTransfer.Mega -> transferMega(file, transfer, destination, report)
-                    }
+                    transferBuzz(file, transfer as JaFileTransfer.Buzz, destination, report)
                     if (verify(file, destination)) return
                     destination.delete()
                     throw JaWorkException(TextRef.Res(R.string.ja_error_file_integrity))
@@ -487,25 +540,72 @@ internal class JaWorkClient(
         }
     }
 
-    private suspend fun transferMega(file: JaRemoteFile, transfer: JaFileTransfer.Mega, out: File, report: (Long) -> Unit) {
+    internal suspend fun transferMega(file: JaRemoteFile, transfer: JaFileTransfer.Mega, out: File, report: (Long) -> Unit) {
         val size = requireNotNull(file.size)
-        val offset = out.length()
-        val address = transfer.address.newBuilder().addPathSegment("$offset-${size - 1}").build()
-        http.newCall(request(address)).withResponse { response ->
-            checkMegaResponse(response)
-            if (response.code != 200) unavailable()
-            copy(response, out, offset, size, report, transfer.crypto.cipherAt(offset))
+        val context = currentCoroutineContext()
+        var activeAddress = transfer.initialAddress
+        var refreshed = false
+        var failures = 0
+        while (true) {
+            context.ensureActive()
+            val offset = out.length()
+            if (offset == size) {
+                if (size == 0L) out.outputStream().close()
+                return
+            }
+            if (offset > size) {
+                out.delete()
+                throw JaWorkException(TextRef.Res(R.string.ja_error_file_length_check))
+            }
+            // Resolve failures leave this loop with their original error and retry budget.
+            val address = activeAddress ?: resolveMegaAddress(megaApi(transfer.source::downloadRequest), size)
+            activeAddress = address
+            val endpoint = address.newBuilder().addPathSegment("$offset-${size - 1}").build()
+            try {
+                val expired = http.newCall(request(endpoint)).withResponse { response ->
+                    if (!response.isChallenge() && response.code in setOf(403, 404, 410)) return@withResponse true
+                    checkMegaResponse(response)
+                    if (response.code != 200) unavailable()
+                    copy(response, out, offset, size, report, transfer.crypto.cipherAt(offset))
+                    false
+                }
+                if (!expired) return
+            } catch (failure: IOException) {
+                context.ensureActive()
+                val incomplete = failure is JaWorkException &&
+                    failure.userText == TextRef.Res(R.string.ja_error_file_incomplete)
+                if (failures == 2 || (!incomplete && !retryableMega(failure))) throw failure
+                delay(megaRetryDelay(failures++))
+                continue
+            }
+            if (refreshed) {
+                throw JaMegaManifestInvalidException(TextRef.Res(R.string.ja_error_download_address_expired))
+            }
+            activeAddress = resolveMegaAddress(megaApi(transfer.source::downloadRequest), size)
+            refreshed = true
         }
     }
 
-    private suspend fun copy(response: Response, out: File, offset: Long, size: Long?, report: (Long) -> Unit,
+    private fun retryableMega(failure: IOException): Boolean = when (failure) {
+        is JaMegaTransientException -> true
+        is JaWorkException, is JapaneseAsmrException -> false
+        else -> true
+    }
+
+    private fun megaRetryDelay(attempt: Int): Long = 1_000L shl attempt
+
+    internal suspend fun copy(response: Response, out: File, offset: Long, size: Long?, report: (Long) -> Unit,
         cipher: javax.crypto.Cipher? = null) {
+        fun lengthError(message: Int): JaWorkException {
+            val text = TextRef.Res(message)
+            return if (cipher != null) JaMegaManifestInvalidException(text) else JaWorkException(text)
+        }
         val context = currentCoroutineContext()
         val body = response.body ?: unavailable()
         val expected = size?.minus(offset)
         if (expected != null && body.contentLength() >= 0 && expected != body.contentLength()) {
             out.delete()
-            throw JaWorkException(TextRef.Res(R.string.ja_error_file_length_changed))
+            throw lengthError(R.string.ja_error_file_length_changed)
         }
         var bytes = offset
         java.io.FileOutputStream(out, offset != 0L).buffered().use { output ->
@@ -516,7 +616,7 @@ internal class JaWorkClient(
                     val count = input.read(buffer)
                     if (count < 0) break
                     bytes += count
-                    if (size != null && bytes > size) throw JaWorkException(TextRef.Res(R.string.ja_error_file_length_check))
+                    if (size != null && bytes > size) throw lengthError(R.string.ja_error_file_length_check)
                     if (cipher == null) output.write(buffer, 0, count)
                     else cipher.update(buffer, 0, count)?.let(output::write)
                     report(bytes)
@@ -577,7 +677,9 @@ internal class JaWorkClient(
     private fun request(url: HttpUrl, userAgent: String? = null) = Request.Builder().url(url)
         .header("User-Agent", userAgent ?: JapaneseAsmrClient.USER_AGENT)
         .apply {
-            cookieProvider?.invoke(url)?.takeIf(String::isNotBlank)?.let { header("Cookie", it) }
+            if (url.buzzTransferHost()) {
+                cookieProvider?.invoke(url)?.takeIf(String::isNotBlank)?.let { header("Cookie", it) }
+            }
         }
         .header("Accept-Encoding", "identity").build()
 
@@ -618,13 +720,16 @@ internal class JaWorkClient(
     }
 
     private fun checkMegaResponse(response: Response) {
-        val requiresSession = response.code == 401 || response.isChallenge()
-        if (requiresSession || response.code == 403) {
-            val message = TextRef.Res(R.string.ja_error_mega_use_browser)
-            if (requiresSession) throw JaWorkException(message)
-            throw JaWorkAddressExpired(message, sessionRequired = true)
+        if (response.code == 401 || response.isChallenge()) {
+            throw JaMegaFatalException(TextRef.Res(R.string.ja_error_mega_use_browser))
         }
-        checkDownloadResponse(response)
+        when (response.code) {
+            403 -> throw JaMegaFatalException(TextRef.Res(R.string.ja_error_mega_use_browser))
+            404, 410 -> throw JaMegaManifestInvalidException(TextRef.Res(R.string.ja_error_mega_share_expired))
+            429, 503 -> throw JaMegaTransientException(TextRef.Res(R.string.ja_error_mega_busy))
+            509 -> throw JaMegaFatalException(TextRef.Res(R.string.ja_error_mega_quota))
+        }
+        if (!response.isSuccessful) unavailable()
     }
 
     private fun checkDownloadResponse(response: Response) {

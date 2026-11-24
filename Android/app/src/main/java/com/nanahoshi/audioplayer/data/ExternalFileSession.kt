@@ -8,6 +8,11 @@ import androidx.core.content.FileProvider
 import com.nanahoshi.audioplayer.asmr.AsmrClient
 import com.nanahoshi.audioplayer.dlsite.DlsiteClient
 import com.nanahoshi.audioplayer.dlsite.RemotePreview
+import com.nanahoshi.audioplayer.dlsite.SignedPlayFile
+import com.nanahoshi.audioplayer.dlsite.isTrustedDlsitePlayHost
+import com.nanahoshi.audioplayer.data.db.FolderEntity
+import com.nanahoshi.audioplayer.data.db.LibraryFileEntity
+import com.nanahoshi.audioplayer.playback.nearestSubtitleWorkRoot
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
@@ -20,7 +25,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.awaitCancellation
 import okhttp3.Call
 import okhttp3.Callback
-import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -49,7 +54,7 @@ class ExternalFileSession internal constructor(
     private val downloader: ExternalFileDownloader,
 ) {
     constructor(context: Context, cache: CacheStore, dlsite: DlsiteClient) : this(
-        context, cache, ExternalFileDownloader { work, key -> dlsite.signedPlayFileBlocking(work, key) },
+        context, cache, ExternalFileDownloader(sign = dlsite::signedPlayFile),
     )
     private val directory = File(context.cacheDir, "external-open/${UUID.randomUUID()}")
     private var ready: ExternalFile? = null
@@ -75,7 +80,7 @@ class ExternalFileSession internal constructor(
                     if (local.length() > directory.usableSpace) throw ExternalFileException(TextRef.Res(R.string.external_file_no_space))
                     currentCoroutineContext().ensureActive()
                     local.inputStream().use { input -> partial.outputStream().use { output ->
-                        copyExternalBytes(input, output, local.length(), progress)
+                        copyExternalBytes(input, output, local.length(), progress = progress)
                     } }
                 } else {
                     downloader.download(request, partial, progress)
@@ -98,11 +103,49 @@ class ExternalFileSession internal constructor(
 }
 
 internal class ExternalFileDownloader(
-    private val client: OkHttpClient = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false).build(),
+    client: OkHttpClient = OkHttpClient(),
     private val usableSpace: (File) -> Long = { it.parentFile!!.usableSpace },
-    private val sign: (String, String) -> com.nanahoshi.audioplayer.dlsite.SignedPlayFile,
+    private val sign: suspend (String, String) -> SignedPlayFile,
 ) {
-    suspend fun download(preview: RemotePreview, partial: File, progress: (Long, Long?) -> Unit) {
+    private val client = client.newBuilder().followRedirects(false).followSslRedirects(false).build()
+
+    suspend fun download(preview: RemotePreview, partial: File, progress: (Long, Long?) -> Unit) =
+        download(preview, partial, Long.MAX_VALUE, progress)
+
+    suspend fun downloadFile(preview: RemotePreview, target: File, maxBytes: Long = 25L * 1024 * 1024): Unit =
+        withContext(Dispatchers.IO) {
+            require(maxBytes > 0L)
+            val directory = requireNotNull(target.absoluteFile.parentFile)
+            if (!directory.isDirectory && !directory.mkdirs()) {
+                throw ExternalFileException(TextRef.Res(R.string.external_file_staging_dir_failed))
+            }
+            val partial = File.createTempFile("preview-", ".part", directory)
+            try {
+                download(preview, partial, maxBytes) { _, _ -> }
+                currentCoroutineContext().ensureActive()
+                if (!partial.renameTo(target)) throw ExternalFileException(TextRef.Res(R.string.external_file_save_temp_failed))
+            } finally {
+                partial.delete()
+            }
+        }
+
+    private suspend fun download(preview: RemotePreview, partial: File, maxBytes: Long, progress: (Long, Long?) -> Unit) {
+        transfer(preview) { response ->
+            val body = response.body ?: throw ExternalFileException(TextRef.Res(R.string.external_file_empty_body))
+            val length = body.contentLength().takeIf { it >= 0 }
+            if (length != null && length > maxBytes) throw ExternalFileException(TextRef.Res(R.string.library_file_image_failed))
+            if (length != null && length > usableSpace(partial)) throw ExternalFileException(TextRef.Res(R.string.external_file_no_space))
+            body.byteStream().use { input ->
+                partial.outputStream().use { output -> copyExternalBytes(input, output, length, maxBytes, progress) }
+            }
+        }
+    }
+
+    suspend fun readText(preview: RemotePreview, limit: Int): RemoteTextPreview = transfer(preview) { response ->
+        response.body?.byteStream()?.readRemoteTextPreview(limit) ?: RemoteTextPreview("")
+    }
+
+    private suspend fun <T : Any> transfer(preview: RemotePreview, consume: suspend (Response) -> T): T {
         for (attempt in 0 until if (preview.authed) 2 else 1) {
             currentCoroutineContext().ensureActive()
             val signed = if (preview.authed) {
@@ -110,48 +153,58 @@ internal class ExternalFileDownloader(
                 val key = preview.fileKey ?: throw ExternalFileException(TextRef.Res(R.string.external_file_reopen_work))
                 sign(work, key)
             } else null
-            var url = (signed?.url ?: preview.url.toHttps()).toHttpUrl()
+            var url = (signed?.url ?: preview.url.toHttps()).toHttpUrlOrNull()
+                ?: throw ExternalFileException(TextRef.Res(R.string.external_file_read_failed))
+            if (signed != null && (url.port != 443 || !isTrustedDlsitePlayHost(url.host))) {
+                throw ExternalFileException(TextRef.Res(R.string.dlsite_error_no_play_url))
+            }
             val credentialHost = if (signed != null) url.host else null
+            var retryAuthorization = false
             for (hop in 0..8) {
                 currentCoroutineContext().ensureActive()
-                require(url.scheme == "https" && url.username.isEmpty() && url.password.isEmpty())
+                if (url.scheme != "https" || url.username.isNotEmpty() || url.password.isNotEmpty()) {
+                    throw ExternalFileException(TextRef.Res(R.string.external_file_redirect_invalid))
+                }
                 val builder = Request.Builder().url(url)
                     .header("Referer", preview.referer)
                     .header("Accept-Encoding", "identity")
                     .header("User-Agent", if (preview.authed) DlsiteClient.USER_AGENT else AsmrClient.USER_AGENT)
                 if (!preview.authed && preview.referer == AsmrClient.REFERER) builder.header("Origin", AsmrClient.ORIGIN)
-                if (signed != null && url.host == credentialHost && url.port == 443) builder.header("Cookie", signed.cookie)
-                val call = client.newCall(builder.build())
-                var transferred = false
-                val retryAuthorization = call.withResponse {
-                    if (it.code in 300..399) {
-                        url = it.header("Location")?.let(url::resolve) ?: throw ExternalFileException(TextRef.Res(R.string.external_file_redirect_invalid))
-                        false
-                    } else if (preview.authed && attempt == 0 && it.code in setOf(401, 403)) {
-                        true
-                    } else {
-                        check(it.isSuccessful)
-                        val body = it.body ?: throw ExternalFileException(TextRef.Res(R.string.external_file_empty_body))
-                        if (body.contentType()?.subtype?.contains("html") == true && fileExtension(preview.name) !in setOf("html", "htm")) {
-                            throw ExternalFileException(TextRef.Res(R.string.external_file_login_expired))
+                if (signed != null && url.host == credentialHost && url.port == 443 && isTrustedDlsitePlayHost(url.host)) {
+                    builder.header("Cookie", signed.cookie)
+                }
+                val result = client.newCall(builder.build()).withResponse { response ->
+                    when {
+                        response.code in 300..399 -> {
+                            url = response.header("Location")?.let(url::resolve)
+                                ?: throw ExternalFileException(TextRef.Res(R.string.external_file_redirect_invalid))
+                            null
                         }
-                        val length = body.contentLength().takeIf { n -> n >= 0 }
-                        if (length != null && length > usableSpace(partial)) throw ExternalFileException(TextRef.Res(R.string.external_file_no_space))
-                        body.byteStream().use { input -> partial.outputStream().use { output -> copyExternalBytes(input, output, length, progress) } }
-                        transferred = true
-                        false
+                        preview.authed && attempt == 0 && response.code in setOf(401, 403) -> {
+                            retryAuthorization = true
+                            null
+                        }
+                        else -> {
+                            if (!response.isSuccessful) throw ExternalFileException(TextRef.Res(R.string.external_file_read_failed))
+                            if (response.body?.contentType()?.subtype?.contains("html") == true &&
+                                fileExtension(preview.name) !in setOf("html", "htm")
+                            ) throw ExternalFileException(TextRef.Res(R.string.external_file_login_expired))
+                            consume(response)
+                        }
                     }
                 }
-                if (transferred) return
+                if (result != null) return result
                 if (retryAuthorization) break
             }
+            if (!retryAuthorization) break
         }
         throw ExternalFileException(TextRef.Res(R.string.external_file_read_failed))
     }
-
 }
 
-internal suspend fun copyExternalBytes(input: java.io.InputStream, output: java.io.OutputStream, total: Long?, progress: (Long, Long?) -> Unit) {
+internal suspend fun copyExternalBytes(
+    input: InputStream, output: java.io.OutputStream, total: Long?, maxBytes: Long = Long.MAX_VALUE, progress: (Long, Long?) -> Unit,
+) {
     val context = currentCoroutineContext()
     val buffer = ByteArray(64 * 1024)
     var done = 0L
@@ -160,6 +213,7 @@ internal suspend fun copyExternalBytes(input: java.io.InputStream, output: java.
         context.ensureActive()
         val count = input.read(buffer)
         if (count < 0) break
+        if (count > maxBytes - done) throw ExternalFileException(TextRef.Res(R.string.library_file_image_failed))
         output.write(buffer, 0, count)
         done += count
         if (done - reported >= 256 * 1024 || done == total) { progress(done, total); reported = done }
@@ -192,16 +246,39 @@ internal suspend fun <T> Call.withResponse(block: suspend (Response) -> T): T = 
 
 internal data class RemoteTextPreview(val text: String, val clipped: Boolean = false)
 
-internal fun InputStream.readRemoteTextPreview(limit: Int): RemoteTextPreview {
-    val buffer = ByteArray(limit + 1)
-    var total = 0
-    while (total < buffer.size) {
-        val read = read(buffer, total, buffer.size - total)
-        if (read < 0) break
-        total += read
+internal fun InputStream.readRemoteTextPreview(limit: Int = 512 * 1024): RemoteTextPreview {
+    val (bytes, clipped) = readBoundedBytes(this, limit)
+    return RemoteTextPreview(decodeTextBytes(bytes, clipped), clipped)
+}
+
+internal fun readLocalTextPreview(context: Context, location: String): RemoteTextPreview? {
+    val stream = when {
+        location.startsWith("content:") -> context.contentResolver.openInputStream(Uri.parse(location))
+        location.startsWith("file:") -> Uri.parse(location).path?.let { File(it).inputStream() }
+        location.startsWith("/") -> File(location).inputStream()
+        else -> null
     }
-    return RemoteTextPreview(
-        buffer.copyOf(minOf(total, limit)).toString(Charsets.UTF_8),
-        clipped = total > limit,
+    return stream?.use { it.readRemoteTextPreview() }
+}
+
+internal fun libraryFilePreview(
+    file: LibraryFileEntity,
+    folders: Map<Long, FolderEntity>,
+    source: TrackSource? = resolveLibraryFileSource(file),
+): RemotePreview {
+    val authed = source == TrackSource.DLSITE
+    val url = file.remoteUrl.takeUnless { source == TrackSource.JAPANESE_ASMR }.orEmpty()
+    val workno = if (authed) {
+        nearestSubtitleWorkRoot(file.folderId, folders)?.asmrSourceId?.takeIf { it.isNotBlank() }
+            ?: folders.values.firstOrNull { it.asmrWorkId == file.asmrWorkId && !it.asmrSourceId.isNullOrBlank() }?.asmrSourceId
+    } else null
+    // Older Play attachments stored their library path as the hash and the Play key in the URL.
+    val key = if (authed) {
+        url.substringAfter("/optimized/", "").substringBefore('?').substringBefore('#').takeIf { it.isNotBlank() }
+            ?: rawFileKey(file.fileHash)?.takeUnless { it.startsWith("original:") }
+    } else null
+    return RemotePreview(
+        file.name, url, file.kind, if (authed) DlsiteClient.PLAY_REFERER else AsmrClient.REFERER,
+        authed, workno = workno, fileKey = key,
     )
 }

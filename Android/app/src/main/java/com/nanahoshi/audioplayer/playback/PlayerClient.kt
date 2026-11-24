@@ -39,6 +39,8 @@ data class PlayerUiState(
     val positionMs: Long = 0,
     val durationMs: Long = 0,
     val hasMedia: Boolean = false,
+    val canSeekBack: Boolean = false,
+    val canSeekForward: Boolean = false,
 )
 
 internal data class JaPlaybackFailure(val queueId: Long, val reason: JaFailure, val postId: String?, val mediaKey: String?) {
@@ -142,6 +144,16 @@ class PlayerClient(
     fun previous() = scope.launch { withController { seekToPrevious() } }
 
     fun seekTo(positionMs: Long) = scope.launch { withController { seekTo(positionMs) } }
+
+    fun seekBack(): Job = seekByStep(forward = false)
+
+    fun seekForward(): Job = seekByStep(forward = true)
+
+    private fun seekByStep(forward: Boolean): Job = scope.launch {
+        withController {
+            if (seekStepIfAvailable(forward)) publish(this)
+        }
+    }
 
     fun startSleepTimer(totalMs: Long) {
         if (totalMs <= 0L) return
@@ -399,13 +411,17 @@ class PlayerClient(
         }
     }
 
-    fun removeFromLibrary(trackIds: List<Long>, folderIds: List<Long>) = scope.launch {
-        if (trackIds.isEmpty() && folderIds.isEmpty()) return@launch
+    fun removeFromLibrary(
+        trackIds: List<Long>,
+        folderIds: List<Long>,
+        fileIds: List<Long> = emptyList(),
+    ) = scope.launch {
+        if (trackIds.isEmpty() && folderIds.isEmpty() && fileIds.isEmpty()) return@launch
         try {
             val affected = queueMutex.withLock {
                 val doomed = library.affectedTrackIds(trackIds, folderIds)
                 val affected = library.queueSnapshot().any { it.trackId in doomed }
-                library.deleteItems(trackIds, folderIds)
+                library.deleteItems(trackIds, folderIds, fileIds)
                 affected
             }
             if (affected) rebuildPlayerFromQueue()
@@ -509,6 +525,8 @@ class PlayerClient(
             positionMs = player.currentPosition.coerceAtLeast(0L),
             durationMs = duration,
             hasMedia = player.mediaItemCount > 0,
+            canSeekBack = player.isCommandAvailable(Player.COMMAND_SEEK_BACK),
+            canSeekForward = player.isCommandAvailable(Player.COMMAND_SEEK_FORWARD),
         )
     }
 }

@@ -10,9 +10,11 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
@@ -21,10 +23,12 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
@@ -40,17 +44,24 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nanahoshi.audioplayer.asmr.WorkFacts
 import com.nanahoshi.audioplayer.data.TrackSource
+import com.nanahoshi.audioplayer.data.db.LibraryFileEntity
+import com.nanahoshi.audioplayer.data.db.TrackEntity
+import com.nanahoshi.audioplayer.data.isSubtitleFile
 import com.nanahoshi.audioplayer.ui.components.AppTopBar
 import com.nanahoshi.audioplayer.ui.components.EmptyState
+import com.nanahoshi.audioplayer.ui.components.FileToTrackSubtitleSheet
 import com.nanahoshi.audioplayer.ui.components.LoadingState
 import com.nanahoshi.audioplayer.ui.components.SectionHeader
 import com.nanahoshi.audioplayer.ui.components.SelectionAction
 import com.nanahoshi.audioplayer.ui.components.SelectionTopBar
+import com.nanahoshi.audioplayer.ui.components.TrackSubtitlePickerSheet
 import com.nanahoshi.audioplayer.ui.components.WorkHeader
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -71,7 +82,13 @@ fun LibraryWorkScreen(
     val request = location?.request
     val listing = loaded?.takeIf { it.request === request }?.listing
     val folders = listing?.folders.orEmpty()
-    val entries = listing?.entries.orEmpty()
+    val showSubtitleFiles by viewModel.showSubtitleFiles.collectAsStateWithLifecycle()
+    val listedEntries = listing?.entries.orEmpty()
+    val entries = if (showSubtitleFiles) listedEntries else listedEntries.filterNot {
+        it is LibraryEntry.File && isSubtitleFile(it.file.name)
+    }
+    val hiddenSubtitleCount = if (showSubtitleFiles) 0
+        else (listing?.hiddenSubtitleCount ?: 0) + listedEntries.size - entries.size
     val workFileSource = request?.source
     val workSources by viewModel.workSources.collectAsStateWithLifecycle()
     val busy by viewModel.busy.collectAsStateWithLifecycle()
@@ -80,14 +97,19 @@ fun LibraryWorkScreen(
     val playlists by viewModel.playlists.collectAsStateWithLifecycle(emptyList())
     val selectedTracks by viewModel.selectedTrackIds.collectAsStateWithLifecycle()
     val selectedFolders by viewModel.selectedFolderIds.collectAsStateWithLifecycle()
-    val selecting = selectedTracks.isNotEmpty() || selectedFolders.isNotEmpty()
+    val selectedFiles by viewModel.selectedFileIds.collectAsStateWithLifecycle()
+    val audioSelection by viewModel.hasSelectedAudio.collectAsStateWithLifecycle()
+    val hasSelectedAudio = audioSelection == LibraryViewModel.AudioSelection(selectedTracks, selectedFolders, workFileSource)
+    val selecting = selectedTracks.isNotEmpty() || selectedFolders.isNotEmpty() || selectedFiles.isNotEmpty()
     val selectedLocalRemoval by viewModel.selectedLocalRemoval.collectAsStateWithLifecycle()
-    val removalSelection = LibraryViewModel.LocalRemovalSelection(selectedTracks, selectedFolders, workFileSource)
-    val removalTargets = selectedLocalRemoval?.takeIf { it.first == removalSelection }?.second
+    val removalSelection = LibraryViewModel.LocalRemovalSelection(selectedTracks, selectedFolders, selectedFiles, workFileSource)
+    val removalPlan = selectedLocalRemoval?.takeIf { it.first == removalSelection }?.second
     var menu by remember { mutableStateOf(false) }
     var pickingPlaylist by remember { mutableStateOf(false) }
     var confirmRemoveWork by remember { mutableStateOf(false) }
-    val listState = viewModel.listState(request?.folderId, true)
+    var bindingTrack by remember { mutableStateOf<TrackEntity?>(null) }
+    var bindingSubtitleFile by remember { mutableStateOf<LibraryFileEntity?>(null) }
+    var batchBindingOpen by remember { mutableStateOf(false) }
     val headerFolder = location?.path?.firstOrNull()
     val context = LocalContext.current
     val openTree = rememberLauncherForActivityResult(OpenPersistableTree()) { uri ->
@@ -120,21 +142,27 @@ fun LibraryWorkScreen(
     Column(Modifier.fillMaxSize()) {
         if (selecting) {
             SelectionTopBar(
-                count = selectedTracks.size + selectedFolders.size,
+                count = selectedTracks.size + selectedFolders.size + selectedFiles.size,
                 onClose = viewModel::clearSelection,
-                actions = listOfNotNull(
-                    SelectionAction(context.getString(R.string.library_play_next), Icons.Default.SkipNext, viewModel::playNextSelection),
-                    SelectionAction(context.getString(R.string.library_add_queue), Icons.AutoMirrored.Filled.PlaylistAdd, viewModel::appendSelection),
-                    SelectionAction(context.getString(R.string.library_download_selected), Icons.Default.Download, viewModel::downloadSelection),
-                    SelectionAction(context.getString(R.string.library_add_playlist), Icons.AutoMirrored.Filled.QueueMusic, {
-                        if (playlists.isEmpty()) viewModel.note(context.getString(R.string.library_create_playlist_first)) else pickingPlaylist = true
-                    }),
-                    removalTargets?.let { targets ->
-                        SelectionAction(context.getString(targets.labelRes), Icons.Default.Delete, {
-                            viewModel.deleteDownloadedSelection(removalSelection, targets)
-                        }, destructive = true)
-                    },
-                ),
+                actions = buildList {
+                    if (hasSelectedAudio) {
+                        add(SelectionAction(context.getString(R.string.library_play_next), Icons.Default.SkipNext, viewModel::playNextSelection))
+                        add(SelectionAction(context.getString(R.string.library_add_queue), Icons.AutoMirrored.Filled.PlaylistAdd, viewModel::appendSelection))
+                        add(SelectionAction(context.getString(R.string.library_download_selected), Icons.Default.Download, viewModel::downloadSelection))
+                        add(
+                            SelectionAction(context.getString(R.string.library_add_playlist), Icons.AutoMirrored.Filled.QueueMusic, {
+                                if (playlists.isEmpty()) viewModel.note(context.getString(R.string.library_create_playlist_first)) else pickingPlaylist = true
+                            }),
+                        )
+                    }
+                    removalPlan?.let { plan ->
+                        add(
+                            SelectionAction(context.getString(plan.labelRes), Icons.Default.Delete, {
+                                viewModel.deleteDownloadedSelection(removalSelection, plan)
+                            }, destructive = true),
+                        )
+                    }
+                },
             )
         } else {
             AppTopBar(
@@ -151,6 +179,15 @@ fun LibraryWorkScreen(
                                 onClick = {
                                     menu = false
                                     onOpenOnline(sourceId)
+                                },
+                            )
+                        }
+                        if (headerFolder != null) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.library_batch_bind_subtitles)) },
+                                onClick = {
+                                    menu = false
+                                    batchBindingOpen = true
                                 },
                             )
                         }
@@ -173,10 +210,10 @@ fun LibraryWorkScreen(
                 onAction = onBack,
             )
         } else if (headerFolder == null || facts == null) {
-            LoadingState(stringResource(R.string.library_work_loading))
+            LoadingState(stringResource(R.string.library_work_loading), Modifier.weight(1f).fillMaxWidth())
         } else {
             com.nanahoshi.audioplayer.ui.components.WorkFileBrowser(
-                state = listState,
+                state = viewModel.workListState(request?.folderId),
                 modifier = Modifier.weight(1f).fillMaxWidth(),
                 loading = listing == null || (busy && folders.isEmpty() && entries.isEmpty()),
                 header = {
@@ -200,7 +237,25 @@ fun LibraryWorkScreen(
         }
     },
     controls = {
-        SectionHeader(stringResource(R.string.library_files_section))
+        val toggleSubDesc = stringResource(R.string.a11y_show_subtitle_files)
+        SectionHeader(stringResource(R.string.library_files_section)) {
+            FilterChip(
+                selected = showSubtitleFiles,
+                onClick = viewModel::toggleSubtitleFiles,
+                leadingIcon = { Icon(Icons.Default.Subtitles, contentDescription = null) },
+                label = {
+                    Text(
+                        stringResource(R.string.library_show_subtitle_files),
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
+                modifier = Modifier
+                    .defaultMinSize(minHeight = 48.dp)
+                    .semantics { contentDescription = toggleSubDesc },
+            )
+        }
         if (workSources.size > 1) {
             SingleChoiceSegmentedButtonRow(
                 Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
@@ -210,7 +265,7 @@ fun LibraryWorkScreen(
                         selected = workFileSource == source,
                         onClick = { viewModel.useWorkSource(source) },
                         shape = SegmentedButtonDefaults.itemShape(index = index, count = workSources.size),
-                    ) { Text(source.workLabel()) }
+                    ) { Text(source.workLabel(), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
                 }
             }
         }
@@ -226,10 +281,19 @@ fun LibraryWorkScreen(
 ) {
                 if (folders.isEmpty() && entries.isEmpty()) {
                     item(key = "empty") {
-                        EmptyState(
-                            title = stringResource(R.string.library_empty_folder_title),
-                            message = stringResource(R.string.library_work_folder_empty_message),
-                        )
+                        if (hiddenSubtitleCount > 0) {
+                            EmptyState(
+                                title = stringResource(R.string.library_hidden_subtitles_title),
+                                message = stringResource(R.string.library_hidden_subtitles_message, hiddenSubtitleCount),
+                                actionLabel = stringResource(R.string.library_show_subtitle_files),
+                                onAction = viewModel::toggleSubtitleFiles,
+                            )
+                        } else {
+                            EmptyState(
+                                title = stringResource(R.string.library_empty_folder_title),
+                                message = stringResource(R.string.library_work_folder_empty_message),
+                            )
+                        }
                     }
                 }
                 items(folders, key = { "folder-${it.id}" }) { folder ->
@@ -289,14 +353,31 @@ fun LibraryWorkScreen(
                                     null
                                 },
                                 onDelete = null,
+                                onBindSubtitle = { bindingTrack = track },
                             )
                         }
-                        is LibraryEntry.File -> FileRow(
-                            modifier = libraryMotionModifier(),
-                            file = entry.file,
-                            onClick = { onOpenPreview(entry.file.id) },
-                            onDelete = null,
-                        )
+                        is LibraryEntry.File -> {
+                            val file = entry.file
+                            FileRow(
+                                modifier = libraryMotionModifier(),
+                                file = file,
+                                onClick = {
+                                    if (viewModel.canInteractWithWorkFile(request, file)) {
+                                        if (selecting) viewModel.toggleFile(file.id) else onOpenPreview(file.id)
+                                    }
+                                },
+                                onDelete = null,
+                                selecting = selecting,
+                                selected = file.id in selectedFiles,
+                                onLongClick = {
+                                    if (viewModel.canInteractWithWorkFile(request, file)) {
+                                        viewModel.beginSelection(fileId = file.id)
+                                    }
+                                },
+                                onBindSubtitle = if (isSubtitleFile(file.name)) ({ bindingSubtitleFile = file }) else null,
+                                onDeleteDownloaded = { viewModel.deleteDownloadedFile(file) },
+                            )
+                        }
                     }
                 }
             }
@@ -328,11 +409,38 @@ fun LibraryWorkScreen(
     }
     pendingAudioDelete?.let { pending ->
         com.nanahoshi.audioplayer.ui.components.DeleteAudioDialog(
-            itemCount = pending.targets.downloads.size,
-            associationCount = pending.targets.associations.size,
-            subtitleCount = pending.subtitles,
+            itemCount = pending.audioCount,
+            associationCount = pending.associationCount,
+            otherFileCount = pending.otherFileCount,
+            workSubtitleCount = pending.workSubtitleCount,
+            subtitleCount = pending.generatedSubtitleCount,
+            customSubtitleCount = pending.customSubtitleCount,
             onConfirm = viewModel::confirmAudioDelete,
             onCancel = viewModel::cancelAudioDelete,
+        )
+    }
+    bindingTrack?.let { track ->
+        TrackSubtitlePickerSheet(
+            track = track,
+            trackTitle = track.title,
+            actions = viewModel.subtitlePickerActions,
+            onDismiss = { bindingTrack = null },
+        )
+    }
+    bindingSubtitleFile?.let { file ->
+        FileToTrackSubtitleSheet(
+            file = file,
+            loadTracks = { viewModel.listWorkTracksForSubtitle(file) },
+            onBindTrack = { track -> viewModel.bindSubtitleFileToTrack(file, track) },
+            onDismiss = { bindingSubtitleFile = null },
+            onError = { viewModel.showMessage(com.nanahoshi.audioplayer.R.string.library_operation_failed) },
+        )
+    }
+    if (batchBindingOpen && headerFolder != null) {
+        BatchSubtitleMatchSheet(
+            currentFolderId = request?.folderId ?: headerFolder.id,
+            viewModel = viewModel,
+            onDismiss = { batchBindingOpen = false },
         )
     }
 }

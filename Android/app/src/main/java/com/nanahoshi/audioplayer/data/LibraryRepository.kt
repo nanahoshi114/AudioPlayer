@@ -42,12 +42,15 @@ import com.nanahoshi.audioplayer.data.db.PlaylistTrack
 import com.nanahoshi.audioplayer.data.db.QueueItemEntity
 import com.nanahoshi.audioplayer.data.db.QueuedTrack
 import com.nanahoshi.audioplayer.data.db.TrackEntity
+import com.nanahoshi.audioplayer.data.db.TrackSubtitleBindingEntity
 import androidx.room.withTransaction
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -95,6 +98,8 @@ class LibraryRepository(
 ) {
     internal val biliLibrary = BiliLibraryStore(context, db, ::upsertBili)
 
+    internal var onBindingsDetached: (suspend (detached: List<TrackSubtitleBindingEntity>, invalidateSubtitles: Boolean) -> Unit)? = null
+
     suspend fun importBili(request: com.nanahoshi.audioplayer.bilibili.BiliImportRequest): List<TrackEntity> = biliLibrary.save(request)
 
     private val youtubeLock = kotlinx.coroutines.sync.Mutex()
@@ -127,6 +132,13 @@ class LibraryRepository(
     }
 
     fun observeAllFiles(): Flow<List<LibraryFileEntity>> = db.files().observeAll()
+
+    suspend fun allFiles(): List<LibraryFileEntity> = withContext(Dispatchers.IO) { db.files().observeAll().first() }
+
+    internal fun observeJaFileIds(): Flow<Set<Long>> =
+        db.invalidationTracker.createFlow("japaneseasmr_download_entries")
+            .map { db.jaDownloads().fileIds().toSet() }
+            .distinctUntilChanged()
 
     fun observeTracksIn(folderId: Long?): Flow<List<TrackEntity>> = combine(
         db.tracks().observeIn(folderId), db.dlsiteOriginals().observeEntries(),
@@ -340,24 +352,80 @@ class LibraryRepository(
     ): Flow<List<TrackEntity>> =
         db.invalidationTracker.createFlow("tracks", "folders", "dlsite_original_works", "dlsite_original_entries")
             .map {
-                db.withTransaction {
-                    val tracks = trackIds.chunked(500).flatMap { db.tracks().getByIds(it) }
-                    val nested = if (folderIds.isEmpty()) emptyList() else {
-                        val originals = originalContentsByFolder()
-                        val visible = db.folders().all().filter {
-                            it.id in folderIds || it.isVisibleWorkChild(source, originals[it.parentId]?.folders)
-                        }
-                        val descendants = descendantFolderIds(visible, folderIds)
-                        descendants.chunked(500).flatMap { db.tracks().inFolders(it) }.filter { track ->
-                            val original = originals[track.folderId]
-                            original == null || track.source != TrackSource.DLSITE || track.id in original.tracks
-                        }
-                    }
-                    (tracks + nested).distinctBy { it.id }.filter { source == null || it.source == source }
-                }
+                db.withTransaction { localRemovalSelection(trackIds, folderIds, emptySet(), source).first }
             }
 
-    private data class OriginalContents(val folders: Set<Long>, val tracks: Set<Long>)
+    internal fun observeLocalRemovalTargets(
+        trackIds: Set<Long>,
+        folderIds: Set<Long>,
+        fileIds: Set<Long>,
+        source: TrackSource?,
+    ): Flow<LocalRemovalPlan> = db.invalidationTracker.createFlow(
+        "tracks", "folders", "library_files", "track_subtitles",
+        "dlsite_original_works", "dlsite_original_entries", "japaneseasmr_download_entries",
+    ).map {
+        buildLocalRemovalPlan(trackIds, folderIds, fileIds, source)
+    }.distinctUntilChanged()
+
+    internal suspend fun localRemovalPlan(
+        trackIds: Set<Long>,
+        folderIds: Set<Long>,
+        fileIds: Set<Long>,
+        source: TrackSource?,
+    ): LocalRemovalPlan = withContext(Dispatchers.IO) {
+        buildLocalRemovalPlan(trackIds, folderIds, fileIds, source)
+    }
+
+    private suspend fun buildLocalRemovalPlan(
+        trackIds: Set<Long>,
+        folderIds: Set<Long>,
+        fileIds: Set<Long>,
+        source: TrackSource?,
+    ): LocalRemovalPlan = db.withTransaction {
+        val (tracks, files) = localRemovalSelection(trackIds, folderIds, fileIds, source)
+        val filesDir = context.filesDir
+        val tracksByRemoval = tracks.groupBy { it.localRemoval(filesDir) }
+        val downloads = tracksByRemoval[LocalRemoval.DOWNLOAD].orEmpty()
+        val (subtitles, others) = files.filter { it.localRemoval(filesDir) == LocalRemoval.DOWNLOAD }
+            .partition { isSubtitleFile(it.name) }
+        LocalRemovalPlan(
+            audioDownloads = downloads,
+            audioAssociations = tracksByRemoval[LocalRemoval.ASSOCIATION].orEmpty(),
+            subtitleFiles = subtitles,
+            otherFiles = others,
+            customSubtitlePaths = exclusiveCustomSubtitlePaths(db, filesDir, downloads.mapTo(mutableSetOf()) { it.id }),
+        )
+    }
+
+    private suspend fun localRemovalSelection(
+        trackIds: Set<Long>, folderIds: Set<Long>, fileIds: Set<Long>, source: TrackSource?,
+    ): Pair<List<TrackEntity>, List<LibraryFileEntity>> {
+        val originals = originalContentsByFolder()
+        val folders = if (folderIds.isNotEmpty() || originals.isNotEmpty()) db.folders().all() else emptyList()
+        val parents = folders.associate { it.id to it.parentId }
+        fun originalFor(folderId: Long?): OriginalContents? =
+            generateSequence(folderId) { parents[it] }.firstNotNullOfOrNull { originals[it] }
+
+        val descendants = if (folderIds.isEmpty()) emptySet() else descendantFolderIds(folders.filter {
+            it.id in folderIds || it.isVisibleWorkChild(source, originals[it.parentId]?.folders)
+        }, folderIds)
+        val tracks = (trackIds.chunked(500).flatMap { db.tracks().getByIds(it) } +
+            descendants.chunked(500).flatMap { db.tracks().inFolders(it) }).distinctBy { it.id }.filter { track ->
+            (source == null || track.source == source) &&
+                (track.source != TrackSource.DLSITE || originalFor(track.folderId)?.let { track.id in it.tracks } != false)
+        }
+        val candidates = (fileIds.chunked(500).flatMap { db.files().getByIds(it) } +
+            descendants.chunked(500).flatMap { db.files().inFolders(it) }).distinctBy { it.id }
+        val jaFileIds = if (candidates.isEmpty()) emptySet() else db.jaDownloads().fileIds().toSet()
+        val files = candidates.filter { file ->
+            val fileSource = resolveLibraryFileSource(file, jaFileIds)
+            (source == null || fileSource == source) &&
+                (fileSource != TrackSource.DLSITE || originalFor(file.folderId)?.let { file.id in it.files } != false)
+        }
+        return tracks to files
+    }
+
+    private data class OriginalContents(val folders: Set<Long>, val tracks: Set<Long>, val files: Set<Long>)
 
     private suspend fun originalContentsByFolder(): Map<Long, OriginalContents> {
         val originals = db.dlsiteOriginals()
@@ -365,6 +433,7 @@ class LibraryRepository(
             OriginalContents(
                 entries.filter { it.kind == "FOLDER" }.mapNotNull { it.folderId }.toSet(),
                 entries.mapNotNull { it.trackId }.toSet(),
+                entries.mapNotNull { it.fileId }.toSet(),
             )
         }
         return buildMap {
@@ -373,7 +442,7 @@ class LibraryRepository(
             }
             for (work in originals.works()) {
                 val rootId = work.rootFolderId ?: continue
-                put(rootId, byWork[work.workno] ?: OriginalContents(emptySet(), emptySet()))
+                put(rootId, byWork[work.workno] ?: OriginalContents(emptySet(), emptySet(), emptySet()))
             }
         }
     }
@@ -449,22 +518,40 @@ class LibraryRepository(
         trackIdsIn(doomedFolders) + trackIds
     }
 
-    suspend fun deleteItems(trackIds: List<Long>, folderIds: List<Long>) = withContext(Dispatchers.IO) {
-        db.withTransaction {
-            val policy = LibraryRemovalPolicy(db.folders().all())
-            val parents = trackIds.mapNotNull { db.tracks().getById(it) }.map { it.folderId }
-            if (!policy.allows(parents, folderIds.toSet())) throw LibraryRemovalRejected()
-            val removedFolders = descendantFolderIds(db.folders().all(), folderIds.toSet())
-            val removedTracks = trackIdsIn(removedFolders) + trackIds
-            for (job in db.downloads().active()) {
-                if (job.trackId in removedTracks || job.workFolderId in removedFolders) {
-                    db.downloads().stopActive(job.id, DOWNLOAD_LIBRARY_REQUIRED)
+    suspend fun deleteItems(
+        trackIds: List<Long>,
+        folderIds: List<Long>,
+        fileIds: List<Long> = emptyList(),
+    ): Unit = withContext(Dispatchers.IO) {
+        withContext(NonCancellable) {
+            val (detachedBindings, subtitleFileRemoved) = db.withTransaction {
+                val folders = db.folders().all()
+                val policy = LibraryRemovalPolicy(folders)
+                val explicitFiles = fileIds.chunked(900).flatMap { db.files().getByIds(it) }
+                val parents = trackIds.chunked(900).flatMap { db.tracks().getByIds(it) }.map { it.folderId } +
+                    explicitFiles.map { it.folderId }
+                if (!policy.allows(parents, folderIds.toSet())) throw LibraryRemovalRejected()
+                val removedFolders = descendantFolderIds(folders, folderIds.toSet())
+                val removedTracks = trackIdsIn(removedFolders) + trackIds
+                val removedFiles = (removedFolders.chunked(900).flatMap { db.files().inFolders(it) } + explicitFiles)
+                    .distinctBy { it.id }
+                val trackBindings = removedTracks.chunked(900).flatMap { db.trackSubtitles().getForTracks(it) }
+                val fileBindings = removedFiles.map { it.id }.chunked(900).flatMap { db.trackSubtitles().getForFileIds(it) }
+                val detached = (trackBindings + fileBindings).distinctBy { it.id }
+                val subtitleRemoved = removedFiles.any { isSubtitleFile(it.name) }
+                for (job in db.downloads().active()) {
+                    if (job.trackId in removedTracks || job.workFolderId in removedFolders) {
+                        db.downloads().stopActive(job.id, DOWNLOAD_LIBRARY_REQUIRED)
+                    }
                 }
+                removedFolders.chunked(900).forEach { db.downloads().invalidateJaWorkVerification(it) }
+                folderIds.forEach { db.folders().delete(it) }
+                trackIds.forEach { db.tracks().delete(it) }
+                fileIds.forEach { db.files().delete(it) }
+                compactQueue()
+                detached to subtitleRemoved
             }
-            if (removedFolders.isNotEmpty()) db.downloads().invalidateJaWorkVerification(removedFolders.toList())
-            folderIds.forEach { db.folders().delete(it) }
-            trackIds.forEach { db.tracks().delete(it) }
-            compactQueue()
+            onBindingsDetached?.invoke(detachedBindings, subtitleFileRemoved)
         }
     }
 
@@ -746,83 +833,89 @@ class LibraryRepository(
         val updated = article ?: japaneseAsmr.article(postId, expected.rj, refresh = true)
         check(updated.post.postId == postId && updated.post.rj.equals(expected.rj, ignoreCase = true)) { context.getString(R.string.library_ja_post_id_changed) }
         workImportLock.withLock {
-            db.withTransaction {
-                val root = db.folders().get(rootId)
-                check(root?.asmrSourceId?.let(DlsiteClient::canonicalWorkno) == DlsiteClient.canonicalWorkno(expected.rj) &&
-                    dao.post(postId)?.rootFolderId == rootId) { PersistedErrors.JA_POST_REMOVED }
-                val rows = dao.mediaForPost(postId)
-                val matches = resolveStoredJaMatches(updated, postId, dao)
-                val visible = updated.media.map { it.key }.toSet()
-                val sync = if (updated.media.isEmpty()) null else fillJapaneseAsmrArticle(requireNotNull(root), updated)
-                val queue = db.queue().snapshot()
-                val stored = resolveStoredJaMatches(updated, postId, dao)
-                for (item in queue) {
-                    val key = item.fileKey ?: continue
-                    if (item.trackId != null || item.workno != postId || item.source != TrackSource.JAPANESE_ASMR) continue
-                    val media = resolveQueuedJaMatch(updated, key, item.mediaPathHash, stored, queue).media ?: continue
-                    if (item.mediaKind != media.kind.name) db.queue().setJaMediaKind(item.queueItemId, media.kind.name)
-                }
-                val gone = rows.filter { matches[it.mediaKey] == JaMatchResult.Gone }
-                val queueIds = linkedSetOf<Long>()
-                var playlistItems = 0
-                var removed = 0
-                val playlists = mutableSetOf<Long>()
-                if (cleanup && updated.complete) {
-                    val online = queue.filter {
-                        it.source == TrackSource.JAPANESE_ASMR && it.trackId == null &&
-                            it.workno == postId && it.fileKey != null
+            withContext(NonCancellable) {
+                val detachedBindings = mutableListOf<TrackSubtitleBindingEntity>()
+                val result = db.withTransaction {
+                    val root = db.folders().get(rootId)
+                    check(root?.asmrSourceId?.let(DlsiteClient::canonicalWorkno) == DlsiteClient.canonicalWorkno(expected.rj) &&
+                        dao.post(postId)?.rootFolderId == rootId) { PersistedErrors.JA_POST_REMOVED }
+                    val rows = dao.mediaForPost(postId)
+                    val matches = resolveStoredJaMatches(updated, postId, dao)
+                    val visible = updated.media.map { it.key }.toSet()
+                    val sync = if (updated.media.isEmpty()) null else fillJapaneseAsmrArticle(requireNotNull(root), updated)
+                    val queue = db.queue().snapshot()
+                    val stored = resolveStoredJaMatches(updated, postId, dao)
+                    for (item in queue) {
+                        val key = item.fileKey ?: continue
+                        if (item.trackId != null || item.workno != postId || item.source != TrackSource.JAPANESE_ASMR) continue
+                        val media = resolveQueuedJaMatch(updated, key, item.mediaPathHash, stored, queue).media ?: continue
+                        if (item.mediaKind != media.kind.name) db.queue().setJaMediaKind(item.queueItemId, media.kind.name)
                     }
-                    val candidates = matchOldJaQueue(rows, online)
-                    val removedKeys = mutableSetOf<String>()
-                    if (visible != rows.map { it.mediaKey }.toSet()) {
-                        for (media in gone) {
-                            val track = media.trackId?.let { db.tracks().getById(it) }
-                            if (track == null) {
+                    val gone = rows.filter { matches[it.mediaKey] == JaMatchResult.Gone }
+                    val queueIds = linkedSetOf<Long>()
+                    var playlistItems = 0
+                    var removed = 0
+                    val playlists = mutableSetOf<Long>()
+                    if (cleanup && updated.complete) {
+                        val online = queue.filter {
+                            it.source == TrackSource.JAPANESE_ASMR && it.trackId == null &&
+                                it.workno == postId && it.fileKey != null
+                        }
+                        val candidates = matchOldJaQueue(rows, online)
+                        val removedKeys = mutableSetOf<String>()
+                        if (visible != rows.map { it.mediaKey }.toSet()) {
+                            for (media in gone) {
+                                val track = media.trackId?.let { db.tracks().getById(it) }
+                                if (track == null) {
+                                    dao.deleteMedia(postId, media.mediaKey)
+                                    removedKeys += media.mediaKey
+                                    continue
+                                }
+                                val related = queue.filter { it.trackId == track.id }.map { it.queueItemId }
+                                val onlineRelated = online.filter { media.mediaKey in candidates.getValue(it.queueItemId).mediaKeys }
+                                if (track.biliLocalCache(context) != null ||
+                                    onlineRelated.any { candidates.getValue(it.queueItemId).ambiguous }
+                                ) continue
+                                val listItems = db.playlists().itemsForTrack(track.id)
+                                val current = currentQueueId()
+                                if (current in related || onlineRelated.any { it.queueItemId == current }) continue
+                                failJaTrackTasks(track.id, related)
+                                db.trackSubtitles().getForTrack(track.id)?.let(detachedBindings::add)
+                                db.tracks().delete(track.id)
                                 dao.deleteMedia(postId, media.mediaKey)
                                 removedKeys += media.mediaKey
-                                continue
+                                queueIds += related
+                                playlistItems += listItems.size
+                                playlists += listItems.map { it.playlistId }
+                                removed++
                             }
-                            val related = queue.filter { it.trackId == track.id }.map { it.queueItemId }
-                            val onlineRelated = online.filter { media.mediaKey in candidates.getValue(it.queueItemId).mediaKeys }
-                            if (track.biliLocalCache(context) != null ||
-                                onlineRelated.any { candidates.getValue(it.queueItemId).ambiguous }
-                            ) continue
-                            val listItems = db.playlists().itemsForTrack(track.id)
-                            val current = currentQueueId()
-                            if (current in related || onlineRelated.any { it.queueItemId == current }) continue
-                            failJaTrackTasks(track.id, related)
-                            db.tracks().delete(track.id)
-                            dao.deleteMedia(postId, media.mediaKey)
-                            removedKeys += media.mediaKey
-                            queueIds += related
-                            playlistItems += listItems.size
-                            playlists += listItems.map { it.playlistId }
-                            removed++
+                        }
+                        val cachedKeys = if (online.isEmpty()) emptySet() else db.downloads()
+                            .finishedForWork(TrackSource.JAPANESE_ASMR.name, postId)
+                            .mapNotNull { job ->
+                                val file = job.localPath?.let(::File)
+                                job.fileKey?.takeIf { file != null && file.isFile && file.length() > 0 }
+                            }.toSet()
+                        val removableOnline = online.filter { item ->
+                            val old = candidates.getValue(item.queueItemId)
+                            item.queueItemId != currentQueueId() && !old.ambiguous && item.fileKey !in cachedKeys &&
+                                old.mediaKeys.all { it in removedKeys } &&
+                                resolveQueuedJaMatch(updated, requireNotNull(item.fileKey), item.mediaPathHash, matches, queue) == JaMatchResult.Gone
+                        }.map { it.queueItemId }
+                        for (id in removableOnline) {
+                            if (id == currentQueueId()) continue
+                            db.translations().failForRemovedAudio(null, listOf(id), context.getString(R.string.library_ja_track_invalid))
+                            db.queue().delete(id)
+                            queueIds += id
                         }
                     }
-                    val cachedKeys = if (online.isEmpty()) emptySet() else db.downloads()
-                        .finishedForWork(TrackSource.JAPANESE_ASMR.name, postId)
-                        .mapNotNull { job ->
-                            val file = job.localPath?.let(::File)
-                            job.fileKey?.takeIf { file != null && file.isFile && file.length() > 0 }
-                        }.toSet()
-                    val removableOnline = online.filter { item ->
-                        val old = candidates.getValue(item.queueItemId)
-                        item.queueItemId != currentQueueId() && !old.ambiguous && item.fileKey !in cachedKeys &&
-                            old.mediaKeys.all { it in removedKeys } &&
-                            resolveQueuedJaMatch(updated, requireNotNull(item.fileKey), item.mediaPathHash, matches, queue) == JaMatchResult.Gone
-                    }.map { it.queueItemId }
-                    for (id in removableOnline) {
-                        if (id == currentQueueId()) continue
-                        db.translations().failForRemovedAudio(null, listOf(id), context.getString(R.string.library_ja_track_invalid))
-                        db.queue().delete(id)
-                        queueIds += id
-                    }
+                    if (queueIds.isNotEmpty()) compactQueue()
+                    playlists.forEach { compactPlaylist(it) }
+                    val retained = rows.count { matches[it.mediaKey]?.media == null } - removed
+                    JaRefreshResult(sync?.added ?: 0, removed, retained, queueIds.toList(), playlistItems, updated.complete)
                 }
-                if (queueIds.isNotEmpty()) compactQueue()
-                playlists.forEach { compactPlaylist(it) }
-                val retained = rows.count { matches[it.mediaKey]?.media == null } - removed
-                JaRefreshResult(sync?.added ?: 0, removed, retained, queueIds.toList(), playlistItems, updated.complete)
+                onBindingsDetached?.invoke(detachedBindings, false)
+                result
             }
         }
     }
@@ -1660,8 +1753,7 @@ class LibraryRepository(
     }
 
     private suspend fun trackIdsIn(folderIds: Set<Long>): Set<Long> {
-        if (folderIds.isEmpty()) return emptySet()
-        return db.tracks().inFolders(folderIds.toList()).map { it.id }.toSet()
+        return folderIds.chunked(900).flatMap { db.tracks().inFolders(it) }.map { it.id }.toSet()
     }
 
     private fun workIdOf(folder: FolderEntity): Long =

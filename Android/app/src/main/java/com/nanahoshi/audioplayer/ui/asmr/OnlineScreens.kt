@@ -71,13 +71,19 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.automirrored.outlined.HelpOutline
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.OpenInBrowser
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
@@ -111,12 +117,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -156,18 +164,19 @@ import com.nanahoshi.audioplayer.data.sortedForLibrary
 import com.nanahoshi.audioplayer.graph
 import com.nanahoshi.audioplayer.playback.pickSubtitleName
 import com.nanahoshi.audioplayer.ui.CollapsingTop
+import com.nanahoshi.audioplayer.ui.canCollapseHeader
 import com.nanahoshi.audioplayer.ui.CoverImage
 import com.nanahoshi.audioplayer.ui.EmptyHint
 import com.nanahoshi.audioplayer.ui.components.AppTopBar
+import com.nanahoshi.audioplayer.ui.components.AccountCard
 import com.nanahoshi.audioplayer.ui.components.BadgeItem
-import com.nanahoshi.audioplayer.ui.components.BadgeLine
 import com.nanahoshi.audioplayer.ui.components.ConfirmActionDialog
 import com.nanahoshi.audioplayer.ui.components.ErrorState
 import com.nanahoshi.audioplayer.ui.components.EmptyState
-import com.nanahoshi.audioplayer.ui.components.LabelBadge
 import com.nanahoshi.audioplayer.ui.components.LoadingState
 import com.nanahoshi.audioplayer.ui.components.SectionHeader
 import com.nanahoshi.audioplayer.ui.components.WorkHeader
+import com.nanahoshi.audioplayer.ui.components.WorkCard
 import com.nanahoshi.audioplayer.ui.components.SkeletonWorkList
 import com.nanahoshi.audioplayer.ui.formatDuration
 import com.nanahoshi.audioplayer.ui.theme.LocalReduceMotion
@@ -178,7 +187,9 @@ import com.nanahoshi.audioplayer.ui.library.LoadedWorkFolder
 import com.nanahoshi.audioplayer.ui.library.WorkFolderRequest
 import com.nanahoshi.audioplayer.ui.library.observeFolderListing
 import com.nanahoshi.audioplayer.ui.library.observeWorkPath
+import com.nanahoshi.audioplayer.ui.library.observeWorkSubtitleTrackIds
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -194,6 +205,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
 
 enum class OnlineSort(@param:StringRes val labelRes: Int, val order: String, val direction: String) {
@@ -542,7 +554,6 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
         private set
     private var jaJob: Job? = null
     private var jaDiscovery: Job? = null
-    private var localRootId by mutableStateOf<Long?>(null)
     val availableSources: List<WorkFileSource> get() = buildList {
         if (purchased || hasOriginalFiles) add(WorkFileSource.PLAY)
         if (work != null) add(WorkFileSource.ASMR)
@@ -578,8 +589,6 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
     var playFolders by mutableStateOf<List<com.nanahoshi.audioplayer.dlsite.PlayEntry>>(emptyList())
         private set
     var playFiles by mutableStateOf<List<com.nanahoshi.audioplayer.dlsite.PlayEntry>>(emptyList())
-        private set
-    var saved by mutableStateOf(false)
         private set
     var error by mutableStateOf<String?>(null)
         private set
@@ -621,19 +630,32 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
     fun openGallery(index: Int): Boolean {
         val url = gallery.getOrNull(index) ?: return false
         graph.remotePreview.value = com.nanahoshi.audioplayer.dlsite.RemotePreview(
-            "${facts?.title.orEmpty()} · ${getApplication<Application>().getString(R.string.online_gallery_image_title, index + 1)}", url, FileKind.IMAGE, DlsiteClient.STORE_REFERER, false)
+            name = facts?.title.orEmpty(),
+            url = url,
+            kind = FileKind.IMAGE,
+            referer = DlsiteClient.STORE_REFERER,
+            authed = false,
+            galleryUrls = gallery,
+            initialIndex = index,
+            titlePrefix = facts?.title.orEmpty(),
+        )
         return true
     }
 
-    private var sourceKey = ""
-    private var originalRootId by mutableStateOf<Long?>(null)
+    private val routeSourceKey = MutableStateFlow<String?>(null)
+    private val sourceKey: String get() = routeSourceKey.value.orEmpty()
+    private var libraryLink by mutableStateOf<WorkLibraryLink?>(null)
+    private val currentLibraryLink: WorkLibraryLink? get() = libraryLink?.takeIf { it.rawKey == sourceKey }
+    private val localRootId: Long? get() = currentLibraryLink?.localRootId
+    private val originalRootId: Long? get() = currentLibraryLink?.originalRootId
+    val libraryFolderId: Long? get() = currentLibraryLink?.libraryFolderId
+    val saved: Boolean get() = currentLibraryLink?.saved == true
     val hasOriginalFiles: Boolean get() = originalRootId != null
     private val libraryStack = mutableListOf<Long>()
     private val nodeStack = mutableListOf<AsmrNode>()
     private val playStack = mutableListOf<com.nanahoshi.audioplayer.dlsite.PlayEntry>()
     private var playRoot = emptyList<com.nanahoshi.audioplayer.dlsite.PlayEntry>()
     private val browseRequest = MutableStateFlow<WorkFolderRequest?>(null)
-    private val originalWorkKey = MutableStateFlow<String?>(null)
     private var loadJob: Job? = null
     private var loadRevision = 0L
     private var sourceRevision = 0L
@@ -642,8 +664,12 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             browseRequest.flatMapLatest { request ->
                 if (request == null) emptyFlow()
-                else graph.library.observeFolderListing(request.folderId, LibrarySort.NAME, request.source)
-                    .map { LoadedWorkFolder(request, it) }
+                else graph.library.observeFolderListing(
+                    request.folderId,
+                    LibrarySort.NAME,
+                    request.source,
+                    subtitleTrackIds = graph.observeWorkSubtitleTrackIds(request.folderId, request.source),
+                ).map { LoadedWorkFolder(request, it) }
             }.collect { browse ->
                 if (browse.request === browseRequest.value) libraryListing = browse
             }
@@ -656,16 +682,21 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         viewModelScope.launch {
-            combine(originalWorkKey, graph.db.dlsiteOriginals().observeEntries(), graph.library.observeAllFolders()) { code, _, folders ->
-                val rootId = code?.let { graph.db.dlsiteOriginals().work(it)?.rootFolderId }
-                    ?.takeIf { id -> folders.any { it.id == id } }
-                code to rootId
-            }.collect { (code, rootId) ->
-                if (code == null || code != DlsiteClient.canonicalWorkno(sourceKey)) return@collect
-                originalRootId = rootId
-                if (rootId != null) {
-                    saved = true
-                    if (fileSource == WorkFileSource.PLAY) showOriginalLibrary(rootId)
+            routeSourceKey.flatMapLatest { rawKey ->
+                if (rawKey.isNullOrBlank()) emptyFlow()
+                else combine(
+                    graph.library.observeAllFolders(),
+                    graph.db.dlsiteOriginals().observeWork(DlsiteClient.canonicalWorkno(rawKey)),
+                ) { folders, original ->
+                    resolveWorkLibraryLink(rawKey, folders, original?.rootFolderId)
+                }
+            }.distinctUntilChanged().collect { link ->
+                if (link.rawKey != sourceKey) return@collect
+                libraryLink = link
+                if (fileSource == WorkFileSource.PLAY) {
+                    val root = link.originalRootId
+                    if (root != null) showOriginalLibrary(root)
+                    else if (usingLibrary) updateLibraryPath(emptyList())
                 }
             }
         }
@@ -675,17 +706,15 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
 
     fun load(sourceId: String, metered: Boolean, force: Boolean = false,
         jaPost: String? = initialJaPost) {
-        val sameRoute = initialJaPost == jaPost
+        val sameRoute = sourceKey == sourceId && initialJaPost == jaPost
+        routeSourceKey.value = sourceId
         initialJaPost = jaPost
-        if (!force && sameRoute && sourceKey == sourceId && (facts != null || loadJob?.isActive == true)) {
+        if (!force && sameRoute && (facts != null || loadJob?.isActive == true)) {
             if (facts != null) refreshDownloads(sourceId)
             return
         }
         val revision = ++loadRevision
         val initialSourceRevision = sourceRevision
-        sourceKey = sourceId
-        originalRootId = null
-        originalWorkKey.value = DlsiteClient.canonicalWorkno(sourceId)
         loadJob?.cancel()
         jaJob?.cancel()
         jaDiscovery?.cancel()
@@ -698,11 +727,9 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
         jaChecked = false
         jaDiscoveryFailed = false
         verifyingJaRefresh = false
-        localRootId = null
         work = null
         facts = null
         purchased = false
-        saved = false
         loadJob = viewModelScope.launch {
             busy = true
             error = null
@@ -720,8 +747,14 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
             downloadedAsmr = emptySet()
             allowGallery = !metered
             try {
-                val existing = graph.library.folderBySource(sourceId)
-                localRootId = existing?.id
+                val (link, existing) = withContext(Dispatchers.IO) {
+                    val folders = graph.db.folders().all()
+                    val original = graph.db.dlsiteOriginals().work(DlsiteClient.canonicalWorkno(sourceId))
+                    val initialLink = resolveWorkLibraryLink(sourceId, folders, original?.rootFolderId)
+                    initialLink to folders.firstOrNull { it.id == (initialLink.localRootId ?: initialLink.originalRootId) }
+                }
+                if (revision != loadRevision) return@launch
+                libraryLink = link
                 val known = existing?.let { graph.db.japaneseAsmr().postsForRoot(it.id).map { row -> row.ref() } }.orEmpty()
                 val routeIds = listOfNotNull(jaPost).filter { id -> id.isNotEmpty() && id.all { it in '0'..'9' } }
                 jaPosts = (routeIds.map { id ->
@@ -730,26 +763,22 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
                 if (jaPosts.isNotEmpty() && jaPost != null) {
                     facts = jaPosts.first().facts()
                     coverUrl = jaPosts.first().coverUri
-                    saved = existing != null
                     fileSource = WorkFileSource.JAPANESE_ASMR
                     publishLocation()
                     (jaPosts.firstOrNull { it.postId == jaPost } ?: jaPosts.singleOrNull())?.let(::openJaPost)
                 }
                 discoverJapaneseAsmr(sourceId, revision, initialSourceRevision)
-                val original = graph.db.dlsiteOriginals().work(DlsiteClient.canonicalWorkno(sourceId))
-                    ?.rootFolderId?.takeIf { graph.db.folders().get(it) != null }
-                originalRootId = original
+                val original = originalRootId
                 val localFacts = existing?.let { folder ->
                     WorkFacts.fromJson(folder.workMeta) ?: WorkFacts(folder.name, "", emptyList(), emptyList(), "", sourceId)
                 }
-                if (original != null && localFacts != null) {
+                if (original != null && localFacts != null &&
+                    initialSourceRevision == sourceRevision && fileSource != WorkFileSource.JAPANESE_ASMR
+                ) {
                     facts = localFacts
                     coverUrl = existing.coverUri
-                    if (initialSourceRevision == sourceRevision && fileSource != WorkFileSource.JAPANESE_ASMR) {
-                        fileSource = WorkFileSource.PLAY
-                        showOriginalLibrary(original)
-                    }
-                    saved = true
+                    fileSource = WorkFileSource.PLAY
+                    showOriginalLibrary(original)
                 }
                 var missing = false
                 val loaded = try {
@@ -795,8 +824,6 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
                     false
                 }
                 if (revision != loadRevision) return@launch
-                val localRoot = originalRootId
-                saved = existing != null || localRoot != null
                 if (purchased && originalRootId == null && playRoot.isEmpty()) {
                     playRoot = try {
                         graph.dlsite.playTree(nextFacts.sourceId, nextFacts.circle, coverUrl)
@@ -807,21 +834,25 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
                         emptyList()
                     }
                 }
+                if (revision != loadRevision) return@launch
+                val localRoot = originalRootId
                 if (initialSourceRevision != sourceRevision || fileSource == WorkFileSource.JAPANESE_ASMR) {
                     if (fileSource == WorkFileSource.ASMR && !usingLibrary) publishNodes()
                 } else if (localRoot != null) {
                     fileSource = WorkFileSource.PLAY
                     showOriginalLibrary(localRoot)
-                } else if (purchased) {
+                } else if (purchased && playRoot.isNotEmpty()) {
                     fileSource = WorkFileSource.PLAY
                     showPlay = true
                     usingLibrary = false
                     browseRequest.value = null
                     publishPlay()
 
+                } else if (fileSource == WorkFileSource.PLAY) {
+                    useFallbackFileSource()
                 } else if (loaded == null && jaPosts.isNotEmpty()) {
                     useFileSource(WorkFileSource.JAPANESE_ASMR)
-                } else if (loaded != null && existing != null && graph.library.hasSavedAsmr(existing)) {
+                } else if (loaded != null && existing != null && graph.library.hasSavedAsmr(existing) && existing.id == localRootId) {
                     showPlay = false
                     showLibrary(existing.id)
                 } else if (loaded != null) {
@@ -861,30 +892,53 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
                 showOriginalLibrary(it)
                 return
             }
-            showPlay = true
-            usingLibrary = false
-            browseRequest.value = null
-            publishPlay()
-            if (playRoot.isEmpty()) {
-                val currentFacts = facts ?: return
-                val currentRevision = sourceRevision
-                viewModelScope.launch {
-                    try {
-                        val nodes = graph.dlsite.playTree(currentFacts.sourceId, currentFacts.circle, coverUrl)
-                        if (currentRevision == sourceRevision && fileSource == WorkFileSource.PLAY) {
-                            playRoot = nodes
-                            publishPlay()
-                        }
-                    } catch (cancelled: CancellationException) { throw cancelled }
-                    catch (failure: Exception) { graph.showError(failure, R.string.online_read_files_failed) }
-                }
-            }
+            showRemotePlay()
         } else {
             showPlay = false
             usingLibrary = false
             browseRequest.value = null
             publishNodes()
         }
+    }
+
+    private fun showRemotePlay() {
+        val currentFacts = facts
+        if (!purchased || currentFacts == null) {
+            useFallbackFileSource()
+            return
+        }
+        showPlay = true
+        usingLibrary = false
+        browseRequest.value = null
+        publishPlay()
+        if (playRoot.isNotEmpty()) return
+        val currentLoad = loadRevision
+        val currentSource = sourceRevision
+        viewModelScope.launch {
+            val nodes = try {
+                graph.dlsite.playTree(currentFacts.sourceId, currentFacts.circle, coverUrl)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                if (currentLoad == loadRevision && currentSource == sourceRevision && !usingLibrary) {
+                    graph.showError(failure, R.string.online_read_files_failed)
+                }
+                emptyList()
+            }
+            if (currentLoad != loadRevision || currentSource != sourceRevision ||
+                fileSource != WorkFileSource.PLAY || usingLibrary
+            ) return@launch
+            if (nodes.isEmpty()) {
+                useFallbackFileSource()
+            } else {
+                playRoot = nodes
+                publishPlay()
+            }
+        }
+    }
+
+    private fun useFallbackFileSource() {
+        useFileSource(if (work == null && jaPosts.isNotEmpty()) WorkFileSource.JAPANESE_ASMR else WorkFileSource.ASMR)
     }
 
     fun retryJaDiscovery() {
@@ -971,6 +1025,10 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun acceptJaArticle(article: JaArticle, cleanup: Boolean, sync: Boolean = false) {
         val revision = loadRevision
         val post = article.post
+        if (article.media.isEmpty() && jaArticle?.let { it.post.postId == post.postId && it.media.isNotEmpty() } == true) {
+            jaError = getApplication<Application>().getString(R.string.online_article_unavailable)
+            return
+        }
         jaArticle = article
         val old = jaPosts.firstOrNull { it.postId == post.postId }
         val displayed = post.copy(publishedAt = post.publishedAt ?: old?.publishedAt, coverUri = post.coverUri ?: old?.coverUri)
@@ -1249,7 +1307,7 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
             working = true
             try {
                 loadJob?.join()
-                    if (revision != loadRevision) return@launch
+                if (revision != loadRevision) return@launch
                 val currentFacts = facts ?: return@launch
                 val current = work
                 val root = graph.library.saveOnlineWork(
@@ -1258,8 +1316,6 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
                     playChecked = playRoot.isNotEmpty() || graph.dlsite.cachedPurchased(currentFacts.sourceId) == false,
                 )
                 if (revision != loadRevision) return@launch
-                localRootId = root
-                saved = true
                 graph.library.rememberJapanesePosts(root, jaPosts)
                 if (fileSource == WorkFileSource.ASMR && current != null) showLibrary(root)
                 graph.show(R.string.online_added_to_library)
@@ -1300,8 +1356,7 @@ class OnlineWorkViewModel(app: Application) : AndroidViewModel(app) {
             browseRequest.value = null
             libraryListing = null
             if (fileSource == WorkFileSource.PLAY) {
-                showPlay = true
-                publishPlay()
+                showRemotePlay()
             } else {
                 publishNodes()
             }
@@ -1375,24 +1430,43 @@ private fun WorkSearchScreen(
     }
     CollapsingTop(
         resetKey = viewModel.searchRevision,
+        isEmpty = works.isEmpty(),
+        canCollapse = listState::canCollapseHeader,
         header = {
+            val hasQuery = viewModel.text.isNotBlank() || viewModel.pieces.isNotEmpty()
             Surface(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                shape = MaterialTheme.shapes.small,
+                shape = RoundedCornerShape(28.dp),
                 tonalElevation = 1.dp,
                 onClick = { composing = true },
             ) {
-                Text(
-                    viewModel.summary().ifBlank { stringResource(R.string.online_search_works) },
-                    modifier = Modifier.padding(16.dp),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    color = if (viewModel.summary().isBlank()) {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    } else {
-                        MaterialTheme.colorScheme.onSurface
-                    },
-                )
+                Row(
+                    Modifier.heightIn(min = 48.dp).padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        Icons.Default.Search,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        viewModel.summary().ifBlank { stringResource(R.string.online_search_works) },
+                        modifier = Modifier.weight(1f).padding(horizontal = 12.dp),
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                        color = if (viewModel.summary().isBlank()) {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        } else {
+                            MaterialTheme.colorScheme.onSurface
+                        },
+                    )
+                    if (hasQuery) {
+                        IconButton(onClick = { viewModel.applyQuery("", emptyList()) }) {
+                            Icon(Icons.Default.Close, contentDescription = stringResource(R.string.a11y_clear_search))
+                        }
+                    }
+                }
             }
             Row(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
@@ -1412,6 +1486,7 @@ private fun WorkSearchScreen(
                 SortMenu(
                     label = viewModel.sortLabel(),
                     showPopular = viewModel.text.isBlank() && viewModel.pieces.isEmpty() && !viewModel.allAges,
+                    selected = viewModel.sort,
                     onPopular = { viewModel.chooseSort(null) },
                     onSort = viewModel::chooseSort,
                 )
@@ -1420,29 +1495,32 @@ private fun WorkSearchScreen(
     ) { topInset ->
         when {
             works.isEmpty() && viewModel.loading -> SkeletonWorkList(modifier = topInset)
-            works.isEmpty() -> Box(topInset.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
-                Column(Modifier.verticalScroll(rememberScrollState())) {
-                    val failure = viewModel.error
-                    if (failure != null) {
-                        ErrorState(failure, viewModel::loadMore)
-                    } else {
-                        EmptyState(
-                            title = stringResource(R.string.online_empty_search_title),
-                            message = stringResource(R.string.online_empty_search_message),
-                            actionLabel = stringResource(R.string.online_empty_search_action),
-                            onAction = { composing = true },
-                        )
-                    }
+            works.isEmpty() -> Box(topInset.fillMaxSize(), contentAlignment = Alignment.Center) {
+                val failure = viewModel.error
+                if (failure != null) {
+                    ErrorState(failure, viewModel::loadMore)
+                } else {
+                    EmptyState(
+                        title = stringResource(R.string.online_empty_search_title),
+                        message = stringResource(R.string.online_empty_search_message),
+                        actionLabel = stringResource(R.string.online_empty_search_action),
+                        onAction = { composing = true },
+                    )
                 }
             }
-            else -> LazyColumn(state = listState, modifier = topInset.fillMaxSize()) {
-                if (viewModel.error != null && !viewModel.loading) {
-                    item(key = "error") { ErrorState(viewModel.error!!, viewModel::loadMore) }
-                }
+            else -> LazyColumn(
+                state = listState,
+                modifier = topInset.fillMaxSize(),
+                contentPadding = PaddingValues(bottom = 24.dp),
+            ) {
                 items(works, key = { it.sourceId }) { item ->
                     OnlineResultCard(item) {
                         if (item.sourceId.isNotBlank()) onOpenWork(item.sourceId)
                     }
+                }
+                val failure = viewModel.error
+                if (failure != null && !viewModel.loading) {
+                    item(key = "error") { ErrorState(failure, viewModel::loadMore) }
                 }
                 if (viewModel.loading) {
                     item(key = "loading") {
@@ -1458,25 +1536,57 @@ private fun WorkSearchScreen(
     }
 }
 
+internal enum class OnlineSearchSource(val saveableKey: String) {
+    WORKS("works"),
+    BILIBILI("bilibili"),
+    YOUTUBE("youtube");
+
+    fun topBarOwnerKey(entryId: String) = "online:$entryId:$name"
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun OnlineSearchScreen(
+internal fun OnlineSearchScreen(
+    entryId: String,
+    source: OnlineSearchSource,
+    onSourceChange: (OnlineSearchSource) -> Unit,
     onOpenWork: (String) -> Unit,
     onOpenBiliCollection: (com.nanahoshi.audioplayer.bilibili.BiliCollection) -> Unit = {},
 ) {
-    var source by rememberSaveable { mutableStateOf("works") }
     val holder = androidx.compose.runtime.saveable.rememberSaveableStateHolder()
     Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(selected = source == "works", onClick = { source = "works" }, label = { Text(stringResource(R.string.online_source_works)) })
-            FilterChip(selected = source == "bilibili", onClick = { source = "bilibili" }, label = { Text(stringResource(R.string.library_badge_bilibili)) })
-            FilterChip(selected = source == "youtube", onClick = { source = "youtube" }, label = { Text("YouTube") })
+        val sources = OnlineSearchSource.entries
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+            sources.forEachIndexed { index, item ->
+                SegmentedButton(
+                    selected = source == item,
+                    onClick = { onSourceChange(item) },
+                    shape = SegmentedButtonDefaults.itemShape(index = index, count = sources.size),
+                ) {
+                    Text(
+                        when (item) {
+                            OnlineSearchSource.WORKS -> stringResource(R.string.online_source_works)
+                            OnlineSearchSource.BILIBILI -> stringResource(R.string.library_badge_bilibili)
+                            OnlineSearchSource.YOUTUBE -> "YouTube"
+                        },
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
         }
         Box(Modifier.weight(1f)) {
-            holder.SaveableStateProvider(source) {
+            holder.SaveableStateProvider(source.saveableKey) {
                 when (source) {
-                    "bilibili" -> com.nanahoshi.audioplayer.ui.bilibili.BiliBrowser(onOpenCollection = onOpenBiliCollection)
-                    "youtube" -> com.nanahoshi.audioplayer.ui.youtube.YouTubeBrowser()
-                    else -> WorkSearchScreen(onOpenWork)
+                    OnlineSearchSource.BILIBILI -> com.nanahoshi.audioplayer.ui.bilibili.BiliBrowser(
+                        topBarOwnerKey = source.topBarOwnerKey(entryId),
+                        onOpenCollection = onOpenBiliCollection,
+                    )
+                    OnlineSearchSource.YOUTUBE -> com.nanahoshi.audioplayer.ui.youtube.YouTubeBrowser(
+                        topBarOwnerKey = source.topBarOwnerKey(entryId),
+                    )
+                    OnlineSearchSource.WORKS -> WorkSearchScreen(onOpenWork)
                 }
             }
         }
@@ -1485,67 +1595,56 @@ fun OnlineSearchScreen(
 
 @Composable
 private fun OnlineResultCard(item: OnlineHit, onClick: () -> Unit) {
-    val facts = item.facts()
-    Surface(
+    WorkCard(
+        facts = item.facts(),
+        coverUrl = item.coverUrl,
         onClick = onClick,
         enabled = item.sourceId.isNotBlank(),
-        shape = MaterialTheme.shapes.large,
-        color = MaterialTheme.colorScheme.surfaceContainer,
+        extraBadges = if (item.asmrMissing) {
+            listOf(BadgeItem(stringResource(R.string.online_not_listed), MaterialTheme.colorScheme.error))
+        } else {
+            emptyList()
+        },
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
-    ) {
-        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.Top) {
-            CoverImage(item.coverUrl, size = 84.dp, shape = MaterialTheme.shapes.medium)
-            Column(Modifier.padding(start = 12.dp).weight(1f)) {
-                Text(
-                    facts.title.ifBlank { facts.sourceId },
-                    style = MaterialTheme.typography.titleMedium,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    listOf(facts.circle, facts.vas.joinToString("、")).filter { it.isNotBlank() }.joinToString(" · ").ifBlank { facts.sourceId },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(top = 2.dp),
-                )
-                BadgeLine(
-                    leading = buildList {
-                        if (facts.sourceId.isNotBlank()) {
-                            add(BadgeItem(facts.sourceId, MaterialTheme.colorScheme.primary))
-                        }
-                        if (item.asmrMissing) {
-                            add(BadgeItem(stringResource(R.string.online_not_listed), MaterialTheme.colorScheme.error))
-                        }
-                    },
-                    tags = facts.tags.take(8).map {
-                        BadgeItem(it, MaterialTheme.colorScheme.onSurfaceVariant)
-                    },
-                    totalTags = facts.tags.size,
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-            }
-        }
-    }
+    )
 }
 
 @Composable
 private fun SortMenu(
     label: String,
     showPopular: Boolean,
+    selected: OnlineSort?,
     onPopular: () -> Unit,
     onSort: (OnlineSort) -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
     Box {
-        TextButton(onClick = { open = true }) { Text(label) }
+        TextButton(onClick = { open = true }) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(label)
+                Icon(Icons.Default.ArrowDropDown, contentDescription = null)
+            }
+        }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             if (showPopular) {
-                DropdownMenuItem(text = { Text(stringResource(R.string.online_popular)) }, onClick = { open = false; onPopular() })
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.online_popular)) },
+                    onClick = { open = false; onPopular() },
+                    trailingIcon = {
+                        if (selected == null) Icon(Icons.Default.Check, contentDescription = stringResource(R.string.a11y_selected))
+                    },
+                )
             }
             OnlineSort.entries.forEach { item ->
-                DropdownMenuItem(text = { Text(stringResource(item.labelRes)) }, onClick = { open = false; onSort(item) })
+                val active = selected == item ||
+                    (!showPopular && selected == null && item == OnlineSort.SALES)
+                DropdownMenuItem(
+                    text = { Text(stringResource(item.labelRes)) },
+                    onClick = { open = false; onSort(item) },
+                    trailingIcon = {
+                        if (active) Icon(Icons.Default.Check, contentDescription = stringResource(R.string.a11y_selected))
+                    },
+                )
             }
         }
     }
@@ -1607,6 +1706,7 @@ private fun SearchComposer(
                 BasicTextField(
                     value = text,
                     onValueChange = { onTextChange(it.replace("$", "")) },
+                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                     modifier = Modifier.widthIn(min = 120.dp).padding(8.dp).onPreviewKeyEvent { event ->
                         val deleting = event.type == KeyEventType.KeyDown && event.key == Key.Backspace
                         if (deleting && text.isEmpty() && pieces.isNotEmpty()) {
@@ -1748,6 +1848,7 @@ private fun Context.openWorkSite(url: String?) {
 fun OnlineWorkScreen(
     sourceId: String,
     onBack: () -> Unit,
+    onOpenLibraryWork: (Long) -> Unit,
     onOpenPreview: (Long) -> Unit,
     onOpenRemotePreview: () -> Unit,
     onVerifyJapaneseAsmr: (String, String, Boolean) -> Unit,
@@ -1776,7 +1877,8 @@ fun OnlineWorkScreen(
     val verifyJapaneseAsmr: (String) -> Unit = { page ->
         onVerifyJapaneseAsmr(page, viewModel.jaSelected?.rj ?: sourceId, viewModel.verifyingJaRefresh)
     }
-    val canSave = facts != null && (viewModel.work != null || viewModel.purchased || viewModel.jaPosts.isNotEmpty() || viewModel.saved)
+    val targetFolderId = viewModel.libraryFolderId
+    val canSave = facts != null && (viewModel.work != null || viewModel.purchased || viewModel.jaPosts.isNotEmpty())
     if (browserChoice && facts != null) {
         AlertDialog(
             onDismissRequest = { browserChoice = false },
@@ -1835,20 +1937,6 @@ fun OnlineWorkScreen(
                 }
             },
         )
-        if (facts != null && viewModel.jaChecked && viewModel.jaPosts.isEmpty()) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(stringResource(
-                        if (viewModel.jaDiscoveryFailed) R.string.online_ja_unknown else R.string.online_ja_missing,
-                    ),
-                    modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                if (viewModel.jaDiscoveryFailed) {
-                    TextButton(onClick = {
-                        if (jaVerificationPage != null) verifyJapaneseAsmr(jaVerificationPage)
-                        else viewModel.retryJaDiscovery()
-                    }) { Text(stringResource(if (jaVerificationPage != null) R.string.online_verify else R.string.common_retry)) }
-                }
-            }
-        }
         when {
             facts == null && viewModel.busy -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator()
@@ -1879,8 +1967,13 @@ fun OnlineWorkScreen(
                 com.nanahoshi.audioplayer.ui.components.WorkFileBrowser(
                     state = viewModel.browserListState(),
                     modifier = Modifier.weight(1f).fillMaxWidth(),
-                    bottomPadding = PaddingValues(bottom = if (canSave) 96.dp else 24.dp),
-                    loading = viewModel.libraryLoading || (viewModel.busy && foldersEmpty && filesEmpty),
+                    bottomPadding = PaddingValues(bottom = if (targetFolderId != null || canSave) 96.dp else 24.dp),
+                    loading = when {
+                        viewModel.fileSource == WorkFileSource.JAPANESE_ASMR ->
+                            viewModel.jaSelected == null && viewModel.jaPosts.isEmpty() &&
+                                (!viewModel.jaChecked || viewModel.jaLoading)
+                        else -> (viewModel.libraryLoading || viewModel.busy) && foldersEmpty && filesEmpty
+                    },
                     header = {
                         if (viewModel.error != null && !viewModel.busy) ErrorState(viewModel.error!!,
                             onRetry = { viewModel.load(sourceId, context.onMeteredNetwork(), force = true) })
@@ -1898,7 +1991,32 @@ fun OnlineWorkScreen(
                                     SegmentedButton(selected = viewModel.fileSource == source,
                                         onClick = { viewModel.useFileSource(source) },
                                         shape = SegmentedButtonDefaults.itemShape(index, viewModel.availableSources.size)) {
-                                        Text(source.trackSource().workLabel())
+                                        Text(source.trackSource().workLabel(), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+                                    }
+                                }
+                            }
+                        }
+                        if (viewModel.jaChecked && viewModel.jaPosts.isEmpty()) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    stringResource(
+                                        if (viewModel.jaDiscoveryFailed) R.string.online_ja_unknown
+                                        else R.string.online_ja_missing,
+                                    ),
+                                    modifier = Modifier.weight(1f),
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                                if (viewModel.jaDiscoveryFailed) {
+                                    TextButton(onClick = {
+                                        if (jaVerificationPage != null) verifyJapaneseAsmr(jaVerificationPage)
+                                        else viewModel.retryJaDiscovery()
+                                    }) {
+                                        Text(stringResource(
+                                            if (jaVerificationPage != null) R.string.online_verify else R.string.common_retry,
+                                        ))
                                     }
                                 }
                             }
@@ -2054,30 +2172,24 @@ fun OnlineWorkScreen(
             }
         }
     }
-    if (facts != null && canSave) {
-        if (viewModel.saved) {
-            Surface(
-                shape = MaterialTheme.shapes.large,
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
-            ) {
-                Row(
-                    Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(Icons.Default.Check, contentDescription = null)
-                    Text(stringResource(R.string.online_in_library), modifier = Modifier.padding(start = 12.dp))
-                }
-            }
-        } else {
-            ExtendedFloatingActionButton(
-                onClick = { if (!viewModel.working) viewModel.save() },
-                expanded = true,
-                icon = { Icon(Icons.Default.Add, contentDescription = null) },
-                text = { Text(stringResource(R.string.common_add_to_library)) },
-                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
-            )
-        }
+    if (targetFolderId != null) {
+        ExtendedFloatingActionButton(
+            onClick = { onOpenLibraryWork(targetFolderId) },
+            expanded = true,
+            icon = { Icon(Icons.Default.LibraryMusic, contentDescription = null) },
+            text = { Text(stringResource(R.string.online_open_in_library)) },
+            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+            modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+        )
+    } else if (canSave) {
+        ExtendedFloatingActionButton(
+            onClick = { if (!viewModel.working) viewModel.save() },
+            expanded = true,
+            icon = { Icon(Icons.Default.Add, contentDescription = null) },
+            text = { Text(stringResource(R.string.common_add_to_library)) },
+            modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+        )
     }
     }
 }
@@ -2277,6 +2389,8 @@ class MineViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var qrExpired by mutableStateOf(false)
         private set
+    var qrFailed by mutableStateOf(false)
+        private set
     private var qrJob: Job? = null
     private var qrGeneration = 0
 
@@ -2359,6 +2473,7 @@ class MineViewModel(app: Application) : AndroidViewModel(app) {
         qrVisible = true
         qrImage = null
         qrExpired = false
+        qrFailed = false
         qrMessage = getApplication<Application>().getString(R.string.mine_qr_getting)
         qrJob = viewModelScope.launch {
             try {
@@ -2394,6 +2509,7 @@ class MineViewModel(app: Application) : AndroidViewModel(app) {
                 throw cancelled
             } catch (failure: Exception) {
                 if (generation != qrGeneration) return@launch
+                qrFailed = true
                 qrMessage = if (failure is BilibiliException) {
                     getApplication<Application>().resolveUserError(failure, R.string.online_qr_login_failed)
                 } else {
@@ -2409,6 +2525,8 @@ class MineViewModel(app: Application) : AndroidViewModel(app) {
         qrJob = null
         qrVisible = false
         qrImage = null
+        qrExpired = false
+        qrFailed = false
     }
 }
 
@@ -2423,7 +2541,7 @@ class PurchasesViewModel(app: Application) : AndroidViewModel(app) {
 
     val hasDlsiteSession: Boolean get() = graph.dlsite.hasSession()
 
-    init { reload() }
+    init { if (hasDlsiteSession) reload() else loading = false }
 
     fun reload() {
         viewModelScope.launch {
@@ -2459,6 +2577,7 @@ fun MineScreen(
             image = viewModel.qrImage,
             message = viewModel.qrMessage,
             expired = viewModel.qrExpired,
+            failed = viewModel.qrFailed,
             onRefresh = viewModel::startBiliQr,
             onDismiss = viewModel::stopBiliQr,
         )
@@ -2486,7 +2605,12 @@ fun MineScreen(
         )
     }
     var cookieOpen by remember { mutableStateOf(false) }
-    LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+    var showCookie by rememberSaveable { mutableStateOf(false) }
+    val reduceCookieMotion = LocalReduceMotion.current
+    LazyColumn(
+        Modifier.fillMaxSize().padding(horizontal = 16.dp),
+        contentPadding = PaddingValues(bottom = 24.dp),
+    ) {
         item(key = "dlsite") {
             AccountCard(title = "DLsite", loggedIn = viewModel.loggedIn) {
                 if (!viewModel.loggedIn) {
@@ -2504,12 +2628,27 @@ fun MineScreen(
                     TextButton(onClick = { cookieOpen = !cookieOpen }) {
                         Text(stringResource(if (cookieOpen) R.string.mine_cookie_collapse else R.string.mine_cookie_use))
                     }
-                    AnimatedVisibility(visible = cookieOpen) {
+                    AnimatedVisibility(
+                        visible = cookieOpen,
+                        enter = if (reduceCookieMotion) EnterTransition.None else fadeIn() + expandVertically(),
+                        exit = if (reduceCookieMotion) ExitTransition.None else fadeOut() + shrinkVertically(),
+                    ) {
                         Column {
                             OutlinedTextField(
                                 value = viewModel.cookie,
                                 onValueChange = { viewModel.cookie = it },
-                                label = { Text("Cookie") },
+                                label = { Text(stringResource(R.string.mine_dlsite_cookie_label)) },
+                                visualTransformation = if (showCookie) VisualTransformation.None else PasswordVisualTransformation(),
+                                trailingIcon = {
+                                    IconButton(onClick = { showCookie = !showCookie }) {
+                                        Icon(
+                                            if (showCookie) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                            contentDescription = stringResource(
+                                                if (showCookie) R.string.a11y_hide_password else R.string.a11y_show_password,
+                                            ),
+                                        )
+                                    }
+                                },
                                 modifier = Modifier.fillMaxWidth(),
                             )
                             TextButton(
@@ -2595,31 +2734,6 @@ fun MineScreen(
 }
 
 @Composable
-private fun AccountCard(
-    title: String,
-    loggedIn: Boolean,
-    badgeText: String = stringResource(if (loggedIn) R.string.mine_bili_badge_logged_in else R.string.mine_bili_not_logged_in),
-    content: @Composable () -> Unit,
-) {
-    Surface(
-        shape = MaterialTheme.shapes.large,
-        color = MaterialTheme.colorScheme.surfaceContainer,
-        modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
-    ) {
-        Column(Modifier.padding(16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                LabelBadge(
-                    badgeText,
-                    if (loggedIn) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            content()
-        }
-    }
-}
-
-@Composable
 private fun BiliLoginHelpDialog(onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -2648,6 +2762,7 @@ private fun BiliSessdataDialog(
 ) {
     var text by remember { mutableStateOf(saved) }
     var confirming by remember { mutableStateOf(false) }
+    var showSecret by rememberSaveable { mutableStateOf(false) }
     fun submit() {
         val value = text.trim()
         if (value.isEmpty()) return
@@ -2665,7 +2780,17 @@ private fun BiliSessdataDialog(
                 value = text,
                 onValueChange = { text = it },
                 label = { Text(stringResource(R.string.mine_cookie_label)) },
-                visualTransformation = PasswordVisualTransformation(),
+                visualTransformation = if (showSecret) VisualTransformation.None else PasswordVisualTransformation(),
+                trailingIcon = {
+                    IconButton(onClick = { showSecret = !showSecret }) {
+                        Icon(
+                            if (showSecret) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                            contentDescription = stringResource(
+                                if (showSecret) R.string.a11y_hide_password else R.string.a11y_show_password,
+                            ),
+                        )
+                    }
+                },
                 maxLines = 4,
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -2699,24 +2824,35 @@ private fun BiliQrDialog(
     image: Bitmap?,
     message: String,
     expired: Boolean,
+    failed: Boolean,
     onRefresh: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val canRetry = expired || failed
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.mine_qr_title)) },
         text = {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 if (image != null) {
-                    Surface(color = Color.White) {
-                        Image(
-                            bitmap = image.asImageBitmap(),
-                            contentDescription = stringResource(R.string.a11y_bili_qr),
-                            modifier = Modifier.size(220.dp),
-                        )
+                    // 白色底与静区保证二维码在深色主题下仍可被 B 站 App 识别。
+                    Surface(
+                        color = Color.White,
+                        shape = MaterialTheme.shapes.medium,
+                        modifier = Modifier.padding(top = 4.dp),
+                    ) {
+                        Box(Modifier.padding(12.dp)) {
+                            Image(
+                                bitmap = image.asImageBitmap(),
+                                contentDescription = stringResource(R.string.a11y_bili_qr),
+                                modifier = Modifier.size(220.dp),
+                            )
+                        }
                     }
-                } else if (!expired) {
-                    CircularProgressIndicator(modifier = Modifier.padding(vertical = 24.dp))
+                } else if (!canRetry) {
+                    Box(Modifier.size(244.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(Modifier.size(48.dp))
+                    }
                 }
                 if (message.isNotBlank()) {
                     Text(message, modifier = Modifier.padding(top = 12.dp))
@@ -2724,9 +2860,11 @@ private fun BiliQrDialog(
             }
         },
         confirmButton = {
-            if (expired) {
+            if (canRetry) {
                 TextButton(onClick = onRefresh) { Text(stringResource(R.string.mine_qr_refresh)) }
             }
+        },
+        dismissButton = {
             TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
         },
     )
@@ -2739,16 +2877,27 @@ fun PurchasesScreen(
     viewModel: PurchasesViewModel = viewModel(),
 ) {
     Column(Modifier.fillMaxSize()) {
-        AppTopBar(title = stringResource(R.string.mine_purchases_title), onBack = onBack)
+        AppTopBar(
+            title = stringResource(R.string.mine_purchases_title),
+            onBack = onBack,
+            actions = {
+                IconButton(
+                    onClick = viewModel::reload,
+                    enabled = !viewModel.loading && viewModel.hasDlsiteSession,
+                ) {
+                    Icon(Icons.Default.Refresh, contentDescription = stringResource(R.string.a11y_refresh))
+                }
+            },
+        )
         when {
             viewModel.loading && viewModel.purchases.isEmpty() -> LoadingState(
                 stringResource(R.string.mine_purchases_loading),
-                Modifier.fillMaxSize(),
+                Modifier.weight(1f).fillMaxWidth(),
             )
             viewModel.error != null && viewModel.purchases.isEmpty() -> ErrorState(
                 viewModel.error!!,
                 onRetry = viewModel::reload,
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier.weight(1f).fillMaxWidth(),
             )
             viewModel.purchases.isEmpty() -> EmptyState(
                 title = stringResource(R.string.online_empty_purchases_title),
@@ -2756,33 +2905,31 @@ fun PurchasesScreen(
                     if (viewModel.hasDlsiteSession) R.string.online_empty_purchases_message
                     else R.string.online_purchases_login,
                 ),
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier.weight(1f).fillMaxWidth(),
             )
-            else -> LazyColumn(Modifier.fillMaxSize()) {
+            else -> LazyColumn(
+                Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = PaddingValues(bottom = 24.dp),
+            ) {
                 if (viewModel.loading) {
                     item(key = "loading") { LoadingState(stringResource(R.string.mine_purchases_loading)) }
                 } else if (viewModel.error != null) {
                     item(key = "error") { ErrorState(viewModel.error!!, viewModel::reload) }
                 }
                 items(viewModel.purchases, key = { it.workno }) { item ->
-                    Surface(
+                    WorkCard(
+                        facts = WorkFacts(
+                            title = item.title,
+                            circle = item.circle,
+                            vas = item.vas,
+                            tags = emptyList(),
+                            release = item.release,
+                            sourceId = item.workno,
+                        ),
+                        coverUrl = item.coverUrl,
                         onClick = { onOpenWork(item.workno) },
-                        color = Color.Transparent,
-                    ) {
-                        WorkFactsBlock(
-                            facts = WorkFacts(
-                                title = item.title,
-                                circle = item.circle,
-                                vas = item.vas,
-                                tags = emptyList(),
-                                release = item.release,
-                                sourceId = item.workno,
-                            ),
-                            coverUrl = item.coverUrl,
-                            singleLine = true,
-                            modifier = Modifier.padding(vertical = 4.dp),
-                        )
-                    }
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+                    )
                 }
             }
         }

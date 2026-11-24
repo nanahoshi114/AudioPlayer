@@ -73,6 +73,10 @@
     <string name="a11y_bili_qr">B 站登录二维码</string>
     <string name="a11y_import_cover">导入内容封面</string>
     <string name="a11y_selected">已选</string>
+    <string name="a11y_clear_search">清空搜索</string>
     <string name="a11y_checked">已选择</string>
     <string name="a11y_verify_current_post">在 App 内验证当前篇目</string>
+    <string name="a11y_refresh">刷新</string>
+    <string name="a11y_show_password">显示密码</string>
+    <string name="a11y_hide_password">隐藏密码</string>
 </resources>

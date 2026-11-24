@@ -3,6 +3,9 @@ package com.nanahoshi.audioplayer.ui.components
 import com.nanahoshi.audioplayer.R
 import androidx.compose.ui.res.stringResource
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -10,8 +13,11 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CalendarMonth
 import androidx.compose.material.icons.outlined.Groups
@@ -19,7 +25,7 @@ import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -29,6 +35,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.nanahoshi.audioplayer.asmr.WorkFacts
@@ -68,20 +77,44 @@ fun WorkHeader(
                 shown.forEach { tag ->
                     LabelBadge(tag, MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                if (!tagsExpanded && hidden > 0) {
-                    LabelBadge("+$hidden", MaterialTheme.colorScheme.primary)
-                }
-            }
-            if (hidden > 0) {
-                TextButton(
-                    onClick = { tagsExpanded = !tagsExpanded },
-                    modifier = Modifier.padding(top = 2.dp),
-                ) {
-                    Text(stringResource(if (tagsExpanded) R.string.work_tags_collapse else R.string.work_tags_expand))
+                if (hidden > 0) {
+                    ExpandTagsControl(
+                        expanded = tagsExpanded,
+                        hidden = hidden,
+                        onToggle = { tagsExpanded = !tagsExpanded },
+                    )
                 }
             }
         }
     }
+    }
+}
+
+@Composable
+private fun ExpandTagsControl(expanded: Boolean, hidden: Int, onToggle: () -> Unit) {
+    val description = stringResource(if (expanded) R.string.a11y_collapse_tags else R.string.a11y_expand_tags)
+    Box(
+        Modifier
+            .widthIn(min = 48.dp)
+            .heightIn(min = 48.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(role = Role.Button, onClickLabel = description, onClick = onToggle)
+            .semantics { contentDescription = description }
+            .padding(horizontal = 4.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            if (expanded) stringResource(R.string.work_tags_collapse) else "+$hidden",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.16f))
+                .padding(horizontal = 8.dp, vertical = 3.dp),
+        )
     }
 }
 

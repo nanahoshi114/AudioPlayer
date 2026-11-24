@@ -158,20 +158,25 @@ private fun StringBuilder.appendCueArray(cues: List<SubtitleCue>) {
     append(']')
 }
 
-internal fun subtitleSourceFingerprint(cues: List<SubtitleCue>): String =
-    MessageDigest.getInstance("SHA-256")
-        .digest(encodeGeneratedCues(cues.map { it.copy(translation = null) }).toByteArray(Charsets.UTF_8))
+internal fun subtitleSourceFingerprint(cues: List<SubtitleCue>, includeTranslation: Boolean = false): String {
+    val content = if (includeTranslation) cues else cues.map { it.copy(translation = null) }
+    return MessageDigest.getInstance("SHA-256")
+        .digest(encodeGeneratedCues(content).toByteArray(Charsets.UTF_8))
         .joinToString("") { "%02x".format(it) }
+}
 
-internal fun applySubtitleOverlay(source: List<SubtitleCue>, overlay: GeneratedSubtitles): List<SubtitleCue> {
-    if (source.isEmpty() || source.hasTranslation()) return source
+internal fun applySubtitleOverlay(
+    source: List<SubtitleCue>,
+    overlay: GeneratedSubtitles,
+    allowLegacyOverlay: Boolean = true,
+): List<SubtitleCue> {
+    if (source.isEmpty()) return source
     overlay.sourceFingerprint?.let { fingerprint ->
-        return if (fingerprint == subtitleSourceFingerprint(source) && overlay.cues.hasTranslation()) {
-            overlay.cues
-        } else {
-            source
-        }
+        return if (fingerprint == subtitleSourceFingerprint(source, includeTranslation = true) && overlay.displayCues.hasTranslation()) {
+            overlay.displayCues
+        } else source
     }
+    if (!allowLegacyOverlay || source.hasTranslation()) return source
     val byStart = overlay.cues.associateBy { it.startMs }
     return source.map { cue ->
         val extra = byStart[cue.startMs]?.translation

@@ -11,7 +11,9 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -22,6 +24,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.HelpOutline
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import com.nanahoshi.audioplayer.ui.components.AppTopBar
 import com.nanahoshi.audioplayer.ui.components.ConfirmActionDialog
 import androidx.compose.material3.AlertDialog
@@ -37,11 +41,12 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -51,8 +56,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nanahoshi.audioplayer.data.SENSE_VOICE_MODEL
@@ -78,6 +85,13 @@ fun ModelSettingsScreen(
 ) {
     var whisperHelp by remember { mutableStateOf(false) }
     var translateHelp by remember { mutableStateOf(false) }
+    var confirmClearWhisper by remember { mutableStateOf(false) }
+    var confirmClearTranslate by remember { mutableStateOf(false) }
+    var showWhisperToken by rememberSaveable { mutableStateOf(false) }
+    var showTranslateToken by rememberSaveable { mutableStateOf(false) }
+    // 切换模型或平台后重新隐藏口令，避免复用上一项的可视状态。
+    LaunchedEffect(viewModel.whisperModel) { showWhisperToken = false }
+    LaunchedEffect(viewModel.translatePlatform) { showTranslateToken = false }
     if (whisperHelp) {
         WhisperHelpDialog(onDismiss = { whisperHelp = false })
     }
@@ -86,162 +100,281 @@ fun ModelSettingsScreen(
     }
     Column(Modifier.fillMaxSize()) {
         AppTopBar(title = stringResource(R.string.settings_whisper_translate_title), onBack = onBack)
-        LazyColumn(Modifier.fillMaxSize().imePadding().padding(horizontal = 16.dp), contentPadding = PaddingValues(bottom = 24.dp)) {
+        LazyColumn(
+            Modifier.fillMaxSize().imePadding().padding(horizontal = 16.dp),
+            contentPadding = PaddingValues(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
             item(key = "whisper") {
-                Row(
-                    Modifier.padding(top = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                SettingsCard(
+                    title = stringResource(R.string.settings_whisper_card_title),
+                    helpDescription = stringResource(R.string.a11y_whisper_help),
+                    onHelp = { whisperHelp = true },
                 ) {
-                    Text(stringResource(R.string.settings_whisper_section), style = MaterialTheme.typography.titleMedium)
-                    IconButton(onClick = { whisperHelp = true }) {
-                        Icon(Icons.AutoMirrored.Outlined.HelpOutline, contentDescription = stringResource(R.string.a11y_whisper_help))
+                    WhisperModelField(
+                        model = viewModel.whisperModel,
+                        onModel = viewModel::selectWhisperModel,
+                    )
+                    val offlineModel = OfflineWhisperModel.fromId(viewModel.whisperModel)
+                    if (offlineModel != null) {
+                        val manager = viewModel.offlineModel(offlineModel)
+                        val state by manager.state.collectAsStateWithLifecycle()
+                        OfflineModelPanel(
+                            model = offlineModel,
+                            state = state,
+                            onDownload = { viewModel.downloadOfflineModel(offlineModel, it) },
+                            onCancel = manager::cancelDownload,
+                            onDelete = { viewModel.deleteOfflineModel(offlineModel) },
+                        )
+                        Button(
+                            onClick = viewModel::saveWhisper,
+                            modifier = Modifier.padding(top = 8.dp),
+                        ) { Text(stringResource(R.string.common_save)) }
+                        SaveStatus(viewModel.whisperModified, state == OfflineWhisperModelState.Ready)
+                    } else {
+                        if (!isCloudWhisperModel(viewModel.whisperModel)) {
+                            OutlinedTextField(
+                                value = viewModel.whisperBase,
+                                onValueChange = { viewModel.whisperBase = it },
+                                label = { Text(stringResource(R.string.settings_address_label)) },
+                                singleLine = true,
+                                supportingText = whisperAddressHint(viewModel.whisperModel),
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                        OutlinedTextField(
+                            value = viewModel.whisperToken,
+                            onValueChange = { viewModel.whisperToken = it },
+                            label = { Text(stringResource(R.string.settings_api_key_label)) },
+                            singleLine = true,
+                            visualTransformation = if (showWhisperToken) VisualTransformation.None else PasswordVisualTransformation(),
+                            trailingIcon = {
+                                SecretVisibilityIcon(visible = showWhisperToken, onToggle = { showWhisperToken = !showWhisperToken })
+                            },
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                        )
+                        FlowRow(
+                            Modifier.fillMaxWidth().padding(top = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Button(onClick = viewModel::saveWhisper) { Text(stringResource(R.string.common_save)) }
+                            TextButton(onClick = { confirmClearWhisper = true }) { Text(stringResource(R.string.settings_clear)) }
+                        }
+                        SaveStatus(viewModel.whisperModified, viewModel.whisperSaved)
                     }
                 }
-                WhisperModelField(
-                    model = viewModel.whisperModel,
-                    onModel = viewModel::selectWhisperModel,
-                )
-                val offlineModel = OfflineWhisperModel.fromId(viewModel.whisperModel)
-                if (offlineModel != null) {
-                    val manager = viewModel.offlineModel(offlineModel)
-                    val state by manager.state.collectAsState()
-                    OfflineModelPanel(
-                        model = offlineModel,
-                        state = state,
-                        onDownload = { viewModel.downloadOfflineModel(offlineModel, it) },
-                        onCancel = manager::cancelDownload,
-                        onDelete = { viewModel.deleteOfflineModel(offlineModel) },
+            }
+            item(key = "translate-config") {
+                SettingsCard(
+                    title = stringResource(R.string.settings_translate_card_title),
+                    helpDescription = stringResource(R.string.a11y_translate_help),
+                    onHelp = { translateHelp = true },
+                ) {
+                    TranslatePlatformField(
+                        platform = viewModel.translatePlatform,
+                        onPlatform = viewModel::selectTranslatePlatform,
                     )
-                    Button(
-                        onClick = viewModel::saveWhisper,
-                        modifier = Modifier.padding(top = 8.dp),
-                    ) { Text(stringResource(R.string.common_save)) }
-                } else {
-                    if (!isCloudWhisperModel(viewModel.whisperModel)) {
-                        OutlinedTextField(
-                            value = viewModel.whisperBase,
-                            onValueChange = { viewModel.whisperBase = it },
-                            label = { Text(stringResource(R.string.settings_address_label)) },
-                            singleLine = true,
-                            supportingText = whisperAddressHint(viewModel.whisperModel),
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                    }
                     OutlinedTextField(
-                        value = viewModel.whisperToken,
-                        onValueChange = { viewModel.whisperToken = it },
-                        label = { Text("API Key") },
+                        value = viewModel.translateToken,
+                        onValueChange = { viewModel.translateToken = it },
+                        label = { Text(stringResource(R.string.settings_api_key_label)) },
                         singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
+                        visualTransformation = if (showTranslateToken) VisualTransformation.None else PasswordVisualTransformation(),
+                        trailingIcon = {
+                            SecretVisibilityIcon(visible = showTranslateToken, onToggle = { showTranslateToken = !showTranslateToken })
+                        },
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    )
+                    OutlinedTextField(
+                        value = viewModel.translateModel,
+                        onValueChange = { viewModel.translateModel = it },
+                        label = { Text(stringResource(R.string.settings_model_name_optional)) },
+                        supportingText = { Text(stringResource(R.string.settings_model_default_hint, viewModel.translatePlatform.defaultModel)) },
+                        singleLine = true,
                         modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                     )
                     FlowRow(
                         Modifier.fillMaxWidth().padding(top = 8.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        Button(onClick = viewModel::saveWhisper) { Text(stringResource(R.string.common_save)) }
-                        TextButton(onClick = viewModel::clearWhisper) { Text(stringResource(R.string.settings_clear)) }
+                        Button(onClick = viewModel::saveTranslate) { Text(stringResource(R.string.common_save)) }
+                        TextButton(onClick = { confirmClearTranslate = true }) { Text(stringResource(R.string.settings_clear)) }
                     }
-                    SaveStatus(viewModel.whisperModified, viewModel.whisperSaved)
+                    SaveStatus(viewModel.translateModified, viewModel.translateSaved)
                 }
             }
-            item(key = "translate") {
-                Row(
-                    Modifier.padding(top = 20.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(stringResource(R.string.settings_translate_section), style = MaterialTheme.typography.titleMedium)
-                    IconButton(onClick = { translateHelp = true }) {
-                        Icon(Icons.AutoMirrored.Outlined.HelpOutline, contentDescription = stringResource(R.string.a11y_translate_help))
-                    }
-                }
-                TranslatePlatformField(
-                    platform = viewModel.translatePlatform,
-                    onPlatform = viewModel::selectTranslatePlatform,
-                )
-                OutlinedTextField(
-                    value = viewModel.translateToken,
-                    onValueChange = { viewModel.translateToken = it },
-                    label = { Text("API Key") },
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                )
-                OutlinedTextField(
-                    value = viewModel.translateModel,
-                    onValueChange = { viewModel.translateModel = it },
-                    label = { Text(stringResource(R.string.settings_model_name_optional)) },
-                    supportingText = { Text(stringResource(R.string.settings_model_default_hint, viewModel.translatePlatform.defaultModel)) },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                )
-                Row(
-                    Modifier.fillMaxWidth().padding(top = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(stringResource(R.string.settings_deep_thinking), modifier = Modifier.weight(1f))
-                    Switch(
-                        checked = viewModel.translateThinking,
-                        onCheckedChange = viewModel::setThinking,
+            item(key = "translate-behavior") {
+                SettingsCard(title = stringResource(R.string.settings_translate_behavior_title)) {
+                    Text(
+                        stringResource(
+                            R.string.settings_translate_behavior_platform,
+                            stringResource(viewModel.activeTranslatePlatform.labelRes),
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp),
                     )
-                }
-                if (viewModel.translateThinking) {
-                    Text(stringResource(R.string.settings_thinking_effort), modifier = Modifier.padding(top = 4.dp))
-                    viewModel.translatePlatform.efforts.forEach { effort ->
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .selectable(
-                                    selected = effort.value == viewModel.translateEffort,
-                                    onClick = { viewModel.setEffort(effort.value) },
-                                    role = Role.RadioButton,
-                                )
-                                .padding(vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            RadioButton(
-                                selected = effort.value == viewModel.translateEffort,
-                                onClick = null,
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 48.dp)
+                            .toggleable(
+                                value = viewModel.translateThinking,
+                                role = Role.Switch,
+                                onValueChange = viewModel::setThinking,
                             )
-                            Text(stringResource(effort.labelRes), modifier = Modifier.padding(start = 8.dp))
+                            .padding(top = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(stringResource(R.string.settings_deep_thinking), modifier = Modifier.weight(1f))
+                        Switch(
+                            checked = viewModel.translateThinking,
+                            onCheckedChange = null,
+                        )
+                    }
+                    if (viewModel.translateThinking) {
+                        Text(stringResource(R.string.settings_thinking_effort), modifier = Modifier.padding(top = 4.dp))
+                        viewModel.activeTranslatePlatform.efforts.forEach { effort ->
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 48.dp)
+                                    .selectable(
+                                        selected = effort.value == viewModel.translateEffort,
+                                        onClick = { viewModel.setEffort(effort.value) },
+                                        role = Role.RadioButton,
+                                    )
+                                    .padding(vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                RadioButton(
+                                    selected = effort.value == viewModel.translateEffort,
+                                    onClick = null,
+                                )
+                                Text(stringResource(effort.labelRes), modifier = Modifier.padding(start = 8.dp))
+                            }
                         }
                     }
-                }
-                Row(
-                    Modifier.fillMaxWidth().padding(top = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(stringResource(R.string.settings_auto_polish), modifier = Modifier.weight(1f))
-                    Switch(
-                        checked = viewModel.translateAutoPolish,
-                        onCheckedChange = viewModel::setAutoPolish,
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 48.dp)
+                            .toggleable(
+                                value = viewModel.translateAutoPolish,
+                                role = Role.Switch,
+                                onValueChange = viewModel::setAutoPolish,
+                            )
+                            .padding(top = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(stringResource(R.string.settings_auto_polish), modifier = Modifier.weight(1f))
+                        Switch(
+                            checked = viewModel.translateAutoPolish,
+                            onCheckedChange = null,
+                        )
+                    }
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 48.dp)
+                            .toggleable(
+                                value = viewModel.translateAutoCorrect,
+                                role = Role.Switch,
+                                onValueChange = viewModel::setAutoCorrect,
+                            )
+                            .padding(top = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(stringResource(R.string.settings_translate_tuning), modifier = Modifier.weight(1f))
+                        Switch(
+                            checked = viewModel.translateAutoCorrect,
+                            onCheckedChange = null,
+                        )
+                    }
+                    Text(
+                        stringResource(R.string.settings_translate_tuning_help),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                Row(
-                    Modifier.fillMaxWidth().padding(top = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(stringResource(R.string.settings_translate_tuning), modifier = Modifier.weight(1f))
-                    Switch(
-                        checked = viewModel.translateAutoCorrect,
-                        onCheckedChange = viewModel::setAutoCorrect,
-                    )
-                }
-                Text(
-                    stringResource(R.string.settings_translate_tuning_help),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                FlowRow(
-                    Modifier.fillMaxWidth().padding(top = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Button(onClick = viewModel::saveTranslate) { Text(stringResource(R.string.common_save)) }
-                    TextButton(onClick = viewModel::clearTranslate) { Text(stringResource(R.string.settings_clear)) }
-                }
-                SaveStatus(viewModel.translateModified, viewModel.translateSaved)
             }
         }
+    }
+    if (confirmClearWhisper) {
+        val model = stringResource(whisperModelLabelRes(viewModel.whisperModel) ?: R.string.settings_model_sensevoice)
+        val address = viewModel.savedWhisperBase()
+        ConfirmActionDialog(
+            title = stringResource(R.string.settings_clear_title),
+            message = if (address.isBlank()) {
+                stringResource(R.string.settings_clear_whisper_message_no_address, model)
+            } else {
+                stringResource(R.string.settings_clear_whisper_message, model, address)
+            },
+            confirmLabel = stringResource(R.string.settings_clear),
+            onConfirm = {
+                confirmClearWhisper = false
+                viewModel.clearWhisper()
+            },
+            onDismiss = { confirmClearWhisper = false },
+        )
+    }
+    if (confirmClearTranslate) {
+        ConfirmActionDialog(
+            title = stringResource(R.string.settings_clear_title),
+            message = stringResource(
+                R.string.settings_clear_translate_message,
+                stringResource(viewModel.translatePlatform.labelRes),
+                viewModel.savedTranslateModel(),
+            ),
+            confirmLabel = stringResource(R.string.settings_clear),
+            onConfirm = {
+                confirmClearTranslate = false
+                viewModel.clearTranslate()
+            },
+            onDismiss = { confirmClearTranslate = false },
+        )
+    }
+}
+
+@Composable
+private fun SettingsCard(
+    title: String,
+    helpDescription: String? = null,
+    onHelp: (() -> Unit)? = null,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Surface(
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    title,
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                if (onHelp != null && helpDescription != null) {
+                    IconButton(onClick = onHelp) {
+                        Icon(Icons.AutoMirrored.Outlined.HelpOutline, contentDescription = helpDescription)
+                    }
+                }
+            }
+            content()
+        }
+    }
+}
+
+@Composable
+private fun SecretVisibilityIcon(visible: Boolean, onToggle: () -> Unit) {
+    IconButton(onClick = onToggle) {
+        Icon(
+            if (visible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+            contentDescription = stringResource(
+                if (visible) R.string.a11y_hide_password else R.string.a11y_show_password,
+            ),
+        )
     }
 }
 
@@ -261,61 +394,76 @@ private fun SaveStatus(modified: Boolean, configured: Boolean) {
 
 class ModelSettingsViewModel(app: Application) : AndroidViewModel(app) {
     private val graph = app.graph()
+    private val credentials = graph.credentials
     internal fun offlineModel(model: OfflineWhisperModel) = graph.offlineWhisperModels.getValue(model)
-    var whisperModel by mutableStateOf(graph.credentials.resolvedWhisperModel())
-    var whisperBase by mutableStateOf(graph.credentials.whisperBaseUrl(whisperModel).orEmpty())
-    var whisperToken by mutableStateOf(graph.credentials.whisperToken(whisperModel).orEmpty())
-    var whisperSaved by mutableStateOf(graph.credentials.hasWhisper())
+    var whisperModel by mutableStateOf(credentials.resolvedWhisperModel())
+    var whisperBase by mutableStateOf(storedWhisperBase(whisperModel))
+    var whisperToken by mutableStateOf(storedWhisperToken(whisperModel))
+    var whisperSaved by mutableStateOf(credentials.hasWhisper(whisperModel))
         private set
-    var translatePlatform by mutableStateOf(graph.credentials.translatePlatform())
-    var translateToken by mutableStateOf(graph.credentials.translateToken(translatePlatform).orEmpty())
-    var translateModel by mutableStateOf(graph.credentials.translateModelInput(translatePlatform))
-    var translateSaved by mutableStateOf(graph.credentials.translateToken(translatePlatform) != null)
+    var translatePlatform by mutableStateOf(credentials.translatePlatform())
+    var activeTranslatePlatform by mutableStateOf(credentials.translatePlatform())
+        private set
+    var translateToken by mutableStateOf(credentials.translateToken(translatePlatform).orEmpty())
+    var translateModel by mutableStateOf(credentials.translateModelInput(translatePlatform))
+    var translateSaved by mutableStateOf(credentials.hasTranslate())
         private set
     var translateThinking by mutableStateOf(graph.credentials.translateThinking())
         private set
-    var translateEffort by mutableStateOf(graph.credentials.translateEffort(translatePlatform))
+    var translateEffort by mutableStateOf(graph.credentials.translateEffort(credentials.translatePlatform()))
         private set
     var translateAutoPolish by mutableStateOf(graph.credentials.translateAutoPolish())
         private set
     var translateAutoCorrect by mutableStateOf(graph.credentials.translateAutoCorrect())
         private set
 
-    private var whisperBaseline by mutableStateOf(currentWhisperInput())
-    private var translateBaseline by mutableStateOf(currentTranslateInput())
+    private var whisperBaseline by mutableStateOf(persistedWhisperBaseline())
+    private var translateBaseline by mutableStateOf(persistedTranslateBaseline())
+    private data class WhisperDraft(val base: String, val token: String)
+    private data class TranslateDraft(val token: String, val model: String)
+    // 切换模型/平台但尚未保存时保留各自的编辑内容，避免下一次切换丢失输入。
+    private val whisperDrafts = mutableMapOf<String, WhisperDraft>()
+    private val translateDrafts = mutableMapOf<TranslatePlatform, TranslateDraft>()
     val whisperModified: Boolean
-        get() = whisperBaseline.isModified(whisperBase, whisperToken)
+        get() = whisperBaseline.isModified(whisperModel, whisperBase, whisperToken)
     val translateModified: Boolean
-        get() = translateBaseline.isModified(translateToken, translateModel)
+        get() = translateBaseline.isModified(translatePlatform.name, translateToken, translateModel)
 
-    private fun currentWhisperInput() = SettingsInputBaseline(whisperBase, whisperToken)
-    private fun currentTranslateInput() = SettingsInputBaseline(translateToken, translateModel)
+    private fun storedWhisperBase(model: String) =
+        if (isOnDeviceWhisperModel(model)) "" else credentials.whisperBaseUrl(model).orEmpty()
+
+    private fun storedWhisperToken(model: String) =
+        if (isOnDeviceWhisperModel(model)) "" else credentials.whisperToken(model).orEmpty()
+
+    private fun persistedWhisperBaseline(): SettingsInputBaseline {
+        val model = credentials.resolvedWhisperModel()
+        return SettingsInputBaseline(model, storedWhisperBase(model), storedWhisperToken(model))
+    }
+
+    private fun persistedTranslateBaseline(): SettingsInputBaseline {
+        val platform = credentials.translatePlatform()
+        return SettingsInputBaseline(platform.name, credentials.translateToken(platform).orEmpty(), credentials.translateModelInput(platform))
+    }
 
     fun selectWhisperModel(id: String) {
+        if (id == whisperModel) return
+        whisperDrafts[whisperModel] = WhisperDraft(whisperBase, whisperToken)
+        applyWhisperModel(id)
+    }
+
+    private fun applyWhisperModel(id: String) {
         whisperModel = id
-        if (isOnDeviceWhisperModel(id)) {
-            whisperBase = ""
-            whisperToken = ""
-            whisperSaved = graph.whisper.missingOfflineModel(id) == null
-        } else {
-            whisperBase = graph.credentials.whisperBaseUrl(id).orEmpty()
-            whisperToken = graph.credentials.whisperToken(id).orEmpty()
-            whisperSaved = graph.credentials.hasWhisper(id)
-        }
-        whisperBaseline = currentWhisperInput()
+        val draft = whisperDrafts[id]
+        whisperBase = draft?.base ?: storedWhisperBase(id)
+        whisperToken = draft?.token ?: storedWhisperToken(id)
+        whisperSaved = credentials.hasWhisper(id)
+        whisperBaseline = SettingsInputBaseline(id, storedWhisperBase(id), storedWhisperToken(id))
     }
 
     fun saveWhisper() {
-        graph.credentials.saveWhisper(whisperBase, whisperToken, whisperModel)
-        whisperBase = graph.credentials.whisperBaseUrl(whisperModel).orEmpty()
-        whisperToken = graph.credentials.whisperToken(whisperModel).orEmpty()
-        whisperModel = graph.credentials.resolvedWhisperModel()
-        whisperSaved = if (isOnDeviceWhisperModel(whisperModel)) {
-            graph.whisper.missingOfflineModel(whisperModel) == null
-        } else {
-            graph.credentials.hasWhisper(whisperModel)
-        }
-        whisperBaseline = currentWhisperInput()
+        credentials.saveWhisper(whisperBase, whisperToken, whisperModel)
+        whisperDrafts.remove(whisperModel)
+        applyWhisperModel(credentials.resolvedWhisperModel())
     }
 
     internal fun deleteOfflineModel(model: OfflineWhisperModel) {
@@ -337,37 +485,46 @@ class ModelSettingsViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun clearWhisper() {
-        graph.credentials.clearWhisper(whisperModel)
-        whisperBase = ""
-        whisperToken = ""
-        whisperSaved = false
-        whisperBaseline = currentWhisperInput()
+        credentials.clearWhisper(whisperModel)
+        whisperDrafts.remove(whisperModel)
+        applyWhisperModel(whisperModel)
     }
 
     fun selectTranslatePlatform(platform: TranslatePlatform) {
-        translatePlatform = platform
-        translateToken = graph.credentials.translateToken(platform).orEmpty()
-        translateModel = graph.credentials.translateModelInput(platform)
-        translateEffort = graph.credentials.translateEffort(platform)
-        translateSaved = graph.credentials.translateToken(platform) != null
-        translateBaseline = currentTranslateInput()
+        if (platform == translatePlatform) return
+        translateDrafts[translatePlatform] = TranslateDraft(translateToken, translateModel)
+        applyTranslatePlatform(platform)
     }
 
+    private fun applyTranslatePlatform(platform: TranslatePlatform) {
+        translatePlatform = platform
+        val draft = translateDrafts[platform]
+        translateToken = draft?.token ?: credentials.translateToken(platform).orEmpty()
+        translateModel = draft?.model ?: credentials.translateModelInput(platform)
+        translateSaved = translateToken.isNotEmpty()
+        translateBaseline = SettingsInputBaseline(
+            platform.name, credentials.translateToken(platform).orEmpty(), credentials.translateModelInput(platform),
+        )
+    }
+
+    /** 清除确认里明确列出会清掉的自定义地址与模型名。 */
+    fun savedWhisperBase(): String =
+        if (isOnDeviceWhisperModel(whisperModel)) "" else credentials.whisperBaseUrl(whisperModel).orEmpty()
+
+    fun savedTranslateModel(): String = credentials.translateModel(translatePlatform)
+
     fun saveTranslate() {
-        graph.credentials.saveTranslate(translatePlatform, translateToken, translateModel)
-        translatePlatform = graph.credentials.translatePlatform()
-        translateToken = graph.credentials.translateToken(translatePlatform).orEmpty()
-        translateModel = graph.credentials.translateModelInput(translatePlatform)
-        translateSaved = graph.credentials.hasTranslate()
-        translateBaseline = currentTranslateInput()
+        credentials.saveTranslate(translatePlatform, translateToken, translateModel)
+        translateDrafts.remove(translatePlatform)
+        applyTranslatePlatform(credentials.translatePlatform())
+        activeTranslatePlatform = credentials.translatePlatform()
+        translateEffort = credentials.translateEffort(activeTranslatePlatform)
     }
 
     fun clearTranslate() {
-        graph.credentials.clearTranslate(translatePlatform)
-        translateToken = ""
-        translateModel = ""
-        translateSaved = false
-        translateBaseline = currentTranslateInput()
+        credentials.clearTranslate(translatePlatform)
+        translateDrafts.remove(translatePlatform)
+        applyTranslatePlatform(translatePlatform)
     }
 
     fun setThinking(enabled: Boolean) {
@@ -376,8 +533,8 @@ class ModelSettingsViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun setEffort(value: String) {
-        graph.credentials.saveTranslateEffort(translatePlatform, value)
-        translateEffort = graph.credentials.translateEffort(translatePlatform)
+        graph.credentials.saveTranslateEffort(activeTranslatePlatform, value)
+        translateEffort = graph.credentials.translateEffort(activeTranslatePlatform)
     }
 
     fun setAutoPolish(enabled: Boolean) {

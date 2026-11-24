@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -33,8 +34,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.nanahoshi.audioplayer.ui.theme.LocalReduceMotion
 import com.nanahoshi.audioplayer.ui.theme.Motion
@@ -87,6 +90,7 @@ fun LoadingState(message: String = stringResource(R.string.common_loading), modi
     Column(
         modifier.fillMaxWidth().padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
     ) {
         CircularProgressIndicator()
         Text(
@@ -111,14 +115,38 @@ fun ErrorState(message: String, onRetry: () -> Unit, modifier: Modifier = Modifi
 }
 
 @Composable
-fun SectionHeader(title: String, modifier: Modifier = Modifier) {
+fun SectionHeader(
+    title: String,
+    modifier: Modifier = Modifier,
+    containerColor: Color = MaterialTheme.colorScheme.background,
+    trailing: (@Composable () -> Unit)? = null,
+) {
     Column(
         modifier
             .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.background)
+            .background(containerColor)
             .padding(start = 16.dp, end = 16.dp, top = 20.dp, bottom = 8.dp),
     ) {
-        Text(title, style = MaterialTheme.typography.titleMedium)
+        if (trailing == null) {
+            Text(title, style = MaterialTheme.typography.titleMedium)
+        } else {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    title,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(8.dp))
+                trailing()
+            }
+        }
         HorizontalDivider(
             Modifier.padding(top = 8.dp),
             color = MaterialTheme.colorScheme.outlineVariant,

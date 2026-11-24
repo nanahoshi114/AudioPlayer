@@ -2,8 +2,10 @@ package com.nanahoshi.audioplayer.ui.library
 
 import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.text.resolveUserError
 import androidx.compose.ui.res.stringResource
 import android.app.Application
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -21,9 +23,11 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.Text
 import com.nanahoshi.audioplayer.ui.components.AppTopBar
 import com.nanahoshi.audioplayer.ui.components.EmptyState
+import com.nanahoshi.audioplayer.ui.components.ErrorState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -51,6 +55,7 @@ class FavoriteViewModel(app: Application) : AndroidViewModel(app) {
     val loading = MutableStateFlow(false)
     val importing = MutableStateFlow(false)
     val hasMore = MutableStateFlow(false)
+    val error = MutableStateFlow<String?>(null)
     private var nextPage = 1
     private var paging = false
     private var pagingJob: Job? = null
@@ -61,14 +66,15 @@ class FavoriteViewModel(app: Application) : AndroidViewModel(app) {
     fun reloadFolders() {
         if (loading.value || opened.value != null) return
         loading.value = true
+        error.value = null
         viewModelScope.launch {
             try {
                 folders.value = graph.bilibili.favoriteFolders()
             } catch (cancelled: CancellationException) {
                 throw cancelled
-            } catch (error: Exception) {
-                Log.w("Favorites", "folders ${error.javaClass.simpleName}")
-                graph.showError(error, R.string.bilibili_favorites_read_failed)
+            } catch (failure: Exception) {
+                Log.w("Favorites", "folders ${failure.javaClass.simpleName}")
+                error.value = getApplication<Application>().resolveUserError(failure, R.string.bilibili_favorites_read_failed)
             } finally {
                 loading.value = false
             }
@@ -91,6 +97,7 @@ class FavoriteViewModel(app: Application) : AndroidViewModel(app) {
         videos.value = emptyList()
         selected.value = emptySet()
         hasMore.value = false
+        error.value = null
     }
 
     /** 换收藏夹时先作废旧分页，否则旧任务的 paging/loading 会盖住新文件夹的首次加载。 */
@@ -109,20 +116,20 @@ class FavoriteViewModel(app: Application) : AndroidViewModel(app) {
         val token = generation
         paging = true
         loading.value = true
+        error.value = null
         pagingJob = viewModelScope.launch {
             try {
                 val result = graph.bilibili.favoriteVideos(folder.id, page)
                 if (token != generation) return@launch
-                videos.value = videos.value + result.videos
+                videos.value = (videos.value + result.videos).distinctBy { it.bvid }
                 hasMore.value = result.hasMore
                 nextPage = page + 1
             } catch (cancelled: CancellationException) {
                 throw cancelled
-            } catch (error: Exception) {
+            } catch (failure: Exception) {
                 if (token != generation) return@launch
-                hasMore.value = false
-                Log.w("Favorites", "videos ${error.javaClass.simpleName}")
-                graph.showError(error, R.string.bilibili_favorites_read_failed)
+                Log.w("Favorites", "videos ${failure.javaClass.simpleName}")
+                error.value = getApplication<Application>().resolveUserError(failure, R.string.bilibili_favorites_read_failed)
             } finally {
                 if (token == generation) {
                     paging = false
@@ -180,16 +187,21 @@ fun FavoriteScreen(onBack: () -> Unit, folderId: Long? = null, viewModel: Favori
     val loading by viewModel.loading.collectAsStateWithLifecycle()
     val importing by viewModel.importing.collectAsStateWithLifecycle()
     val hasMore by viewModel.hasMore.collectAsStateWithLifecycle()
-    val listState = rememberLazyListState()
+    val error by viewModel.error.collectAsStateWithLifecycle()
     val folder = opened
+    val listState = key(folder?.id) { rememberLazyListState() }
+    val loadError = error
 
-    LaunchedEffect(folder?.id, videos.size, hasMore, loading) {
-        if (folder == null || loading || !hasMore) return@LaunchedEffect
+    BackHandler(enabled = folder != null) { viewModel.closeFolder() }
+
+    LaunchedEffect(folder?.id, videos.size, hasMore, loading, loadError) {
+        if (folder == null || loading || !hasMore || loadError != null) return@LaunchedEffect
         snapshotFlow {
+            if (videos.isEmpty()) return@snapshotFlow true
             val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: return@snapshotFlow false
             last >= listState.layoutInfo.totalItemsCount - 3
         }.collect { nearEnd ->
-            if (nearEnd) viewModel.loadMore()
+            if (nearEnd && viewModel.error.value == null) viewModel.loadMore()
         }
     }
 
@@ -199,6 +211,11 @@ fun FavoriteScreen(onBack: () -> Unit, folderId: Long? = null, viewModel: Favori
             onBack = { if (folder != null) viewModel.closeFolder() else onBack() },
         )
         when {
+            folder == null && loadError != null -> ErrorState(
+                loadError,
+                onRetry = viewModel::reloadFolders,
+                modifier = Modifier.weight(1f),
+            )
             folder == null && folders.isEmpty() && !loading -> EmptyState(
                 title = stringResource(R.string.bilibili_favorites_empty_title),
                 message = stringResource(R.string.bilibili_favorites_empty_message),
@@ -206,7 +223,10 @@ fun FavoriteScreen(onBack: () -> Unit, folderId: Long? = null, viewModel: Favori
                 onAction = viewModel::reloadFolders,
                 modifier = Modifier.weight(1f),
             )
-            folder == null -> LazyColumn(Modifier.weight(1f)) {
+            folder == null -> LazyColumn(
+                Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp),
+            ) {
                 items(folders, key = { it.id }) { item ->
                     ListItem(
                         headlineContent = { Text(item.title) },
@@ -215,12 +235,21 @@ fun FavoriteScreen(onBack: () -> Unit, folderId: Long? = null, viewModel: Favori
                     )
                 }
             }
-            videos.isEmpty() && !loading -> EmptyState(
+            videos.isEmpty() && loadError != null -> ErrorState(
+                loadError,
+                onRetry = viewModel::loadMore,
+                modifier = Modifier.weight(1f),
+            )
+            videos.isEmpty() && !loading && !hasMore -> EmptyState(
                 title = stringResource(R.string.bilibili_favorite_detail_empty_title),
                 message = stringResource(R.string.bilibili_favorite_detail_empty_message),
                 modifier = Modifier.weight(1f),
             )
-            else -> LazyColumn(state = listState, modifier = Modifier.weight(1f)) {
+            else -> LazyColumn(
+                state = listState,
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp),
+            ) {
                 items(videos, key = { it.bvid }) { video ->
                     val checked = video.bvid in selected
                     ListItem(
@@ -230,6 +259,9 @@ fun FavoriteScreen(onBack: () -> Unit, folderId: Long? = null, viewModel: Favori
                         trailingContent = { Checkbox(checked = checked, onCheckedChange = { viewModel.toggle(video.bvid) }) },
                         modifier = Modifier.clickable { viewModel.toggle(video.bvid) },
                     )
+                }
+                if (loadError != null) {
+                    item("page-error") { ErrorState(loadError, onRetry = viewModel::loadMore) }
                 }
             }
         }

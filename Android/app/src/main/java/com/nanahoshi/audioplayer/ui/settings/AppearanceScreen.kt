@@ -5,7 +5,6 @@ import androidx.compose.ui.res.stringResource
 import android.app.Application
 import android.os.Build
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
@@ -25,6 +25,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.SegmentedButton
@@ -40,6 +41,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -85,7 +88,7 @@ fun AppearanceScreen(
                         selected = appearance.themeMode == mode,
                         onClick = { viewModel.setThemeMode(mode) },
                         shape = SegmentedButtonDefaults.itemShape(index = index, count = modes.size),
-                    ) { Text(stringResource(mode.labelRes)) }
+                    ) { Text(stringResource(mode.labelRes), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
                 }
             }
             SectionHeader(stringResource(R.string.appearance_theme_color))
@@ -150,25 +153,32 @@ private fun AccentRow(
         headlineContent = { Text(title) },
         supportingContent = { Text(summary) },
         leadingContent = { RadioButton(selected = selected, onClick = null, enabled = enabled) },
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
         modifier = Modifier.selectable(selected = selected, enabled = enabled, role = Role.RadioButton, onClick = onClick),
     )
 }
 
 @Composable
 private fun Swatch(color: Color, name: String, selected: Boolean, onClick: () -> Unit) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.size(width = 56.dp, height = 76.dp)) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .widthIn(min = 56.dp)
+            .selectable(selected = selected, role = Role.RadioButton, onClick = onClick)
+            .semantics(mergeDescendants = true) {}
+            .padding(vertical = 4.dp),
+    ) {
         Box(
             Modifier
                 .size(48.dp)
                 .clip(CircleShape)
-                .background(color)
-                .clickable(role = Role.RadioButton, onClick = onClick),
+                .background(color),
             contentAlignment = Alignment.Center,
         ) {
             if (selected) {
                 Icon(
                     Icons.Default.Check,
-                    contentDescription = stringResource(R.string.a11y_checked),
+                    contentDescription = null,
                     tint = if (color.luminance() > 0.5f) Color.Black else Color.White,
                 )
             }
@@ -177,6 +187,8 @@ private fun Swatch(color: Color, name: String, selected: Boolean, onClick: () ->
             name,
             style = MaterialTheme.typography.labelMedium,
             color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(top = 4.dp),
         )
     }

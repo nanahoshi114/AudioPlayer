@@ -11,12 +11,77 @@ import com.nanahoshi.audioplayer.bilibili.*
 import com.nanahoshi.audioplayer.graph
 import com.nanahoshi.audioplayer.text.TextRef
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.first
 import kotlin.random.Random
 
 enum class CollectionAction { PLAY, APPEND, SAVE, COPY, SINGLE }
 internal data class CollectionPreparation(val action: CollectionAction, val details: List<BiliVideoDetails>,
-    val failed: List<String>, val targets: List<BiliVideoHit>)
+    val failed: List<String>, val targets: List<BiliVideoHit>, val copyName: String? = null)
+
+internal class CollectionCopyDraft(
+    name: String,
+    private val sort: CollectionSort,
+    private val randomSeed: Long,
+    selectionTargets: List<BiliVideoHit>?,
+) {
+    var name by mutableStateOf(name)
+    var preparation: CollectionPreparation? = null
+        private set
+    var targets: List<BiliVideoHit>? = selectionTargets?.toList()
+        private set
+
+    suspend fun freezeDirectory(
+        directory: List<BiliVideoHit>,
+        complete: Boolean,
+        readDirectory: suspend () -> BiliCollectionPage,
+    ): IncompleteCollectionCopy? {
+        if (targets != null) return null
+        val snapshot = if (complete) null else readDirectory()
+        currentCoroutineContext().ensureActive()
+        val ordered = orderCollectionVideos(snapshot?.videos ?: directory, sort, randomSeed).toList()
+        targets = ordered
+        return if (snapshot?.complete == false) IncompleteCollectionCopy(ordered.size, snapshot.collection.total) else null
+    }
+
+    suspend fun submit(prepared: CollectionPreparation, save: suspend (CollectionPreparation) -> Boolean): Boolean {
+        val current = prepared.copy(copyName = name)
+        preparation = current
+        return save(current)
+    }
+}
+
+internal enum class CollectionOperation { OPEN, REFRESH, PREPARE, MUTATE }
+
+internal class CollectionWork(private val scope: CoroutineScope) {
+    var operation by mutableStateOf<CollectionOperation?>(null)
+        private set
+    private var job: Job? = null
+
+    fun start(kind: CollectionOperation, onFailure: (Exception) -> Unit, block: suspend () -> Unit) {
+        if (operation != null) return
+        operation = kind
+        job = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            try {
+                ensureActive()
+                block()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                ensureActive()
+                onFailure(failure)
+            } finally {
+                operation = null
+            }
+        }
+    }
+
+    fun beginRefresh() { operation = CollectionOperation.REFRESH }
+    fun cancel() { job?.cancel() }
+}
+
+internal data class IncompleteCollectionCopy(val count: Int, val total: Int)
 
 class BiliCollectionViewModel(app: Application) : AndroidViewModel(app) {
     private val graph = app.graph()
@@ -30,190 +95,266 @@ class BiliCollectionViewModel(app: Application) : AndroidViewModel(app) {
     val videos: List<BiliVideoHit> by derivedStateOf { orderCollectionVideos(sourceVideos, sort, randomSeed) }
     var selected by mutableStateOf<Set<String>>(emptySet()); private set
     var savedId by mutableStateOf<Long?>(null); private set
-    var loading by mutableStateOf(false); private set
-    var preparing by mutableStateOf(false); private set
+    private val work = CollectionWork(viewModelScope)
+    val loading get() = work.operation == CollectionOperation.OPEN || work.operation == CollectionOperation.REFRESH
+    val preparing get() = work.operation == CollectionOperation.PREPARE
+    val running get() = work.operation != null
     var committing by mutableStateOf(false); private set
     var complete by mutableStateOf(false); private set
+    /** 已有完整目录时，本次刷新未读全；保留原目录并在页头提示。 */
+    var refreshIncomplete by mutableStateOf(false); private set
+    var refreshIncompleteCount by mutableStateOf(0); private set
     var error by mutableStateOf<String?>(null); private set
     var progress by mutableStateOf(""); private set
     var removed by mutableStateOf(false); private set
     internal var pending by mutableStateOf<CollectionPreparation?>(null); private set
     var singleParts by mutableStateOf<List<BiliPart>>(emptyList()); private set
-    var copyName by mutableStateOf<String?>(null); private set
-    private var copyDetails: List<BiliVideoDetails> = emptyList()
-    private var refreshJob: Job? = null
-    private var actionJob: Job? = null
-    @Volatile private var generation = 0L
+    private var copyDraft by mutableStateOf<CollectionCopyDraft?>(null)
+    internal var incompleteCopy by mutableStateOf<IncompleteCollectionCopy?>(null); private set
+    val copyName get() = if (!running && pending == null && incompleteCopy == null) {
+        copyDraft?.name
+    } else null
     private var initialized = false
     private var savedRoute = false
-    val busy get() = preparing || committing
+    val busy get() = running || copyDraft != null || pending != null || singleParts.isNotEmpty()
 
     init {
         viewModelScope.launch {
-            graph.credentials.biliSession.drop(1).collect {
-                cancelPreparation()
-                if (collection != null) refresh()
+            graph.credentials.biliSession.drop(1).collectLatest {
+                if (collection == null) return@collectLatest
+                if (work.operation == CollectionOperation.REFRESH || (preparing && !committing)) work.cancel()
+                snapshotFlow { busy }.first { !it }
+                refresh()
             }
         }
     }
 
     fun open(ref: BiliCollection?, playlistId: Long?) {
         if (initialized) return
-        initialized = true
         savedRoute = playlistId != null
-        viewModelScope.launch {
+        startWork(CollectionOperation.OPEN, R.string.bilibili_collection_read_failed) {
             val record = playlistId?.let { graph.db.collections().get(it) }
-            if (playlistId != null && record == null) { removed = true; return@launch }
+            if (playlistId != null && record == null) { removed = true; return@startWork }
             collection = (record?.let(repository::decode) ?: ref)?.withFirstVideoCover(null)
-            val value = collection ?: return@launch
+            val value = collection ?: return@startWork
             savedId = record?.playlistId ?: graph.db.collections().find(value.kind.name, value.remoteId)?.playlistId
             savedId?.let { repository.cached(it) }?.let { sourceVideos = it.videos; collection = it.collection; complete = true }
-            refresh()
+            refreshDirectory()
+            // 只有初始解析真正成功后才锁定；失败或取消时允许页面重新打开时重试。
+            initialized = true
         }
     }
 
     private suspend fun readDirectory(): BiliCollectionPage {
         val value = checkNotNull(collection)
-        val token = generation
+        val job = currentCoroutineContext().job
         val session = graph.credentials.biliSession.value
-        return repository.refresh(value, savedId, { token == generation && session == graph.credentials.biliSession.value }) { partial ->
-            if (token == generation) {
-                progress = text(R.string.bilibili_read_count, partial.size)
-                if (!complete) sourceVideos = partial
+        val isCurrent = { job.isActive && session == graph.credentials.biliSession.value }
+        progress = text(R.string.bilibili_read_count, 0)
+        try {
+            val snapshot = repository.refresh(value, savedId, isCurrent) { partial ->
+                if (isCurrent()) {
+                    progress = text(R.string.bilibili_read_count, partial.size)
+                    if (!complete) sourceVideos = partial
+                }
             }
-        }.also {
-            currentCoroutineContext().ensureActive()
-            check(token == generation && session == graph.credentials.biliSession.value) { text(R.string.bilibili_read_cancelled) }
-            collection = it.collection
-            if (it.complete) {
-                sourceVideos = it.videos
-                complete = true
-            } else if (!complete) {
-                // 不完整结果只用于展示，不覆盖已保存的完整目录。
-                sourceVideos = it.videos
+            if (!isCurrent()) throw CancellationException()
+            val hadComplete = complete
+            // 不完整结果只用于展示，不覆盖已保存的完整目录。
+            if (snapshot.complete || !complete) {
+                collection = snapshot.collection
+                sourceVideos = snapshot.videos
+                complete = snapshot.complete
             }
-            selected = selected.intersect(videos.map { video -> video.bvid }.toSet())
+            if (snapshot.complete) {
+                refreshIncomplete = false
+                refreshIncompleteCount = 0
+            } else if (hadComplete) {
+                refreshIncomplete = true
+                refreshIncompleteCount = snapshot.videos.size
+            }
+            return snapshot
+        } finally {
+            selected = selected.intersect(sourceVideos.map { it.bvid }.toSet())
         }
     }
 
     fun refresh() {
-        if (busy) return
-        refreshJob?.cancel()
-        generation++
-        val token = generation
-        refreshJob = viewModelScope.launch {
-            loading = true; error = null
-            try {
-                val snapshot = readDirectory()
-                if (!snapshot.complete) {
-                    val count = if (snapshot.collection.total > 0) {
-                        "${snapshot.videos.size}/${snapshot.collection.total}"
-                    } else {
-                        "${snapshot.videos.size}"
-                    }
-                    error = text(R.string.bilibili_catalogue_incomplete, count)
-                }
-            }
-            catch (cancelled: CancellationException) { throw cancelled }
-            catch (failure: Exception) { error = appContext.resolveUserError(failure, R.string.bilibili_collection_read_failed) }
-            finally { if (token == generation) loading = false }
+        if (busy || collection == null) return
+        startWork(CollectionOperation.REFRESH, R.string.bilibili_collection_read_failed) {
+            refreshDirectory()
         }
     }
 
-    fun stopRefresh() { generation++; refreshJob?.cancel(); loading = false }
+    private suspend fun refreshDirectory() {
+        val snapshot = readDirectory()
+        // 已有完整目录时只显示刷新不完整的非破坏性提示，不覆盖为错误状态。
+        if (!snapshot.complete && !complete) error = text(R.string.bilibili_catalogue_incomplete, snapshot.videos.size)
+    }
+
+    private fun startWork(
+        kind: CollectionOperation,
+        @StringRes failureRes: Int,
+        block: suspend () -> Unit,
+    ) = work.start(kind, { error = appContext.resolveUserError(it, failureRes) }) {
+        error = null
+        progress = ""
+        if (kind == CollectionOperation.OPEN || kind == CollectionOperation.REFRESH) {
+            refreshIncomplete = false
+            refreshIncompleteCount = 0
+        }
+        block()
+    }
+
+    fun stopRefresh() { if (loading) work.cancel() }
     fun updateSort(value: CollectionSort) {
         if (busy) return
         sort = value
         if (value == CollectionSort.RANDOM) randomSeed = Random.nextLong()
     }
-    fun toggle(bvid: String) { selected = if (bvid in selected) selected - bvid else selected + bvid }
-    fun clearSelection() { selected = emptySet() }
-    fun selectAll() { selected = if (selected.size == videos.size) emptySet() else videos.map { it.bvid }.toSet() }
+    fun toggle(bvid: String) {
+        if (!busy) selected = if (bvid in selected) selected - bvid else selected + bvid
+    }
+    fun clearSelection() { if (!busy) selected = emptySet() }
+    fun selectAll() {
+        if (busy) return
+        val ids = videos.map { it.bvid }.toSet()
+        selected = if (ids.isNotEmpty() && ids.all { it in selected }) selected - ids else selected + ids
+    }
 
     fun bookmark() {
         if (busy) return
         val value = collection ?: return
-        viewModelScope.launch {
+        startWork(CollectionOperation.MUTATE, R.string.bilibili_bookmark_failed) {
+            savedId = repository.bookmark(value)
+            graph.show(R.string.bilibili_bookmarked)
+            work.beginRefresh()
+            // 收藏已成功；后续目录刷新失败只提示读取失败，不能误报为收藏失败。
             try {
-                stopRefresh()
-                savedId = repository.bookmark(value)
-                graph.show(R.string.bilibili_bookmarked)
-                refresh()
-            } catch (cancelled: CancellationException) { throw cancelled }
-            catch (failure: Exception) { error = appContext.resolveUserError(failure, R.string.bilibili_bookmark_failed) }
+                refreshDirectory()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                error = appContext.resolveUserError(failure, R.string.bilibili_collection_read_failed)
+            }
         }
     }
 
     fun unbookmark() {
-        if (committing) return
+        if (busy) return
         val id = savedId ?: return
-        stopRefresh(); cancelPreparation()
-        viewModelScope.launch {
-            try {
-                repository.unbookmark(id); savedId = null
-                if (savedRoute) removed = true
-            } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { error = text(R.string.bilibili_unbookmark_failed) }
+        startWork(CollectionOperation.MUTATE, R.string.bilibili_unbookmark_failed) {
+            repository.unbookmark(id)
+            savedId = null
+            if (savedRoute) removed = true
         }
     }
 
     fun cancelPreparation() {
-        if (committing) return
-        generation++; actionJob?.cancel(); preparing = false; pending = null
-        singleParts = emptyList(); copyName = null; copyDetails = emptyList()
+        if (committing || (running && !preparing)) return
+        if (preparing) work.cancel()
+        pending = null
+        singleParts = emptyList()
+        incompleteCopy = null
+        copyDraft = null
     }
 
     fun prepare(action: CollectionAction, targets: List<BiliVideoHit>? = null) {
         if (busy) return
-        stopRefresh(); cancelPreparation()
-        val token = generation
-        actionJob = viewModelScope.launch {
-            preparing = true; error = null
-            try {
-                val items = targets ?: run {
-                    if (!complete) readDirectory()
-                    videos
-                }
-                if (items.isEmpty()) { error = text(R.string.bilibili_no_videos_in_collection); return@launch }
-                val details = mutableListOf<BiliVideoDetails>()
-                val failed = mutableListOf<String>()
-                for ((index, video) in items.distinctBy { it.bvid }.withIndex()) {
-                    progress = text(R.string.bilibili_preparing_parts, index + 1, items.size)
-                    try {
-                        val result = repository.details(video, savedId, allowPartialLocal = action == CollectionAction.SINGLE)
-                        check(result.parts.isNotEmpty()) { text(R.string.bilibili_no_playable_parts) }
-                        details += result.copy(parts = result.parts.distinctBy { it.cid }.sortedBy { it.page })
-                    } catch (cancelled: CancellationException) { throw cancelled }
-                    catch (failure: Exception) {
-                        failed += text(
-                            R.string.bilibili_item_failure,
-                            video.title,
-                            appContext.resolveUserError(failure, R.string.bilibili_read_failed_short),
-                        )
-                    }
-                    currentCoroutineContext().ensureActive()
-                }
-                if (token != generation) return@launch
-                val result = CollectionPreparation(action, details, failed, items)
-                if (failed.isNotEmpty()) pending = result else dispatch(result)
-            } catch (cancelled: CancellationException) { throw cancelled }
-            catch (failure: Exception) { error = appContext.resolveUserError(failure, R.string.bilibili_prepare_collection_failed) }
-            finally { if (token == generation) preparing = false }
+        if (action == CollectionAction.COPY) {
+            startCopy(targets)
+            return
+        }
+        startWork(CollectionOperation.PREPARE, R.string.bilibili_prepare_collection_failed) {
+            val items = targets ?: run {
+                if (!complete) readDirectory()
+                videos
+            }
+            prepareTargets(CollectionPreparation(action, emptyList(), emptyList(), items.toList()))
         }
     }
 
+    private suspend fun prepareTargets(value: CollectionPreparation) {
+        if (value.targets.isEmpty()) {
+            error = text(R.string.bilibili_no_videos_in_collection)
+            return
+        }
+        val known = value.details.associateBy { it.video.bvid }
+        val details = mutableListOf<BiliVideoDetails>()
+        val failed = mutableListOf<String>()
+        val items = value.targets.distinctBy { it.bvid }
+        for ((index, video) in items.withIndex()) {
+            progress = text(R.string.bilibili_preparing_parts, index + 1, items.size)
+            try {
+                val result = known[video.bvid] ?: repository.details(
+                    video, savedId, allowPartialLocal = value.action == CollectionAction.SINGLE,
+                )
+                check(result.parts.isNotEmpty()) { text(R.string.bilibili_no_playable_parts) }
+                details += result.copy(parts = result.parts.distinctBy { it.cid }.sortedBy { it.page })
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                failed += text(
+                    R.string.bilibili_item_failure,
+                    video.title,
+                    appContext.resolveUserError(failure, R.string.bilibili_read_failed_short),
+                )
+            }
+            currentCoroutineContext().ensureActive()
+        }
+        val result = value.copy(details = details, failed = failed)
+        if (failed.isNotEmpty()) pending = result else dispatch(result)
+    }
+
+    fun startCopy(selectionTargets: List<BiliVideoHit>? = null) {
+        if (busy || collection == null || selectionTargets?.isEmpty() == true) return
+        copyDraft = CollectionCopyDraft(collection?.title.orEmpty(), sort, randomSeed, selectionTargets)
+        error = null
+    }
+
+    fun confirmCopyName(name: String) {
+        val draft = copyDraft?.takeIf { copyName != null && name.isNotBlank() } ?: return
+        draft.name = name.trim()
+        startWork(CollectionOperation.PREPARE, R.string.bilibili_copy_failed) {
+            val prepared = draft.preparation
+            if (prepared != null) {
+                dispatch(prepared)
+                return@startWork
+            }
+            incompleteCopy = draft.freezeDirectory(sourceVideos, complete, ::readDirectory)
+            if (incompleteCopy == null) prepareCopy(draft, checkNotNull(draft.targets))
+        }
+    }
+
+    fun continueIncompleteCopy() {
+        val draft = copyDraft ?: return
+        if (running || incompleteCopy == null) return
+        val targets = draft.targets?.takeIf { it.isNotEmpty() } ?: return
+        incompleteCopy = null
+        startWork(CollectionOperation.PREPARE, R.string.bilibili_copy_failed) {
+            prepareCopy(draft, targets)
+        }
+    }
+
+    private suspend fun prepareCopy(draft: CollectionCopyDraft, targets: List<BiliVideoHit>) =
+        prepareTargets(CollectionPreparation(CollectionAction.COPY, emptyList(), emptyList(), targets, draft.name))
+
     fun prepareSelection(action: CollectionAction) = prepare(action, videos.filter { it.bvid in selected })
-    fun retryPending() { val value = pending ?: return; pending = null; prepare(value.action, value.targets) }
-    fun continuePending() {
+    fun retryPending() {
+        if (running) return
         val value = pending ?: return
         pending = null
-        val token = generation
-        actionJob = viewModelScope.launch {
-            preparing = true
-            try { dispatch(value) }
-            catch (cancelled: CancellationException) { throw cancelled }
-            catch (failure: Exception) { error = appContext.resolveUserError(failure, R.string.bilibili_collection_action_failed) }
-            finally { if (token == generation) preparing = false }
+        startWork(CollectionOperation.PREPARE, R.string.bilibili_prepare_collection_failed) {
+            prepareTargets(value)
+        }
+    }
+
+    fun continuePending() {
+        if (running) return
+        val value = pending?.takeIf { it.details.isNotEmpty() } ?: return
+        pending = null
+        startWork(CollectionOperation.PREPARE, R.string.bilibili_collection_action_failed) {
+            dispatch(value)
         }
     }
 
@@ -233,39 +374,28 @@ class BiliCollectionViewModel(app: Application) : AndroidViewModel(app) {
                 currentCoroutineContext().ensureActive()
                 if (value.action == CollectionAction.PLAY) graph.player.replaceAndPlayItems(items) else graph.player.appendItems(items)
             }
-            CollectionAction.COPY -> { copyDetails = value.details; copyName = collection?.title.orEmpty() }
-            CollectionAction.SAVE -> import(value.details, value.action, null)
+            CollectionAction.COPY -> {
+                val draft = checkNotNull(copyDraft)
+                if (draft.submit(value, ::import)) copyDraft = null
+            }
+            CollectionAction.SAVE -> import(value)
         }
     }
 
     fun playPart(part: BiliPart) {
+        if (running || part !in singleParts) return
         singleParts = emptyList()
-        actionJob = viewModelScope.launch {
-            try {
-                val item = repository.playable(part)
-                currentCoroutineContext().ensureActive()
-                graph.player.replaceAndPlayItems(listOf(item))
-            } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { error = text(R.string.bilibili_video_prepare_failed) }
+        startWork(CollectionOperation.PREPARE, R.string.bilibili_video_prepare_failed) {
+            val item = repository.playable(part)
+            currentCoroutineContext().ensureActive()
+            graph.player.replaceAndPlayItems(listOf(item))
         }
     }
     fun dismissParts() { singleParts = emptyList() }
-    fun dismissCopy() { copyName = null; copyDetails = emptyList() }
-    fun confirmCopy(name: String) {
-        if (name.isBlank() || copyDetails.isEmpty()) return
-        val details = copyDetails; dismissCopy()
-        val token = generation
-        actionJob = viewModelScope.launch {
-            preparing = true
-            try { import(details, CollectionAction.COPY, name.trim()) }
-            catch (cancelled: CancellationException) { throw cancelled }
-            catch (failure: Exception) { error = appContext.resolveUserError(failure, R.string.bilibili_copy_failed) }
-            finally { if (token == generation) preparing = false }
-        }
-    }
+    fun dismissCopy() { if (copyName != null) cancelPreparation() }
 
-    private suspend fun import(details: List<BiliVideoDetails>, action: CollectionAction, name: String?) {
-        val requests = graph.biliImportRequests.choose(details) ?: return
+    private suspend fun import(value: CollectionPreparation): Boolean {
+        val requests = graph.biliImportRequests.choose(value.details) ?: return false
         currentCoroutineContext().ensureActive()
         committing = true
         try {
@@ -287,20 +417,22 @@ class BiliCollectionViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }
             }
-            if (action == CollectionAction.COPY && copiedParts.isNotEmpty()) {
-                graph.library.publishBiliPlaylist(checkNotNull(name), copiedParts)
+            val copied = value.action == CollectionAction.COPY && copiedParts.isNotEmpty() &&
+                graph.library.publishBiliPlaylist(checkNotNull(value.copyName), copiedParts) != null
+            if (value.action != CollectionAction.COPY || copied) {
+                selected = emptySet()
             }
-            selected = emptySet()
             graph.show(
-                when (action) {
+                when (value.action) {
                     CollectionAction.COPY -> TextRef.Res(
-                        if (saved.isEmpty()) R.string.bilibili_no_audio_to_copy else R.string.bilibili_copied_playlist,
+                        if (copied) R.string.bilibili_copied_playlist else R.string.bilibili_no_audio_to_copy,
                     )
                     else -> if (saved.isEmpty()) TextRef.Res(R.string.bilibili_nothing_to_add)
                     else TextRef.Res(R.string.bilibili_added_count, listOf(saved.distinct().size))
                 },
             )
             if (failed.isNotEmpty()) error = failed.joinToString("\n")
+            return copied
         } finally { committing = false }
     }
 }

@@ -15,6 +15,8 @@ import com.nanahoshi.audioplayer.data.db.LibraryFileEntity
 import com.nanahoshi.audioplayer.data.db.TrackEntity
 import com.nanahoshi.audioplayer.dlsite.extractDownloadArchive
 import com.nanahoshi.audioplayer.japaneseasmr.JA_WORK_DOWNLOAD
+import com.nanahoshi.audioplayer.japaneseasmr.JaFileTransfer
+import com.nanahoshi.audioplayer.japaneseasmr.JaMegaFileSource
 import com.nanahoshi.audioplayer.japaneseasmr.JaRemoteFile
 import com.nanahoshi.audioplayer.japaneseasmr.JaWorkClient
 import com.nanahoshi.audioplayer.japaneseasmr.JaWorkException
@@ -44,6 +46,14 @@ internal class JaWorkFiles(private val db: AppDatabase, filesDir: File) {
         val hash: String? get() = files.mapNotNull { it.sha256 }.takeIf { it.size == files.size }?.let {
             if (it.size == 1) it.single() else jaHash(it.joinToString("/"))
         }
+        val megaRevision: String? = if (packageKey != null && files.all { it.transfer is JaFileTransfer.Mega }) {
+            "mega:" + jaHash(files.joinToString("/") { (it.transfer as JaFileTransfer.Mega).crypto.checksum })
+        } else null
+        val hasRemoteVersion: Boolean get() = (hash != null || megaRevision != null ||
+            packageKey == null && files.single().transfer is JaFileTransfer.Mega)
+        val archiveParent: String get() = if (packageKey != null && files.all {
+                (it.transfer as? JaFileTransfer.Mega)?.source is JaMegaFileSource.FolderFile
+            }) path.substringBeforeLast('/', "") else ""
     }
 
     internal data class Check(val pending: Int, val needsReplace: Boolean, val lengthOnly: Boolean, val retained: Int)
@@ -104,6 +114,15 @@ internal class JaWorkFiles(private val db: AppDatabase, filesDir: File) {
         return file.isFile && file.length() == entry.size && (entry.sha256 == null || jaFileSha256(file) == entry.sha256)
     }
 
+    private suspend fun sameContent(row: JaDownloadEntryEntity, file: JaRemoteFile): Boolean {
+        if (row.size != file.size || (file.sha256 != null && row.sha256 != file.sha256)) return false
+        val transfer = file.transfer as? JaFileTransfer.Mega ?: return true
+        return row.localPath?.let { transfer.crypto.verify(File(it)) } == true
+    }
+
+    private suspend fun conflictsWithIntactCopy(row: JaDownloadEntryEntity?, file: JaRemoteFile): Boolean =
+        row != null && intact(row) && !sameContent(row, file)
+
     private suspend fun plan(manifest: JaWorkManifest, force: Boolean): Plan {
         val rj = manifest.entry.post.rj
         val old = db.jaDownloads().entries(rj).associateBy { jaWorkPathKey(it.relativePath) }
@@ -111,15 +130,17 @@ internal class JaWorkFiles(private val db: AppDatabase, filesDir: File) {
         val groups = groups(manifest.files)
         val reused = mutableListOf<Group>()
         for (group in groups) {
-            if (group.size == null || (force && group.hash == null)) continue
+            if (group.size == null || (force && !group.hasRemoteVersion)) continue
             val key = group.packageKey
             if (key == null) {
                 val row = old[jaWorkPathKey(group.path)] ?: continue
-                if (row.packageKey == null && row.size == group.size &&
-                    (group.hash == null || row.sha256 == group.hash) && intact(row)) reused += group
+                if (row.packageKey == null && intact(row) && sameContent(row, group.files.single())) reused += group
             } else {
                 val row = packages[key] ?: continue
-                if (row.size != group.size || (group.hash != null && row.sha256 != group.hash) || row.publishedAt == null) continue
+                if (row.size != group.size || row.publishedAt == null) continue
+                val versionMatches = group.megaRevision?.let { row.revision == it }
+                    ?: (group.hash == null || row.sha256 == group.hash)
+                if (!versionMatches) continue
                 val files = old.values.filter { it.packageKey == key && it.kind != "FOLDER" && it.packageRevision == row.revision }
                 if (files.isNotEmpty() && files.all { intact(it) }) reused += group
             }
@@ -145,11 +166,9 @@ internal class JaWorkFiles(private val db: AppDatabase, filesDir: File) {
             pending.sumOf { it.files.size },
             changedEntry && pending.any { group ->
                 if (group.packageKey != null) plan.old.values.any { it.localPath != null }
-                else plan.old[jaWorkPathKey(group.path)]?.let { it.localPath != null &&
-                    (it.size != group.size || group.hash != null && it.sha256 != group.hash)
-                } == true
+                else conflictsWithIntactCopy(plan.old[jaWorkPathKey(group.path)], group.files.single())
             },
-            plan.groups.any { it.hash == null },
+            plan.groups.any { !it.hasRemoteVersion },
             if (pending.isEmpty()) {
                 val current = plan.reused.flatMap { reusedRows(plan, it) }.map { jaWorkPathKey(it.relativePath) }.toSet()
                 retainedCount(plan, current)
@@ -178,6 +197,7 @@ internal class JaWorkFiles(private val db: AppDatabase, filesDir: File) {
         val task = staging(rj, job.id).apply { check(mkdirs() || isDirectory) }
         val generation = File(root, "$rj/files/${UUID.randomUUID()}")
         val entries = linkedMapOf<String, JaDownloadEntryEntity>()
+        val freshKeys = mutableSetOf<String>()
         val packages = mutableListOf<JaDownloadPackageEntity>()
         val retired = mutableListOf<JaDownloadEntryEntity>()
         fun ancestors(path: String) = generateSequence(path.substringBeforeLast('/', "")) {
@@ -246,6 +266,7 @@ internal class JaWorkFiles(private val db: AppDatabase, filesDir: File) {
             old?.let(retired::add)
             entries[key] = JaDownloadEntryEntity(rj, post.postId, finalPath, kind, size, checksum,
                 target.absolutePath, packageKey, old?.trackId, old?.fileId, packageRevision = packageRevision)
+            freshKeys += key
             directories.addAll(ancestors(key))
             return true
         }
@@ -257,9 +278,8 @@ internal class JaWorkFiles(private val db: AppDatabase, filesDir: File) {
                 phase(ProgressPhase.DOWNLOADING)
                 val direct = group.files.singleOrNull()
                 val previous = direct?.let { plan.old[jaWorkPathKey(it.relativePath)] }
-                if (group.packageKey == null && previous?.localPath != null && differentEntry &&
-                    job.jaReplace != true && intact(previous) &&
-                    (previous.size != direct.size || direct.sha256 != null && previous.sha256 != direct.sha256)
+                if (group.packageKey == null && direct != null && differentEntry &&
+                    job.jaReplace != true && conflictsWithIntactCopy(previous, direct)
                 ) {
                     skipped++
                     declined++
@@ -301,17 +321,25 @@ internal class JaWorkFiles(private val db: AppDatabase, filesDir: File) {
                     current.ensureActive()
                 }
                 skipped += extraction.skipped
-                val packageRevision = group.hash ?: jaHash(downloads.map { jaFileSha256(it) }.joinToString("/"))
+                val packageRevision = group.megaRevision ?: group.hash ?: jaHash(downloads.map { jaFileSha256(it) }.joinToString("/"))
+                val archiveParent = group.archiveParent
+                fun publishedPath(path: String) = if (archiveParent.isEmpty()) path else "$archiveParent/$path"
                 var complete = true
                 for (file in extraction.entries.filter { !it.isDirectory }) {
-                    complete = accept(file.relativePath, File(unpacked, file.relativePath), null, packageKey, packageRevision) && complete
+                    complete = accept(publishedPath(file.relativePath), File(unpacked, file.relativePath), null,
+                        packageKey, packageRevision) && complete
                 }
                 // Preserve empty folders as well as the parents implied by files.
-                for (directory in extraction.entries.filter { it.isDirectory }) {
-                    val path = normalizeJaWorkPath(directory.relativePath)
+                val archiveDirectories = extraction.entries.filter { it.isDirectory }.map { publishedPath(it.relativePath) }
+                val outputDirectories = if (archiveParent.isEmpty()) archiveDirectories else archiveDirectories + archiveParent
+                for (directory in outputDirectories) {
+                    val path = normalizeJaWorkPath(directory)
                     val key = path?.let(::jaWorkPathKey)
                     if (key == null || entries[key]?.kind == "AUDIO" || entries[key]?.kind == "FILE" ||
-                        plan.old[key]?.let { it.kind != "FOLDER" } == true
+                        plan.old[key]?.let { it.kind != "FOLDER" } == true ||
+                        (archiveParent.isNotEmpty() && ancestors(key).any { parent ->
+                            (entries[parent] ?: plan.old[parent])?.kind?.let { it != "FOLDER" } == true
+                        })
                     ) {
                         skipped++
                         complete = false
@@ -327,36 +355,53 @@ internal class JaWorkFiles(private val db: AppDatabase, filesDir: File) {
                     group.hash, null, now, now.takeIf { complete }, packageRevision)
             }
             phase(ProgressPhase.IMPORTING)
-            val stale = retainedCount(plan, entries.keys + manifestFilePaths)
             val rjDirectory = File(root, "$rj/files").apply { check(mkdirs() || isDirectory) }
             current.ensureActive()
-            withContext(NonCancellable) {
-                db.withTransaction {
+            val (publishedPaths, stale) = withContext(NonCancellable) {
+                val result = db.withTransaction {
                     current.ensureActive()
                     requireTarget()
                     val work = db.folders().get(rootId) ?: error(DOWNLOAD_LIBRARY_REQUIRED)
-                    val all = plan.old + entries
-                    link(work, before, rj, all.values.toList(), post.coverUri)
+                    val currentWork = db.jaDownloads().work(rj)
+                    val currentRows = db.jaDownloads().entries(rj).associateBy { jaWorkPathKey(it.relativePath) }
+                    // A reused path must still belong to the current manifest. Only new copies can replace it.
+                    val all = currentRows.toMutableMap()
+                    for ((key, row) in entries) {
+                        val latest = currentRows[key]
+                        when {
+                            key in freshKeys -> all[key] = row.copy(trackId = latest?.trackId, fileId = latest?.fileId)
+                            row.kind == "FOLDER" -> all[key] = row.copy(folderId = latest?.folderId)
+                            latest != null && latest.localPath == row.localPath -> {
+                                all[key] = latest.copy(postId = row.postId, packageKey = row.packageKey,
+                                    packageRevision = row.packageRevision)
+                            }
+                        }
+                    }
+                    val linked = link(work, currentWork, rj, all.values.toList(), post.coverUri)
+                    val linkedPaths = linked.filter { it.localPath != null }
+                    val plannedPaths = entries.keys + manifestFilePaths
+                    val retained = linkedPaths.count { jaWorkPathKey(it.relativePath) !in plannedPaths }
                     if (packages.isNotEmpty()) db.jaDownloads().savePackages(packages)
-                    val previousKey = before?.entryKey
+                    val previousKey = currentWork?.entryKey
                     val entryKey = if (declined > 0) previousKey else job.jaEntryKey
                     db.jaDownloads().saveWork(JaDownloadWorkEntity(rj, rootId, post.postId,
                         rjDirectory.absolutePath, System.currentTimeMillis(), entryKey))
                     db.downloads().setLocalPath(job.id, rjDirectory.absolutePath)
                     db.downloads().finish(job.id, downloaded, downloaded)
+                    linkedPaths.filter { jaWorkPathKey(it.relativePath) in entries }.mapNotNull { it.localPath } to retained
                 }
                 published = true
                 phase(ProgressPhase.CLEANING)
                 if (retired.isNotEmpty()) cleanupGenerations(retired, startup = false)
                 task.deleteRecursively()
+                result
             }
-            val publishedPaths = entries.values.mapNotNull { it.localPath }
             val added = publishedPaths.count { it.startsWith(generation.absolutePath + File.separator) }
             val existing = publishedPaths.size - added
             val unsaved = skipped - declined
             report.workFiles(existing, skipped, stale)
-            if (pending.isEmpty()) report.reused()
-            val completionRes = if (plan.groups.any { it.hash == null }) R.string.ja_work_complete_no_checksum
+            if (pending.isEmpty() && publishedPaths.isNotEmpty()) report.reused()
+            val completionRes = if (plan.groups.any { !it.hasRemoteVersion }) R.string.ja_work_complete_no_checksum
             else R.string.ja_work_complete
             val summary = buildList {
                 add(TextRef.Res(R.string.ja_work_added_files, listOf(added)))
@@ -389,7 +434,7 @@ internal class JaWorkFiles(private val db: AppDatabase, filesDir: File) {
         rj: String,
         rows: List<JaDownloadEntryEntity>,
         cover: String?,
-    ) {
+    ): List<JaDownloadEntryEntity> {
         val dao = db.jaDownloads()
         val folders = db.folders()
         val now = System.currentTimeMillis()
@@ -455,6 +500,7 @@ internal class JaWorkFiles(private val db: AppDatabase, filesDir: File) {
             }
         }
         dao.saveEntries(saved)
+        return saved
     }
 
     private fun duration(file: File): Long? {

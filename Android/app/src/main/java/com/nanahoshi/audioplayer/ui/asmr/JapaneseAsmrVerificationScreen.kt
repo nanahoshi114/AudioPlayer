@@ -15,7 +15,13 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -102,6 +108,19 @@ internal fun JapaneseAsmrVerificationScreen(
     var buzzNext by remember { mutableStateOf<String?>(null) }
     var buzzFile by remember { mutableStateOf<String?>(null) }
 
+    fun reloadPage(view: WebView) {
+        navigation++
+        buzzFile = null
+        buzzDirect = null
+        buzzAutoTried = false
+        buzzLanding = null
+        downloadRedirect = null
+        hostingUnavailable = false
+        loading = true
+        error = null
+        view.reload()
+    }
+
     suspend fun readDownload(visible: JaVisibleDownload) {
         try {
             onDownload?.invoke(visible)
@@ -154,7 +173,7 @@ internal fun JapaneseAsmrVerificationScreen(
     }
 
     // 持续读取网页脚本捕获到的地址；手动点击网页按钮时也能生效。
-    LaunchedEffect(buzzheavier) {
+    LaunchedEffect(buzzheavier, buzzDirect) {
         if (!buzzheavier) return@LaunchedEffect
         while (buzzDirect == null) {
             delay(500)
@@ -286,11 +305,17 @@ internal fun JapaneseAsmrVerificationScreen(
         ) startBuzzRead(view, manual = false)
     }
 
-    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().imePadding()) {
         AppTopBar(
             title = if (buzzheavier) stringResource(R.string.ja_verify_hosting_title) else stringResource(R.string.ja_verify_web_title),
             onBack = ::leave,
             actions = {
+                IconButton(onClick = { webView?.let(::reloadPage) }, enabled = webView != null) {
+                    Icon(Icons.Default.Refresh, contentDescription = stringResource(R.string.a11y_refresh))
+                }
+                IconButton(onClick = onBack) {
+                    Icon(Icons.Default.Close, contentDescription = stringResource(R.string.a11y_close))
+                }
                 TextButton(
                     enabled = !loading && !reading &&
                         (if (hostingUnavailable) true
@@ -299,8 +324,7 @@ internal fun JapaneseAsmrVerificationScreen(
                     onClick = {
                         val view = webView ?: return@TextButton
                         if (hostingUnavailable) {
-                            loading = true
-                            view.reload()
+                            reloadPage(view)
                             return@TextButton
                         }
                         if (onDownload != null) {

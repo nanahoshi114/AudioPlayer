@@ -6,13 +6,13 @@ import com.nanahoshi.audioplayer.text.persistedErrorText
 import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.text.PersistedErrors
 import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.text.UserFacingException
 import com.nanahoshi.audioplayer.text.resolve
 import com.nanahoshi.audioplayer.text.userTextOr
 import androidx.room.withTransaction
 
 import com.nanahoshi.audioplayer.youtube.readyYouTubeAudio
 
-import com.nanahoshi.audioplayer.japaneseasmr.jaAudioIdentity
 import android.content.Context
 import android.media.MediaMetadataRetriever
 import android.net.Uri
@@ -22,6 +22,7 @@ import com.nanahoshi.audioplayer.data.db.DownloadStatus
 import com.nanahoshi.audioplayer.data.db.QueuedTrack
 import com.nanahoshi.audioplayer.data.db.TranslateMark
 import com.nanahoshi.audioplayer.data.db.WhisperJobEntity
+import com.nanahoshi.audioplayer.playback.LoadedSubtitles
 import com.nanahoshi.audioplayer.playback.SubtitleCue
 import com.nanahoshi.audioplayer.playback.SubtitleOrigin
 import com.nanahoshi.audioplayer.playback.SubtitleSource
@@ -48,6 +49,7 @@ import java.io.File
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.coroutineContext
 
 internal sealed interface WhisperStart {
@@ -69,6 +71,7 @@ class WhisperCenter internal constructor(
     private val offlineModels: Map<OfflineWhisperModel, OfflineWhisperModelManager>,
     private val requests: ForegroundTaskRequests<SubtitleTask>,
     private val recovery: Job,
+    private val subtitleBindings: SubtitleBindingStore? = null,
     private val progress: TaskProgressCenter = translator.progress,
 ) {
     private val appContext = context.applicationContext
@@ -81,13 +84,45 @@ class WhisperCenter internal constructor(
     private val checkingPending = AtomicBoolean(false)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val kick = Channel<Unit>(Channel.CONFLATED)
-    private val stagedRoot = File(appContext.filesDir, "whisper-src")
+    private val stagedRoot = File(appContext.filesDir, WHISPER_STAGING_DIRECTORY)
     private val staging = ConcurrentHashMap<String, Int>()
     private val runners = ConcurrentHashMap<Long, Job>()
     private val reporters = ConcurrentHashMap<Long, TaskReporter>()
     private val translationRunners = ConcurrentHashMap<Long, Job>()
+    // The write lock protects handoff and attempt changes. When needed, taskLock comes first.
+    private val attemptCounter = AtomicLong()
+    private val activeTranslationAttempt = mutableMapOf<Long, Long>()
+    private val pendingHandoff = mutableMapOf<Long, PendingHandoff>()
+
+    private data class PendingHandoff(val id: Long, val attempt: Long, val isTranslation: Boolean)
 
     fun observe(): Flow<List<WhisperJobEntity>> = db.whisper().observe()
+
+    fun observeVisible(): Flow<List<WhisperJobEntity>> = db.whisper().observeVisible()
+
+    suspend fun deleteTerminal(id: Long) {
+        taskLock.withLock {
+            subtitles.generatedWriteLock.withLock {
+                if (runners.containsKey(id) || translationRunners.containsKey(id)) return
+                val dao = db.whisper()
+                if (dao.deleteFailed(id) > 0) {
+                    sweepStaged()
+                    return
+                }
+                dao.dismissTerminal(id, System.currentTimeMillis())
+            }
+        }
+    }
+
+    suspend fun clearCompletedSubtitles() {
+        subtitles.generatedWriteLock.withLock {
+            val now = System.currentTimeMillis()
+            db.withTransaction {
+                db.whisper().dismissAllCompleted(now)
+                db.translations().dismissAllCompleted(now)
+            }
+        }
+    }
 
     internal fun missingOfflineModel(modelId: String?): String? =
         OfflineWhisperModel.fromId(modelId)?.let { model ->
@@ -136,7 +171,9 @@ class WhisperCenter internal constructor(
     }
 
     private suspend fun runForegroundQueue() = workerLock.withLock {
+        coroutineContext.ensureActive()
         try {
+            subtitles.generatedWriteLock.withLock { pendingHandoff.clear() }
             downloads.awaitStartup()
             drain()
         } catch (stopped: SubtitleTaskStopped) {
@@ -144,7 +181,7 @@ class WhisperCenter internal constructor(
             throw stopped
         } catch (cancelled: CancellationException) {
             val stopped = coroutineContext.cancellationCause() as? SubtitleTaskStopped
-            if (stopped != null) failQueue(stopped.persistedError)
+            failQueue(stopped?.persistedError ?: SUBTITLE_INTERRUPTED)
             throw cancelled
         } catch (_: Exception) {
             failQueue(SUBTITLE_INTERRUPTED)
@@ -153,14 +190,51 @@ class WhisperCenter internal constructor(
 
     private suspend fun failQueue(message: String) = withContext(NonCancellable) {
         taskLock.withLock {
-            val pending = db.whisper().pendingWork()
-            db.whisper().failActive(message)
-            db.whisper().failActiveTranslations(message)
-            pending.forEach { job ->
-                if (job.status != DownloadStatus.DONE) progress.finishFromDb(TaskKey(TaskKind.WHISPER, job.id), ProgressPart.TRANSCRIPTION, true)
-                if (TranslateMark.isActive(job.translateStatus)) progress.finishFromDb(TaskKey(TaskKind.WHISPER, job.id), ProgressPart.TRANSLATION, true)
+            subtitles.generatedWriteLock.withLock {
+                val pending = db.whisper().pendingWork()
+                db.whisper().failActive(message)
+                db.whisper().failActiveTranslations(message)
+                pendingHandoff.clear()
+                activeTranslationAttempt.clear()
+                pending.forEach { job ->
+                    if (job.status != DownloadStatus.DONE) progress.finishFromDb(TaskKey(TaskKind.WHISPER, job.id), ProgressPart.TRANSCRIPTION, true)
+                    if (TranslateMark.isActive(job.translateStatus)) progress.finishFromDb(TaskKey(TaskKind.WHISPER, job.id), ProgressPart.TRANSLATION, true)
+                }
             }
             sweepStaged()
+        }
+    }
+
+    internal suspend fun resolveReadOnlyMatchTargets(
+        row: QueuedTrack,
+        loaded: LoadedSubtitles?,
+        loadedQueueItemId: Long?,
+    ): WhisperMatchTargets = withContext(Dispatchers.IO) {
+        val track = downloads.libraryTrack(row)
+        val byUrl = if (row.source == TrackSource.JAPANESE_ASMR) null
+            else completedAudioPath(row.whisperRemoteIdentity())
+        resolveReadOnlyMatchTargets(
+            row, loaded, loadedQueueItemId, appContext.filesDir, track,
+            savedPaths = listOfNotNull(byUrl, savedWorkAudioPath(row)),
+        )
+    }
+
+    private suspend fun completedAudioPath(url: String?): String? =
+        url?.takeIf { it.isNotBlank() }?.let { db.downloads().latestForUrl(it) }
+            ?.takeIf { it.status == DownloadStatus.DONE }?.localPath
+
+    private suspend fun savedWorkAudioPath(row: QueuedTrack): String? {
+        val work = row.workno ?: return null
+        return when (row.source) {
+            TrackSource.JAPANESE_ASMR -> {
+                if (row.remoteUrl?.startsWith("japaneseasmr://file?") == true) {
+                    val path = row.fileKey ?: return null
+                    db.jaDownloads().entry(work, path)?.localPath
+                } else downloads.savedRemotePath(row.source, work, row.fileKey)
+            }
+            TrackSource.ASMR, TrackSource.DLSITE ->
+                if (work.isNotBlank()) downloads.savedRemotePath(row.source, work, row.fileKey) else null
+            else -> null
         }
     }
 
@@ -177,38 +251,24 @@ class WhisperCenter internal constructor(
         if (row.source == TrackSource.YOUTUBE) {
             readyYouTubeAudio(appContext.filesDir, row.youtubeVideoId ?: row.workno)?.let { return@withContext it }
         }
-        val work = row.workno
         if (row.source == TrackSource.JAPANESE_ASMR) {
-            if (row.remoteUrl?.startsWith("japaneseasmr://file?") == true) {
-                val path = row.fileKey ?: return@withContext null
-                return@withContext work?.let { materialize(db.jaDownloads().entry(it, path)?.localPath) }
-            }
-            return@withContext work?.let { materialize(downloads.savedRemotePath(row.source, it, row.fileKey)) }
+            return@withContext materialize(savedWorkAudioPath(row))
         }
-        val url = row.remoteUrl
-        if (!url.isNullOrBlank()) {
-            val done = db.downloads().latestForUrl(url)
-            if (done?.status == DownloadStatus.DONE) {
-                materialize(done.localPath)?.let { return@withContext it }
-            }
-        }
-        val workKey = row.workno
-        if ((row.source == TrackSource.ASMR || row.source == TrackSource.DLSITE) && !workKey.isNullOrBlank()) {
-            materialize(downloads.savedRemotePath(row.source, workKey, row.fileKey))
-        } else {
-            null
-        }
+        materialize(completedAudioPath(row.remoteUrl))?.let { return@withContext it }
+        materialize(savedWorkAudioPath(row))
     }
 
-    internal suspend fun startIfLocal(row: QueuedTrack, translate: Boolean, model: String): WhisperStart =
-        submitStart {
+    internal suspend fun startIfLocal(
+        row: QueuedTrack, translate: Boolean, model: String, forceRegenerate: Boolean = false,
+    ): WhisperStart =
+        submitStart { submission ->
             val file = existingFile(row) ?: return@submitStart WhisperStart.Unavailable
-            startWithFile(row, file, translate, model)
+            startWithFile(row, file, translate, model, submission, forceRegenerate)
         }
 
     private suspend fun submitStart(
         audio: Boolean = false,
-        prepare: suspend (AudioPreparation?) -> WhisperStart,
+        prepare: suspend (Submission) -> WhisperStart,
     ): WhisperStart = try {
         submit(audio, prepare) { it == WhisperStart.Started }
     } catch (stopped: SubtitleTaskStopped) {
@@ -239,19 +299,70 @@ class WhisperCenter internal constructor(
         }
     }
 
-    private suspend fun <T> submit(audio: Boolean, prepare: suspend (AudioPreparation?) -> T, queued: (T) -> Boolean): T {
+    private inner class Submission(val audio: AudioPreparation?) {
+        private var handoff: PendingHandoff? = null
+
+        suspend fun enqueueTranscription(write: suspend () -> Long?): Boolean =
+            subtitles.generatedWriteLock.withLock {
+                coroutineContext.ensureActive()
+                withContext(NonCancellable) {
+                    val id = write() ?: return@withContext false
+                    register(id, isTranslation = false)
+                    true
+                }
+            }
+
+        // Called with generatedWriteLock held, in the same non-cancellable block as the queue write.
+        fun register(id: Long, isTranslation: Boolean) {
+            val entry = PendingHandoff(id, attemptCounter.incrementAndGet(), isTranslation)
+            handoff = entry
+            pendingHandoff[id] = entry
+            if (isTranslation) activeTranslationAttempt[id] = entry.attempt
+            kick.trySend(Unit)
+        }
+
+        suspend fun failIfUnclaimed(message: String) {
+            val entry = handoff ?: return
+            subtitles.generatedWriteLock.withLock {
+                if (!pendingHandoff.remove(entry.id, entry)) return
+                val dao = db.whisper()
+                val part = if (entry.isTranslation) ProgressPart.TRANSLATION else ProgressPart.TRANSCRIPTION
+                val changed = if (entry.isTranslation) {
+                    if (!activeTranslationAttempt.remove(entry.id, entry.attempt)) return
+                    dao.failQueuedTranslationIfUnpublished(entry.id, message)
+                } else dao.failQueuedIfUnpublished(entry.id, message)
+                if (changed > 0) {
+                    progress.finishFromDb(TaskKey(TaskKind.WHISPER, entry.id), part, force = true)
+                    if (!entry.isTranslation) sweepStaged()
+                }
+            }
+        }
+    }
+
+    private suspend fun <T> submit(audio: Boolean, prepare: suspend (Submission) -> T, queued: (T) -> Boolean): T {
         val prepared = CompletableDeferred<T>()
         // 界面只等到准备完成，服务继续持有听写队列直到音频、听写和自动翻译全部结束。
         val download = if (audio) AudioPreparation(downloads) else null
         val request = requests.submit(SubtitleTask.WHISPER) {
-            val result = try {
-                recovery.join()
-                prepare(download)
+            val submission = Submission(download)
+            var failure: Throwable? = null
+            try {
+                val result = try {
+                    recovery.join()
+                    prepare(submission)
+                } finally {
+                    download?.close()
+                }
+                prepared.complete(result)
+                if (queued(result)) runForegroundQueue()
+            } catch (error: Exception) {
+                failure = coroutineContext.cancellationCause() ?: error
+                throw error
             } finally {
-                download?.close()
+                withContext(NonCancellable) {
+                    submission.failIfUnclaimed((failure as? SubtitleTaskStopped)?.persistedError ?: SUBTITLE_INTERRUPTED)
+                }
             }
-            prepared.complete(result)
-            if (queued(result)) runForegroundQueue()
         }
         request.result.invokeOnCompletion { error ->
             download?.close()
@@ -260,7 +371,14 @@ class WhisperCenter internal constructor(
         return prepared.await()
     }
 
-    private suspend fun startWithFile(row: QueuedTrack, file: File, translate: Boolean, model: String): WhisperStart {
+    private suspend fun startWithFile(
+        row: QueuedTrack,
+        file: File,
+        translate: Boolean,
+        model: String,
+        submission: Submission,
+        forceRegenerate: Boolean,
+    ): WhisperStart {
         try {
             if (!file.isFile) return WhisperStart.Unavailable
             val fingerprint = sha256(file)
@@ -273,6 +391,8 @@ class WhisperCenter internal constructor(
                     skipTranslate = !translate,
                     fingerprint = fingerprint,
                     model = model,
+                    submission = submission,
+                    forceRegenerate = forceRegenerate,
                 )
             }
         } finally {
@@ -286,21 +406,22 @@ class WhisperCenter internal constructor(
         translate: Boolean,
         model: String,
         dlsiteMode: DlsiteDownloadMode,
-    ): WhisperStart = submitStart(audio = true) { preparation ->
+        forceRegenerate: Boolean = false,
+    ): WhisperStart = submitStart(audio = true) { submission ->
         val track = downloads.libraryTrack(row) ?: downloads.prepareJapaneseTrack(row)
             ?: return@submitStart WhisperStart.BackgroundUnavailable(TextRef.Res(R.string.download_error_library_required))
         val savedRow = row.copy(trackId = track.id)
         val archive = track.source == TrackSource.DLSITE &&
             (dlsiteMode == DlsiteDownloadMode.ARCHIVE || track.fileHash.isNullOrBlank())
         val ready = if (archive) materialize(downloads.originalPathForTrack(track.id)) else existingFile(savedRow)
-        if (ready != null) return@submitStart startWithFile(savedRow, ready, translate, model)
+        if (ready != null) return@submitStart startWithFile(savedRow, ready, translate, model, submission, forceRegenerate)
         if (row.remoteUrl?.startsWith("japaneseasmr://file?") == true) {
             return@submitStart WhisperStart.BackgroundUnavailable(TextRef.Res(R.string.ja_error_work_file_missing))
         }
         taskLock.withLock {
             missingOfflineModel(model)?.let { return@withLock WhisperStart.NeedModelDownload(it) }
             if (db.whisper().activeForTrack(track.id) != null) return@withLock WhisperStart.AlreadyRunning
-            val download = checkNotNull(preparation).run {
+            val download = checkNotNull(submission.audio).run {
                 if (archive) {
                     val workno = downloads.requestWorkno(track) ?: error(DOWNLOAD_LIBRARY_REQUIRED)
                     downloads.enqueueDlsiteArchive(workno, row.title).id
@@ -309,16 +430,19 @@ class WhisperCenter internal constructor(
             if (download == null) {
                 val file = existingFile(savedRow) ?: return@withLock WhisperStart.Unavailable
                 try {
-                    return@withLock startLocked(row.title, file, track.id, savedRow.whisperRemoteIdentity(), !translate, sha256(file), model)
+                    return@withLock startLocked(row.title, file, track.id, savedRow.whisperRemoteIdentity(),
+                        !translate, sha256(file), model, submission, forceRegenerate)
                 } finally {
                     releaseStaged(file.absolutePath)
                     sweepStaged()
                 }
             }
-            db.whisper().insert(waiting(row.title, track.id, savedRow.whisperRemoteIdentity(), !translate, model).copy(
-                awaitDownloadId = download, awaitFileKey = if (archive) rawFileKey(track.fileHash) else null,
-            ))
-            kick.trySend(Unit)
+            submission.enqueueTranscription {
+                db.whisper().insert(waiting(row.title, track.id, savedRow.whisperRemoteIdentity(), !translate, model).copy(
+                    awaitDownloadId = download, awaitFileKey = if (archive) rawFileKey(track.fileHash) else null,
+                    forceRegenerate = true.takeIf { forceRegenerate },
+                ))
+            }
             WhisperStart.Started
         }
     }
@@ -338,13 +462,48 @@ class WhisperCenter internal constructor(
     internal suspend fun retry(id: Long, dlsiteMode: DlsiteDownloadMode): TextRef? = try {
         submit(
             audio = true,
-            prepare = { preparation ->
+            prepare = { submission ->
                 taskLock.withLock {
-                    val job = db.whisper().get(id) ?: return@withLock null
-                    if (job.status != DownloadStatus.FAILED) return@withLock null
+                    val job = db.whisper().get(id)?.takeIf { it.status == DownloadStatus.FAILED }
+                        ?: return@withLock TextRef.Res(R.string.whisper_prepare_failed)
+                    if (runners.containsKey(id) || translationRunners.containsKey(id)) return@withLock stoppingRetry()
                     missingOfflineModel(job.model)?.let { return@withLock missingOfflineWhisperModelMessage(it) }
-                    retryLocked(job, dlsiteMode, checkNotNull(preparation))
-                    null
+                    if (retryLocked(job, dlsiteMode, submission)) null
+                    else TextRef.Res(R.string.whisper_prepare_failed)
+                }
+            },
+            queued = { it == null },
+        )
+    } catch (stopped: SubtitleTaskStopped) {
+        stopped.userText
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: UserFacingException) {
+        error.userText
+    } catch (error: Exception) {
+        preparationErrorText(error)
+    }
+
+    internal suspend fun retryTranslation(id: Long): TextRef? = try {
+        submit(
+            audio = false,
+            prepare = { submission ->
+                subtitles.generatedWriteLock.withLock {
+                    if (translationRunners.containsKey(id)) return@withLock stoppingRetry()
+                    coroutineContext.ensureActive()
+                    withContext(NonCancellable) {
+                        when (translator.requeueGeneratedTranslation(id, System.currentTimeMillis())) {
+                            GeneratedRetryResult.Queued -> {
+                                submission.register(id, isTranslation = true)
+                                null
+                            }
+                            GeneratedRetryResult.Duplicate -> TextRef.Res(R.string.translate_duplicate_notice)
+                            GeneratedRetryResult.MissingConfig -> TextRef.Res(R.string.translate_config_required)
+                            GeneratedRetryResult.MissingSource -> TextRef.Res(R.string.translate_source_missing)
+                            GeneratedRetryResult.AlreadyTranslated -> TextRef.Res(R.string.translate_nothing)
+                            GeneratedRetryResult.Unavailable -> TextRef.Res(R.string.whisper_translate_failed)
+                        }
+                    }
                 }
             },
             queued = { it == null },
@@ -357,56 +516,34 @@ class WhisperCenter internal constructor(
         preparationErrorText(error)
     }
 
+    private fun stoppingRetry() = TextRef.Res(R.string.subtitle_stopping_retry)
+
     private fun preparationErrorText(error: Exception): TextRef = when (val persisted = error.message) {
         DOWNLOAD_LIBRARY_REQUIRED, AUDIO_DOWNLOAD_START_FAILED, AUDIO_DOWNLOAD_TIMEOUT,
         PersistedErrors.JA_WORK_FILE_MISSING -> requireNotNull(persistedErrorText(persisted))
         else -> TextRef.Res(R.string.whisper_prepare_failed)
     }
 
-    private suspend fun retryLocked(job: WhisperJobEntity, dlsiteMode: DlsiteDownloadMode, preparation: AudioPreparation) {
-        progress.reset(TaskKey(TaskKind.WHISPER, job.id))
+    private suspend fun retryLocked(job: WhisperJobEntity, dlsiteMode: DlsiteDownloadMode, submission: Submission): Boolean {
+        requireRetryAvailable(job)
         val path = job.localPath
         if (dlsiteMode != DlsiteDownloadMode.ARCHIVE && !path.isNullOrBlank() && File(path).isFile && job.fingerprint.isNotBlank()) {
             val staged = isStagedPath(path)
             if (staged) holdStaged(path)
-            try {
-                db.whisper().requeueWithFile(
-                    job.id,
-                    job.title,
-                    job.fingerprint,
-                    job.trackId,
-                    path,
-                    job.awaitRemoteUrl,
-                    job.endpoint,
-                    job.skipTranslate,
-                    job.model,
-                )
+            return try {
+                requeueWithFile(job, job.fingerprint, path, submission, retry = true)
             } finally {
                 if (staged) releaseStaged(path)
             }
-            kick.trySend(Unit)
-            return
         }
         val restored = if (dlsiteMode == DlsiteDownloadMode.ARCHIVE) null else restoreLocalCopy(job)
         if (restored != null) {
-            try {
-                db.whisper().requeueWithFile(
-                    job.id,
-                    job.title,
-                    sha256(restored),
-                    job.trackId,
-                    restored.absolutePath,
-                    job.awaitRemoteUrl,
-                    job.endpoint,
-                    job.skipTranslate,
-                    job.model,
-                )
+            return try {
+                requeueWithFile(job, sha256(restored), restored.absolutePath, submission, retry = true)
             } finally {
                 releaseStaged(restored.absolutePath)
                 sweepStaged()
             }
-            kick.trySend(Unit)
-            return
         }
         val oldDownload = job.awaitDownloadId?.let { db.downloads().get(it) } ?: relatedDownload(job)
         val selectedTrack = job.trackId?.let { db.tracks().getById(it) }
@@ -417,9 +554,9 @@ class WhisperCenter internal constructor(
                     originals.entryForPlay(workno, key)?.trackId?.let { db.tracks().getById(it) }
                 } else null
             }
-        val id = preparation.run {
-            val track = selectedTrack ?: oldDownload?.let { downloads.retryTrack(it) }
-                ?: error(DOWNLOAD_LIBRARY_REQUIRED)
+        val track = selectedTrack ?: oldDownload?.let { downloads.retryTrack(it) } ?: error(DOWNLOAD_LIBRARY_REQUIRED)
+        if (track.id != job.trackId) requireRetryAvailable(job, resolvedTrackId = track.id)
+        val id = checkNotNull(submission.audio).run {
             if (track.source == TrackSource.DLSITE &&
                 (dlsiteMode == DlsiteDownloadMode.ARCHIVE || track.fileHash.isNullOrBlank())) {
                 downloads.enqueueDlsiteArchive(downloads.requestWorkno(track) ?: error(DOWNLOAD_LIBRARY_REQUIRED), job.title).id
@@ -427,15 +564,55 @@ class WhisperCenter internal constructor(
                 downloads.retry(oldDownload.id)
             } else downloads.enqueueTrack(track.id).id
         }
-        if (id == null) {
-            db.whisper().fail(job.id, appContext.getString(R.string.whisper_audio_missing_playback))
-        } else {
-            db.withTransaction {
-                db.whisper().setAwaitDownload(job.id, id, job.awaitFileKey ?: selectedTrack?.fileHash?.let(::rawFileKey))
-                db.whisper().requeueForDownload(job.id)
+        if (id == null) throw UserFacingException(TextRef.Res(R.string.whisper_audio_missing_playback))
+        return submission.enqueueTranscription {
+            requireRetryAvailable(job, resolvedTrackId = track.id)
+            val queued = db.withTransaction {
+                if (db.whisper().requeueForDownload(job.id) == 0) false
+                else {
+                    db.whisper().setAwaitDownload(job.id, id, job.awaitFileKey ?: selectedTrack?.fileHash?.let(::rawFileKey))
+                    true
+                }
             }
+            if (!queued) return@enqueueTranscription null
+            progress.reset(TaskKey(TaskKind.WHISPER, job.id))
+            job.id
         }
-        kick.trySend(Unit)
+    }
+
+    private suspend fun requireRetryAvailable(
+        job: WhisperJobEntity,
+        fingerprint: String = job.fingerprint,
+        resolvedTrackId: Long? = job.trackId,
+    ) {
+        val targets = WhisperMatchTargets(
+            trackIds = listOfNotNull(job.trackId, resolvedTrackId).toSet(),
+            remoteIdentity = job.awaitRemoteUrl?.takeIf { it.isNotBlank() },
+            localPaths = emptySet(),
+            generatedFingerprint = fingerprint.takeIf { it.isNotBlank() },
+        )
+        if (db.whisper().active().any { it.id != job.id && targets.matches(it) } ||
+            (fingerprint.isNotBlank() && translator.hasActiveGenerated(fingerprint))
+        ) {
+            throw UserFacingException(TextRef.Res(R.string.player_subtitle_already_running))
+        }
+    }
+
+    private suspend fun requeueWithFile(
+        job: WhisperJobEntity,
+        fingerprint: String,
+        path: String,
+        submission: Submission,
+        retry: Boolean = false,
+    ): Boolean = submission.enqueueTranscription {
+        if (retry) requireRetryAvailable(job, fingerprint)
+        val changed = db.whisper().requeueWithFile(
+            job.id, job.title, fingerprint, job.trackId, path,
+            job.awaitRemoteUrl, job.endpoint, job.skipTranslate, job.model,
+        )
+        if (changed == 0) return@enqueueTranscription null
+        progress.reset(TaskKey(TaskKind.WHISPER, job.id))
+        job.id
     }
 
     fun cancel(id: Long) {
@@ -452,6 +629,8 @@ class WhisperCenter internal constructor(
                 translator.stopForWhisper(id)
                 runners[id]?.cancel()
                 translationRunners[id]?.cancel()
+                pendingHandoff.remove(id)
+                if (!translationRunners.containsKey(id)) activeTranslationAttempt.remove(id)
                 progress.finishFromDb(TaskKey(TaskKind.WHISPER, id), if (translating) ProgressPart.TRANSLATION else ProgressPart.TRANSCRIPTION, true)
             }
             kick.trySend(Unit)
@@ -467,6 +646,8 @@ class WhisperCenter internal constructor(
         skipTranslate: Boolean,
         fingerprint: String,
         model: String,
+        submission: Submission,
+        forceRegenerate: Boolean,
     ): WhisperStart {
         if (!file.isFile) return WhisperStart.Unavailable
         missingOfflineModel(model)?.let { return WhisperStart.NeedModelDownload(it) }
@@ -483,7 +664,7 @@ class WhisperCenter internal constructor(
                 whisperModelsMatch(it.model, model)
         }
         val latestDone = prior.lastOrNull { it.status == DownloadStatus.DONE }
-        if (latestDone != null && canReuseCues(fingerprint, model, endpoint, latestDone)) {
+        if (!forceRegenerate && latestDone != null && canReuseCues(fingerprint, model, endpoint, latestDone)) {
             if (TranslateMark.isActive(latestDone.translateStatus)) return WhisperStart.AlreadyRunning
             if (!skipTranslate && translator.readyToTranslate(fingerprint) && busy.isNotEmpty()) {
                 return WhisperStart.AlreadyRunning
@@ -492,7 +673,8 @@ class WhisperCenter internal constructor(
             return WhisperStart.AlreadyDone
         }
         if (busy.isNotEmpty()) {
-            return if (rememberPending(title, fingerprint, file, trackId, remoteUrl, busy, endpoint, skipTranslate, model)) {
+            if (forceRegenerate) return WhisperStart.AlreadyRunning
+            return if (rememberPending(title, fingerprint, file, trackId, remoteUrl, busy, endpoint, skipTranslate, model, submission)) {
                 WhisperStart.Started
             } else {
                 WhisperStart.AlreadyRunning
@@ -503,24 +685,19 @@ class WhisperCenter internal constructor(
                 whisperModelsMatch(it.model, model) &&
                 (trackId == null || it.trackId == trackId)
         }
-        if (failed != null) {
-            progress.reset(TaskKey(TaskKind.WHISPER, failed.id))
-            db.whisper().requeueWithFile(
-                failed.id,
-                title,
-                fingerprint,
-                trackId ?: failed.trackId,
-                file.absolutePath,
-                remoteUrl ?: failed.awaitRemoteUrl,
-                endpoint,
-                skipTranslate,
-                model,
+        if (failed != null && !forceRegenerate && failed.forceRegenerate != true) {
+            if (runners.containsKey(failed.id) || translationRunners.containsKey(failed.id)) return WhisperStart.AlreadyRunning
+            val requeued = requeueWithFile(
+                failed.copy(title = title, trackId = trackId ?: failed.trackId, awaitRemoteUrl = remoteUrl ?: failed.awaitRemoteUrl,
+                    endpoint = endpoint, skipTranslate = skipTranslate, model = model),
+                fingerprint, file.absolutePath, submission,
             )
-            kick.trySend(Unit)
-            return WhisperStart.Started
+            return if (requeued) WhisperStart.Started else WhisperStart.AlreadyRunning
         }
-        db.whisper().insert(uploadJob(title, fingerprint, trackId, file.absolutePath, remoteUrl, endpoint, skipTranslate, model))
-        kick.trySend(Unit)
+        submission.enqueueTranscription {
+            db.whisper().insert(uploadJob(title, fingerprint, trackId, file.absolutePath, remoteUrl, endpoint, skipTranslate, model)
+                .copy(forceRegenerate = true.takeIf { forceRegenerate }))
+        }
         return WhisperStart.Started
     }
 
@@ -551,6 +728,7 @@ class WhisperCenter internal constructor(
                 awaitRemoteUrl = remoteUrl,
                 endpoint = endpoint,
                 model = model,
+                createdAt = System.currentTimeMillis(),
             ),
         )
     }
@@ -565,13 +743,15 @@ class WhisperCenter internal constructor(
         endpoint: String?,
         skipTranslate: Boolean,
         model: String,
+        submission: Submission,
     ): Boolean {
         val covered = prior.any {
             it.status != DownloadStatus.FAILED && covers(it, trackId, remoteUrl, file.absolutePath)
         }
         if (covered) return false
-        db.whisper().insert(uploadJob(title, fingerprint, trackId, file.absolutePath, remoteUrl, endpoint, skipTranslate, model))
-        kick.trySend(Unit)
+        submission.enqueueTranscription {
+            db.whisper().insert(uploadJob(title, fingerprint, trackId, file.absolutePath, remoteUrl, endpoint, skipTranslate, model))
+        }
         return true
     }
 
@@ -678,7 +858,18 @@ class WhisperCenter internal constructor(
     private suspend fun drain() = pumpTasks(kick,
         load = {
             adoptFinishedDownloads()
-            db.whisper().pendingWork().map { SubtitleWork(it, it.status == DownloadStatus.DONE) }
+            subtitles.generatedWriteLock.withLock {
+                // An existing worker can take over submissions made while it is draining.
+                val pending = db.whisper().pendingWork()
+                pendingHandoff.clear()
+                pending.mapNotNull { job ->
+                    when {
+                        job.status == DownloadStatus.QUEUED || job.status == DownloadStatus.RUNNING -> SubtitleWork(job, false)
+                        job.translateStatus == TranslateMark.QUEUED -> SubtitleWork(job, true)
+                        else -> null
+                    }
+                }
+            }
         },
         key = { it.job.id to it.translate },
         canStart = { work, pending, running ->
@@ -687,35 +878,59 @@ class WhisperCenter internal constructor(
                     pending.none { it.translate && it.job.fingerprint == work.job.fingerprint } &&
                     running.none { it.translate && it.job.fingerprint == work.job.fingerprint }))
         },
-        execute = { work ->
-            val job = work.job
-            val self = coroutineContext[Job]!!
-            val registry = if (work.translate) translationRunners else runners
-            registry[job.id] = self
-            try {
-                if (work.translate) translateWritten(job) else runJob(job)
-            } catch (cancelled: CancellationException) {
-                val reason = coroutineContext.cancellationCause() ?: cancelled
-                withContext(NonCancellable) {
-                    val message = (reason as? SubtitleTaskStopped)?.persistedError ?: PersistedErrors.CANCELLED
-                    subtitles.generatedWriteLock.withLock { abandonIfNeeded(job.id, message) }
-                }
-                throw cancelled
-            } catch (_: Exception) {
-                subtitles.generatedWriteLock.withLock {
-                    abandonIfNeeded(job.id, appContext.getString(
-                        if (work.translate) R.string.whisper_translate_failed else R.string.whisper_generate_failed,
-                    ))
-                }
-            } finally {
-                registry.remove(job.id, self)
-                withContext(NonCancellable) {
-                    progress.finishFromDb(TaskKey(TaskKind.WHISPER, job.id), if (work.translate) ProgressPart.TRANSLATION else ProgressPart.TRANSCRIPTION)
+        execute = ::runWork,
+    )
+
+    private suspend fun runWork(work: SubtitleWork) {
+        val id = work.job.id
+        val self = coroutineContext[Job]!!
+        val registry = if (work.translate) translationRunners else runners
+        val part = if (work.translate) ProgressPart.TRANSLATION else ProgressPart.TRANSCRIPTION
+        val (job, attempt) = subtitles.generatedWriteLock.withLock {
+            val current = db.whisper().get(id) ?: return
+            val eligible = if (work.translate) current.translateStatus == TranslateMark.QUEUED else {
+                (current.status == DownloadStatus.QUEUED || current.status == DownloadStatus.RUNNING) &&
+                    current.fingerprint.isNotBlank() && current.localPath != null
+            }
+            if (!eligible || registry.containsKey(id)) return
+            pendingHandoff.remove(id)
+            val token = if (work.translate) activeTranslationAttempt.getOrPut(id) { attemptCounter.incrementAndGet() } else null
+            registry[id] = self
+            current to token
+        }
+        try {
+            if (attempt != null) translateWritten(job, attempt) else runJob(job)
+        } catch (cancelled: CancellationException) {
+            val reason = coroutineContext.cancellationCause() ?: cancelled
+            val message = (reason as? SubtitleTaskStopped)?.persistedError ?: PersistedErrors.CANCELLED
+            withContext(NonCancellable) {
+                subtitles.generatedWriteLock.withLock { abandonIfNeeded(id, attempt, message) }
+            }
+            throw cancelled
+        } catch (_: Exception) {
+            subtitles.generatedWriteLock.withLock {
+                abandonIfNeeded(id, attempt, appContext.getString(
+                    if (work.translate) R.string.whisper_translate_failed else R.string.whisper_generate_failed,
+                ))
+            }
+        } finally {
+            withContext(NonCancellable) {
+                try {
+                    subtitles.generatedWriteLock.withLock {
+                        if (attempt == null || activeTranslationAttempt[id] == attempt) {
+                            progress.finishFromDb(TaskKey(TaskKind.WHISPER, id), part)
+                        }
+                    }
                     sweepStaged()
+                } finally {
+                    subtitles.generatedWriteLock.withLock {
+                        registry.remove(id, self)
+                        if (attempt != null) activeTranslationAttempt.remove(id, attempt)
+                    }
                 }
             }
-        },
-    )
+        }
+    }
 
     private suspend fun stillActive(id: Long): Boolean {
         coroutineContext.ensureActive()
@@ -723,13 +938,12 @@ class WhisperCenter internal constructor(
         return current.status == DownloadStatus.QUEUED || current.status == DownloadStatus.RUNNING
     }
 
-    private suspend fun abandonIfNeeded(id: Long, message: String) {
-        val current = db.whisper().get(id) ?: return
-        when {
-            current.status == DownloadStatus.QUEUED || current.status == DownloadStatus.RUNNING ->
-                db.whisper().fail(id, message)
-            TranslateMark.isActive(current.translateStatus) ->
-                db.whisper().failTranslateIfUnpublished(id, message)
+    private suspend fun abandonIfNeeded(id: Long, attempt: Long?, message: String) {
+        if (attempt != null) {
+            if (activeTranslationAttempt[id] == attempt) db.whisper().failTranslateIfUnpublished(id, message)
+        } else {
+            val current = db.whisper().get(id) ?: return
+            if (current.status == DownloadStatus.QUEUED || current.status == DownloadStatus.RUNNING) db.whisper().fail(id, message)
         }
     }
 
@@ -864,6 +1078,7 @@ class WhisperCenter internal constructor(
     private fun jobCredentialModel(job: WhisperJobEntity): String? = knownWhisperModel(job.model)
 
     private suspend fun finishFromExisting(job: WhisperJobEntity): Boolean {
+        if (job.forceRegenerate == true) return false
         val requested = knownWhisperModel(job.model) ?: return false
         val latestDone = db.whisper().forFingerprint(job.fingerprint).lastOrNull {
             it.id != job.id && it.status == DownloadStatus.DONE
@@ -890,18 +1105,32 @@ class WhisperCenter internal constructor(
     /** 在字幕写入锁内登记识别完成，随后在锁外执行网络翻译。 */
     private suspend fun finishTranscription(job: WhisperJobEntity): Boolean {
         if (!stillActive(job.id)) return false
-        if (job.skipTranslate == true || !translator.readyToTranslate(job.fingerprint)) {
-            db.whisper().finishIfActive(job.id)
-            return false
+        // 用户在这次生成之前关闭或改选过字幕时，新结果应重新可见；请求之后的手动选择优先。
+        // 关联写入失败不应连累已经保存的字幕，任务照常完成。
+        val switched = try {
+            job.trackId?.takeIf { it > 0L }
+                ?.let { subtitleBindings?.bindGeneratedIfOlder(it, job.createdAt) == true } == true
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            false
         }
-        return translator.queueGenerated(job.id, job.fingerprint)
+        val queued = if (job.skipTranslate == true || !translator.readyToTranslate(job.fingerprint)) {
+            db.whisper().finishIfActive(job.id)
+            false
+        } else {
+            translator.queueGenerated(job.id, job.fingerprint)
+        }
+        // publishCues 自己会刷新；复用/续跑路径（finishWritten）只能靠这里通知界面。
+        if (switched) subtitles.invalidate()
+        return queued
     }
 
-    private suspend fun translateWritten(job: WhisperJobEntity) {
+    private suspend fun translateWritten(job: WhisperJobEntity, attempt: Long) {
         val failure = translator.applyGenerated(job.id, job.fingerprint)
         if (failure == null) return
-        if (TranslateMark.isActive(db.whisper().get(job.id)?.translateStatus)) {
-            db.whisper().failTranslateIfUnpublished(job.id, failure)
+        subtitles.generatedWriteLock.withLock {
+            if (activeTranslationAttempt[job.id] == attempt) db.whisper().failTranslateIfUnpublished(job.id, failure)
         }
     }
 
@@ -913,9 +1142,11 @@ class WhisperCenter internal constructor(
             if (!stillActive(job.id)) return
             reporters[job.id]?.subtitles(cues.size)
             reporters[job.id]?.phase(ProgressPhase.SAVING_SUBTITLES)
-            cueFile(job.fingerprint).writeTextAtomically(payload)
-            finishTranscription(job)
-            subtitles.invalidate()
+            withContext(NonCancellable) {
+                cueFile(job.fingerprint).writeTextAtomically(payload)
+                finishTranscription(job)
+                subtitles.invalidate()
+            }
         }
         kick.trySend(Unit)
     }
@@ -924,10 +1155,6 @@ class WhisperCenter internal constructor(
         val safe = fingerprint.lowercase().filter { it in '0'..'9' || it in 'a'..'f' }
         return File(File(appContext.filesDir, "subtitles"), "$safe.json")
     }
-
-    private fun QueuedTrack.whisperRemoteIdentity(): String? =
-        if (source == TrackSource.JAPANESE_ASMR) jaAudioIdentity()
-        else remoteUrl?.takeIf { it.isNotBlank() && (source != TrackSource.BILIBILI || it.startsWith("/")) }
 
     private suspend fun materialize(path: String?): File? {
         if (path.isNullOrBlank()) return null
@@ -940,9 +1167,11 @@ class WhisperCenter internal constructor(
         return file?.takeIf { it.isFile }
     }
 
+    internal fun stagedFilePath(contentUri: String): String = stagedFilePath(appContext.filesDir, contentUri)
+
     private suspend fun stageContent(path: String): File? {
-        val dest = File(stagedRoot, path.hashCode().toUInt().toString(16))
-        val key = dest.absolutePath
+        val key = stagedFilePath(path)
+        val dest = File(key)
         holdStaged(key)
         var rewriting = false
         try {
@@ -1049,6 +1278,7 @@ class WhisperCenter internal constructor(
             endpoint = effectiveWhisperBase(model, credentials.whisperBaseUrl(model)),
             skipTranslate = skipTranslate,
             model = model,
+            createdAt = System.currentTimeMillis(),
         )
 
     private fun uploadJob(
@@ -1073,6 +1303,7 @@ class WhisperCenter internal constructor(
         endpoint = endpoint,
         skipTranslate = skipTranslate,
         model = model,
+        createdAt = System.currentTimeMillis(),
     )
 
     private suspend fun sha256(file: File): String {

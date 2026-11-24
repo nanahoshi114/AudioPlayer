@@ -169,7 +169,7 @@ fun BiliVideoScreen(folderId: Long, onBack: () -> Unit, viewModel: BiliVideoView
         onPick = { pickingPlaylist = false; viewModel.addToPlaylist(it) }, onDismiss = { pickingPlaylist = false })
     if (removing) AlertDialog(onDismissRequest = { removing = false }, title = { Text(stringResource(R.string.library_remove_from_library)) },
         text = { Text(stringResource(R.string.bilibili_remove_video_message)) },
-        confirmButton = { TextButton(onClick = { removing = false; viewModel.remove() }) { Text(stringResource(R.string.common_remove)) } },
+        confirmButton = { TextButton(onClick = { removing = false; viewModel.remove() }) { Text(stringResource(R.string.common_remove), color = MaterialTheme.colorScheme.error) } },
         dismissButton = { TextButton(onClick = { removing = false }) { Text(stringResource(R.string.common_cancel)) } })
     viewModel.pendingDelete?.let { pending ->
         com.nanahoshi.audioplayer.ui.components.DeleteAudioDialog(

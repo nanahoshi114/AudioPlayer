@@ -3,13 +3,14 @@ package com.nanahoshi.audioplayer.ui.components
 import com.nanahoshi.audioplayer.R
 import androidx.compose.ui.res.stringResource
 
+import androidx.compose.animation.rememberSplineBasedDecay
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyListState
@@ -36,16 +37,22 @@ internal fun WorkFileBrowser(
     BoxWithConstraints(modifier) {
         val pageHeight = maxHeight
         val page = rememberScrollState()
-        val connection = remember(page, state) { WorkPageScrollConnection(page, state) }
+        val decay = rememberSplineBasedDecay<Float>()
+        val connection = remember(page, state, decay) { WorkPageScrollConnection(page, state, decay) }
         Column(Modifier.fillMaxSize().verticalScroll(page)) {
             header()
-            Column(Modifier.fillMaxWidth().height(pageHeight).nestedScroll(connection)) {
+            Column(Modifier.fillMaxWidth().heightIn(max = pageHeight)) {
                 controls()
                 if (loading) {
-                    LoadingState(stringResource(R.string.stored_loading), Modifier.weight(1f))
+                    LoadingState(stringResource(R.string.stored_loading), Modifier.weight(1f).fillMaxWidth())
                 } else {
-                    LazyColumn(state = state, modifier = Modifier.fillMaxWidth().weight(1f),
-                        contentPadding = bottomPadding, content = files)
+                    LazyColumn(
+                        state = state,
+                        modifier = Modifier.fillMaxWidth().weight(1f, fill = false).nestedScroll(connection),
+                        contentPadding = bottomPadding,
+                        flingBehavior = connection.fileFlingBehavior,
+                        content = files,
+                    )
                 }
             }
         }

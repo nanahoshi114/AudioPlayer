@@ -15,7 +15,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,13 +29,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyItemScope
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.key
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Download
@@ -44,7 +45,6 @@ import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
@@ -62,6 +62,7 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
@@ -69,8 +70,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -83,18 +82,22 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.nanahoshi.audioplayer.ui.components.EmptyState
 import com.nanahoshi.audioplayer.ui.components.DeleteAudioDialog
-import com.nanahoshi.audioplayer.ui.components.LabelBadge
+import com.nanahoshi.audioplayer.ui.components.FileToTrackSubtitleSheet
 import com.nanahoshi.audioplayer.ui.components.LoadingState
-import com.nanahoshi.audioplayer.ui.components.LocalTopBarOverride
+import com.nanahoshi.audioplayer.ui.components.SearchField
 import com.nanahoshi.audioplayer.ui.components.SelectionAction
 import com.nanahoshi.audioplayer.ui.components.SelectionTopBar
 import com.nanahoshi.audioplayer.ui.components.SourceBadge
+import com.nanahoshi.audioplayer.ui.components.TopBarOverride
+import com.nanahoshi.audioplayer.ui.components.TrackSubtitlePickerSheet
+import com.nanahoshi.audioplayer.data.isSubtitleFile
 import com.nanahoshi.audioplayer.ui.theme.LocalReduceMotion
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -109,12 +112,13 @@ import com.nanahoshi.audioplayer.data.db.LibraryFileEntity
 import com.nanahoshi.audioplayer.data.db.TrackEntity
 import com.nanahoshi.audioplayer.ui.CoverImage
 import com.nanahoshi.audioplayer.ui.CollapsingTop
-import com.nanahoshi.audioplayer.ui.asmr.WorkFactsBlock
+import com.nanahoshi.audioplayer.ui.canCollapseHeader
 import com.nanahoshi.audioplayer.ui.formatDuration
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun LibraryScreen(
+    topBarOwnerKey: String,
     onOpenPreview: (Long) -> Unit,
     onOpenLibraryWork: (Long) -> Unit,
     onOpenBiliVideo: (Long) -> Unit,
@@ -122,9 +126,7 @@ fun LibraryScreen(
     onVerifyJaDownload: (String) -> Unit = {},
     viewModel: LibraryViewModel = viewModel(),
 ) {
-    val listing by viewModel.listing.collectAsStateWithLifecycle(LibraryListing(emptyList(), emptyList()))
-    val folders = listing.folders
-    val entries = listing.entries
+    val loaded by viewModel.listing.collectAsStateWithLifecycle(null)
     val sort by viewModel.sort.collectAsStateWithLifecycle()
     val sourceFilter by viewModel.sourceFilter.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
@@ -133,15 +135,23 @@ fun LibraryScreen(
     val biliAuthors by viewModel.biliAuthors.collectAsStateWithLifecycle()
     val currentFolder by viewModel.currentFolder.collectAsStateWithLifecycle(null)
     val folderId by viewModel.currentFolderId.collectAsStateWithLifecycle()
+    val listKey = libraryListKey(folderId, sourceFilter, searchQuery)
+    val listing = loaded?.takeIf { it.key == listKey }?.listing
+    val folders = listing?.folders.orEmpty()
+    val entries = listing?.entries.orEmpty()
+    val isEmpty = listing != null && folders.isEmpty() && entries.isEmpty()
     val cachePrompt by viewModel.cachePrompt.collectAsStateWithLifecycle()
     val pendingAudioDelete by viewModel.pendingAudioDelete.collectAsStateWithLifecycle()
     val selectedTracks by viewModel.selectedTrackIds.collectAsStateWithLifecycle()
     val selectedFolders by viewModel.selectedFolderIds.collectAsStateWithLifecycle()
-    val selecting = selectedTracks.isNotEmpty() || selectedFolders.isNotEmpty()
-    val selectedLocalRemoval by viewModel.selectedLocalRemoval.collectAsStateWithLifecycle()
+    val selectedFiles by viewModel.selectedFileIds.collectAsStateWithLifecycle()
     val workFileSource by viewModel.workFileSource.collectAsStateWithLifecycle()
-    val removalSelection = LibraryViewModel.LocalRemovalSelection(selectedTracks, selectedFolders, workFileSource)
-    val removalTargets = selectedLocalRemoval?.takeIf { it.first == removalSelection }?.second
+    val audioSelection by viewModel.hasSelectedAudio.collectAsStateWithLifecycle()
+    val hasSelectedAudio = audioSelection == LibraryViewModel.AudioSelection(selectedTracks, selectedFolders, workFileSource)
+    val selecting = selectedTracks.isNotEmpty() || selectedFolders.isNotEmpty() || selectedFiles.isNotEmpty()
+    val selectedLocalRemoval by viewModel.selectedLocalRemoval.collectAsStateWithLifecycle()
+    val removalSelection = LibraryViewModel.LocalRemovalSelection(selectedTracks, selectedFolders, selectedFiles, workFileSource)
+    val removalPlan = selectedLocalRemoval?.takeIf { it.first == removalSelection }?.second
     val context = LocalContext.current
     var menuOpen by remember { mutableStateOf(false) }
     var pickingPlaylist by remember { mutableStateOf(false) }
@@ -150,10 +160,15 @@ fun LibraryScreen(
     var confirmFolderDelete by remember { mutableStateOf<Long?>(null) }
     var recognizeFolder by remember { mutableStateOf<Long?>(null) }
     var recognizeCode by remember { mutableStateOf("") }
+    var importKeepStructure by rememberSaveable { mutableStateOf(true) }
+    var confirmTrackDelete by remember { mutableStateOf<TrackEntity?>(null) }
+    var confirmFileDelete by remember { mutableStateOf<LibraryFileEntity?>(null) }
+    var bindingTrack by remember { mutableStateOf<TrackEntity?>(null) }
+    var bindingSubtitleFile by remember { mutableStateOf<LibraryFileEntity?>(null) }
 
     val removalPolicy by viewModel.removalPolicy.collectAsStateWithLifecycle()
     val canRemoveSelection by viewModel.canRemoveSelection.collectAsStateWithLifecycle()
-    val listState = viewModel.listState(folderId, listing.browsing)
+    val listState = viewModel.listState(listKey)
     val fabExpanded by remember(listState) {
         derivedStateOf { listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset < 48 }
     }
@@ -162,42 +177,34 @@ fun LibraryScreen(
         currentFolderId = { viewModel.currentFolderId.value },
         up = viewModel::up,
     )
-    val topBar = LocalTopBarOverride.current
-    DisposableEffect(Unit) {
-        onDispose { topBar?.value = null }
-    }
     if (selecting) {
-        val selectedCount = selectedTracks.size + selectedFolders.size
+        val selectedCount = selectedTracks.size + selectedFolders.size + selectedFiles.size
         // 选中了作品时，播放和加入列表的键都收起来，作品要进作品页再操作。
         val selectsWork = folders.any { it.id in selectedFolders && (!it.asmrSourceId.isNullOrBlank() || it.biliBvid != null) }
-        SideEffect {
-            topBar?.value = {
-                SelectionTopBar(
-                    count = selectedCount,
-                    onClose = viewModel::clearSelection,
-                    actions = buildList {
-                        if (!selectsWork) {
-                            add(SelectionAction(context.getString(R.string.library_play_next), Icons.Default.SkipNext, viewModel::playNextSelection))
-                            add(SelectionAction(context.getString(R.string.library_add_queue), Icons.AutoMirrored.Filled.PlaylistAdd, viewModel::appendSelection))
-                            add(SelectionAction(context.getString(R.string.library_download_selected), Icons.Default.Download, viewModel::downloadSelection))
-                            add(
-                                SelectionAction(context.getString(R.string.library_add_playlist), Icons.AutoMirrored.Filled.QueueMusic, {
-                                    if (playlists.isEmpty()) viewModel.note(context.getString(R.string.library_create_playlist_first)) else pickingPlaylist = true
-                                }),
-                            )
-                        }
-                        if (removalTargets != null) {
-                            add(SelectionAction(context.getString(removalTargets.labelRes), Icons.Default.Delete, {
-                                viewModel.deleteDownloadedSelection(removalSelection, removalTargets)
-                            }, destructive = true))
-                        }
-                        if (canRemoveSelection) add(SelectionAction(context.getString(R.string.library_remove_from_library), Icons.Default.Delete, { confirmDelete = true }, destructive = true))
-                    },
-                )
-            }
+        TopBarOverride(topBarOwnerKey) {
+            SelectionTopBar(
+                count = selectedCount,
+                onClose = viewModel::clearSelection,
+                actions = buildList {
+                    if (!selectsWork && hasSelectedAudio) {
+                        add(SelectionAction(context.getString(R.string.library_play_next), Icons.Default.SkipNext, viewModel::playNextSelection))
+                        add(SelectionAction(context.getString(R.string.library_add_queue), Icons.AutoMirrored.Filled.PlaylistAdd, viewModel::appendSelection))
+                        add(SelectionAction(context.getString(R.string.library_download_selected), Icons.Default.Download, viewModel::downloadSelection))
+                        add(
+                            SelectionAction(context.getString(R.string.library_add_playlist), Icons.AutoMirrored.Filled.QueueMusic, {
+                                if (playlists.isEmpty()) viewModel.note(context.getString(R.string.library_create_playlist_first)) else pickingPlaylist = true
+                            }),
+                        )
+                    }
+                    if (removalPlan != null) {
+                        add(SelectionAction(context.getString(removalPlan.labelRes), Icons.Default.Delete, {
+                            viewModel.deleteDownloadedSelection(removalSelection, removalPlan)
+                        }, destructive = true))
+                    }
+                    if (canRemoveSelection) add(SelectionAction(context.getString(R.string.library_remove_from_library), Icons.Default.Delete, { confirmDelete = true }, destructive = true))
+                },
+            )
         }
-    } else {
-        SideEffect { topBar?.value = null }
     }
     androidx.compose.runtime.LaunchedEffect(currentFolder?.id, currentFolder?.name) {
         trail = libraryTrail(trail, currentFolder)
@@ -221,41 +228,53 @@ fun LibraryScreen(
 
     Box(Modifier.fillMaxSize()) {
     CollapsingTop(
+        resetKey = folderId,
+        isEmpty = isEmpty,
+        canCollapse = { collapsedPx ->
+            listing == null || listState.canCollapseHeader(collapsedPx)
+        },
         header = {
-            OutlinedTextField(
+            SearchField(
                 value = searchQuery,
                 onValueChange = viewModel::updateSearch,
-                placeholder = { Text(stringResource(if (folderId == null) R.string.library_search_hint_root else R.string.library_search_hint_folder)) },
-                trailingIcon = if (folderId != null) ({ LibrarySortMenu(sort) { if (sort != it) viewModel.toggleSort() } }) else null,
-                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                singleLine = true,
-                shape = RoundedCornerShape(28.dp),
+                placeholder = stringResource(if (folderId == null) R.string.library_search_hint_root else R.string.library_search_hint_folder),
+                trailing = if (folderId != null) ({ LibrarySortMenu(sort) { if (sort != it) viewModel.toggleSort() } }) else null,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
             )
-            if (folderId == null) Row(
-                Modifier.fillMaxWidth().padding(horizontal = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+            if (folderId == null) {
+                val filters = listOf(
+                    LibrarySourceFilter.ALL to stringResource(R.string.library_filter_all),
+                    LibrarySourceFilter.BILIBILI to stringResource(R.string.library_filter_bilibili),
+                    LibrarySourceFilter.YOUTUBE to "YouTube",
+                    LibrarySourceFilter.ASMR to stringResource(R.string.library_filter_online),
+                    LibrarySourceFilter.LOCAL to stringResource(R.string.library_filter_local),
+                )
                 Row(
-                    Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                    Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    listOf(
-                        LibrarySourceFilter.ALL to stringResource(R.string.library_filter_all),
-                        LibrarySourceFilter.BILIBILI to stringResource(R.string.library_filter_bilibili),
-                        LibrarySourceFilter.YOUTUBE to "YouTube",
-                        LibrarySourceFilter.ASMR to stringResource(R.string.library_filter_online),
-                        LibrarySourceFilter.LOCAL to stringResource(R.string.library_filter_local),
-                    ).forEach { (filter, label) ->
-                        FilterChip(
-                            selected = sourceFilter == filter && searchQuery.isBlank(),
-                            onClick = { viewModel.setSourceFilter(filter) },
-                            label = { Text(label) },
-                            modifier = Modifier.padding(end = 8.dp),
-                        )
+                    LazyRow(
+                        Modifier.weight(1f),
+                        contentPadding = PaddingValues(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        items(filters, key = { it.first.name }) { (filter, label) ->
+                            FilterChip(
+                                selected = sourceFilter == filter,
+                                onClick = { viewModel.setSourceFilter(filter) },
+                                label = {
+                                    Text(
+                                        label,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                },
+                            )
+                        }
                     }
+                    LibrarySortMenu(sort) { if (sort != it) viewModel.toggleSort() }
                 }
-                LibrarySortMenu(sort) { if (sort != it) viewModel.toggleSort() }
             }
         },
         pinned = {
@@ -263,14 +282,16 @@ fun LibraryScreen(
                 onRoot = { climb(trail.size) }, onCrumb = { climb(trail.lastIndex - it) })
         },
     ) { topInset ->
-        if (folders.isEmpty() && entries.isEmpty()) {
+        if (listing == null) {
+            Box(topInset.fillMaxSize(), contentAlignment = Alignment.Center) { LoadingState() }
+        } else if (isEmpty) {
             Box(topInset.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
                 when {
-                    !listing.browsing -> EmptyState(
+                    listKey.isSearching -> EmptyState(
                         title = stringResource(R.string.library_empty_search_title),
                         message = stringResource(R.string.library_empty_search_message),
                     )
-                    currentFolder == null -> EmptyState(
+                    folderId == null -> EmptyState(
                         title = stringResource(R.string.library_empty_root_title),
                         message = stringResource(R.string.library_empty_root_message),
                     )
@@ -281,7 +302,7 @@ fun LibraryScreen(
                 }
             }
         } else {
-            key(if (listing.browsing) "folder:${folderId ?: "root"}" else "flat") {
+            key(listKey) {
             LazyColumn(
                 topInset.fillMaxSize(),
                 state = listState,
@@ -343,6 +364,7 @@ fun LibraryScreen(
                                 onDownload = if (
                                     track.source == TrackSource.ASMR ||
                                     track.source == TrackSource.DLSITE ||
+                                    track.source == TrackSource.JAPANESE_ASMR ||
                                     (track.source == TrackSource.BILIBILI || track.source == TrackSource.YOUTUBE)
                                 ) {
                                     { viewModel.downloadTrack(track) }
@@ -352,21 +374,33 @@ fun LibraryScreen(
                                 onDeleteDownloaded = if (
                                     track.source == TrackSource.ASMR ||
                                     track.source == TrackSource.DLSITE ||
+                                    track.source == TrackSource.JAPANESE_ASMR ||
                                     (track.source == TrackSource.BILIBILI || track.source == TrackSource.YOUTUBE)
                                 ) {
                                     { viewModel.deleteDownloadedTrack(track) }
                                 } else {
                                     null
                                 },
-                                onDelete = if (removalPolicy?.canRemoveEntry(track.folderId) == true) ({ viewModel.deleteTrack(track.id) }) else null,
+                                onDelete = if (removalPolicy?.canRemoveEntry(track.folderId) == true) ({ confirmTrackDelete = track }) else null,
+                                onBindSubtitle = { bindingTrack = track },
                             )
                         }
-                        is LibraryEntry.File -> FileRow(
-                            modifier = libraryMotionModifier(),
-                            file = entry.file,
-                            onClick = { onOpenPreview(entry.file.id) },
-                            onDelete = if (removalPolicy?.canRemoveEntry(entry.file.folderId) == true) ({ viewModel.deleteFile(entry.file.id) }) else null,
-                        )
+                        is LibraryEntry.File -> {
+                            val file = entry.file
+                            FileRow(
+                                modifier = libraryMotionModifier(),
+                                file = file,
+                                onClick = {
+                                    if (selecting) viewModel.toggleFile(file.id) else onOpenPreview(file.id)
+                                },
+                                onDelete = if (removalPolicy?.canRemoveEntry(file.folderId) == true) ({ confirmFileDelete = file }) else null,
+                                selecting = selecting,
+                                selected = file.id in selectedFiles,
+                                onLongClick = { viewModel.beginSelection(fileId = file.id) },
+                                onBindSubtitle = if (isSubtitleFile(file.name)) ({ bindingSubtitleFile = file }) else null,
+                                onDeleteDownloaded = { viewModel.deleteDownloadedFile(file) },
+                            )
+                        }
                     }
                 }
             }
@@ -393,6 +427,7 @@ fun LibraryScreen(
                     text = { Text(stringResource(R.string.library_import_folder)) },
                     onClick = {
                         menuOpen = false
+                        importKeepStructure = true
                         openFolder.launch(null)
                     },
                 )
@@ -467,25 +502,38 @@ fun LibraryScreen(
         AlertDialog(
             onDismissRequest = { pendingTree = null },
             title = { Text(stringResource(R.string.library_import_folder_title)) },
-            text = { Text(stringResource(R.string.library_import_folder_help)) },
+            text = {
+                Column {
+                    Text(stringResource(R.string.library_import_folder_help))
+                    Column(Modifier.padding(top = 8.dp)) {
+                        ImportModeRow(
+                            label = stringResource(R.string.library_import_keep_structure),
+                            selected = importKeepStructure,
+                            onClick = { importKeepStructure = true },
+                        )
+                        ImportModeRow(
+                            label = stringResource(R.string.library_import_audio_only),
+                            selected = !importKeepStructure,
+                            onClick = { importKeepStructure = false },
+                        )
+                    }
+                }
+            },
             confirmButton = {
                 TextButton(onClick = {
                     pendingTree = null
-                    viewModel.importFolder(uri, keepStructure = true)
-                }) { Text(stringResource(R.string.library_import_keep_structure)) }
+                    viewModel.importFolder(uri, keepStructure = importKeepStructure)
+                }) { Text(stringResource(R.string.library_import)) }
             },
             dismissButton = {
-                TextButton(onClick = {
-                    pendingTree = null
-                    viewModel.importFolder(uri, keepStructure = false)
-                }) { Text(stringResource(R.string.library_import_audio_only)) }
+                TextButton(onClick = { pendingTree = null }) { Text(stringResource(R.string.common_cancel)) }
             },
         )
     }
 
     if (confirmDelete) {
         ConfirmRemoveDialog(
-            message = stringResource(R.string.library_remove_selection_message, selectedTracks.size + selectedFolders.size),
+            message = stringResource(R.string.library_remove_selection_message, selectedTracks.size + selectedFolders.size + selectedFiles.size),
             onConfirm = {
                 confirmDelete = false
                 viewModel.deleteSelection()
@@ -505,13 +553,57 @@ fun LibraryScreen(
         )
     }
 
+    confirmTrackDelete?.let { track ->
+        ConfirmRemoveDialog(
+            message = stringResource(R.string.library_remove_track_message, track.title),
+            onConfirm = {
+                confirmTrackDelete = null
+                viewModel.deleteTrack(track.id)
+            },
+            onDismiss = { confirmTrackDelete = null },
+        )
+    }
+
+    confirmFileDelete?.let { file ->
+        ConfirmRemoveDialog(
+            message = stringResource(R.string.library_remove_file_message, file.name),
+            onConfirm = {
+                confirmFileDelete = null
+                viewModel.deleteFile(file.id)
+            },
+            onDismiss = { confirmFileDelete = null },
+        )
+    }
+
     pendingAudioDelete?.let { pending ->
         DeleteAudioDialog(
-            itemCount = pending.targets.downloads.size,
-            associationCount = pending.targets.associations.size,
-            subtitleCount = pending.subtitles,
+            itemCount = pending.audioCount,
+            associationCount = pending.associationCount,
+            otherFileCount = pending.otherFileCount,
+            workSubtitleCount = pending.workSubtitleCount,
+            subtitleCount = pending.generatedSubtitleCount,
+            customSubtitleCount = pending.customSubtitleCount,
             onConfirm = viewModel::confirmAudioDelete,
             onCancel = viewModel::cancelAudioDelete,
+        )
+    }
+
+    bindingTrack?.let { track ->
+        TrackSubtitlePickerSheet(
+            track = track,
+            trackTitle = track.title,
+            actions = viewModel.subtitlePickerActions,
+            onDismiss = { bindingTrack = null },
+        )
+    }
+
+    bindingSubtitleFile?.let { file ->
+        FileToTrackSubtitleSheet(
+            file = file,
+            loadTracks = { viewModel.listWorkTracksForSubtitle(file) },
+            onBindTrack = { track -> viewModel.bindSubtitleFileToTrack(file, track) },
+            onDismiss = { bindingSubtitleFile = null },
+            onError = { viewModel.showMessage(com.nanahoshi.audioplayer.R.string.library_operation_failed) },
         )
     }
 }
@@ -527,7 +619,7 @@ internal fun persistRead(context: Context, uri: Uri) {
     }
 }
 
-private class OpenPersistableDocument : ActivityResultContracts.OpenDocument() {
+internal class OpenPersistableDocument : ActivityResultContracts.OpenDocument() {
     override fun createIntent(context: Context, input: Array<String>): Intent =
         super.createIntent(context, input).addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
 }
@@ -538,18 +630,51 @@ internal class OpenPersistableTree : ActivityResultContracts.OpenDocumentTree() 
 }
 
 @Composable
+private fun ImportModeRow(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .selectable(selected = selected, onClick = onClick, role = Role.RadioButton),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioButton(selected = selected, onClick = null)
+        Text(label, modifier = Modifier.padding(start = 8.dp))
+    }
+}
+
+@Composable
 private fun LibrarySortMenu(sort: LibrarySort, onChoose: (LibrarySort) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
     Box {
         IconButton(onClick = { expanded = true }) {
-            Icon(
-                Icons.AutoMirrored.Filled.Sort,
-                contentDescription = stringResource(if (sort == LibrarySort.NAME) R.string.a11y_sort_name else R.string.a11y_sort_added),
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.AutoMirrored.Filled.Sort,
+                    contentDescription = stringResource(if (sort == LibrarySort.NAME) R.string.a11y_sort_name else R.string.a11y_sort_added),
+                )
+                Icon(Icons.Default.ArrowDropDown, contentDescription = null, modifier = Modifier.size(16.dp))
+            }
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            DropdownMenuItem(text = { Text(stringResource(R.string.library_sort_name)) }, onClick = { expanded = false; onChoose(LibrarySort.NAME) })
-            DropdownMenuItem(text = { Text(stringResource(R.string.library_sort_added)) }, onClick = { expanded = false; onChoose(LibrarySort.ADDED) })
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.library_sort_name)) },
+                onClick = { expanded = false; onChoose(LibrarySort.NAME) },
+                trailingIcon = {
+                    if (sort == LibrarySort.NAME) Icon(Icons.Default.Check, contentDescription = stringResource(R.string.a11y_selected))
+                },
+            )
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.library_sort_added)) },
+                onClick = { expanded = false; onChoose(LibrarySort.ADDED) },
+                trailingIcon = {
+                    if (sort == LibrarySort.ADDED) Icon(Icons.Default.Check, contentDescription = stringResource(R.string.a11y_selected))
+                },
+            )
         }
     }
 }

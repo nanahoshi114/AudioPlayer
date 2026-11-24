@@ -58,6 +58,9 @@ interface JaDownloadDao {
     @Query("SELECT * FROM japaneseasmr_download_works WHERE rj = :rj")
     suspend fun work(rj: String): JaDownloadWorkEntity?
 
+    @Query("SELECT DISTINCT fileId FROM japaneseasmr_download_entries WHERE fileId IS NOT NULL")
+    suspend fun fileIds(): List<Long>
+
     @Query("SELECT * FROM japaneseasmr_download_entries WHERE rj = :rj ORDER BY relativePath")
     suspend fun entries(rj: String): List<JaDownloadEntryEntity>
 

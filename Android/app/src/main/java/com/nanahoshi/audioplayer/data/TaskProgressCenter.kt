@@ -50,6 +50,8 @@ class TaskProgressCenter(private val db: AppDatabase) {
     fun begin(key: TaskKey, part: ProgressPart, phase: ProgressPhase = ProgressPhase.PREPARING,
               model: String? = null, platform: String? = null) = tracker.begin(key, part, phase, model, platform)
     fun reset(key: TaskKey) = tracker.reset(key)
+    fun resetPart(key: TaskKey, part: ProgressPart) = tracker.resetPart(key, part)
+    internal fun isCurrent(reporter: TaskReporter): Boolean = tracker.isCurrent(reporter.key, reporter.token)
     internal suspend fun close() { scope.coroutineContext[Job]?.cancelAndJoin() }
 
     private suspend fun persist(key: TaskKey, part: ProgressPart, value: TaskSegmentSummary, valid: () -> Boolean = { true }) {
@@ -80,10 +82,15 @@ class TaskProgressCenter(private val db: AppDatabase) {
             result = ProgressResult.INTERRUPTED, failurePhase = previous?.phase ?: phase,
             model = previous?.model, platform = previous?.platform))
     }
-    suspend fun end(reporter: TaskReporter) = finishFromDb(reporter.key, reporter.part)
+    suspend fun end(reporter: TaskReporter) {
+        if (!isCurrent(reporter)) return
+        val terminal = resultFromDb(reporter.key, reporter.part) ?: return
+        // The DB read can suspend across a retry. Finish only this reporter's attempt.
+        tracker.finish(reporter.key, reporter.token, terminal)
+    }
 
-    suspend fun finishFromDb(key: TaskKey, part: ProgressPart, force: Boolean = false) {
-        val terminal = when (key.kind) {
+    private suspend fun resultFromDb(key: TaskKey, part: ProgressPart): ProgressResult? =
+        when (key.kind) {
             TaskKind.DOWNLOAD -> db.downloads().get(key.id)?.let { job ->
                 if (part == ProgressPart.BILI_SUBTITLE) null
                 else terminalResult(job.status, job.error)
@@ -96,7 +103,10 @@ class TaskProgressCenter(private val db: AppDatabase) {
                 } else terminalResult(job.status, job.error)
             }
             TaskKind.TRANSLATION -> db.translations().get(key.id)?.let { terminalResult(it.status, it.error) }
-        } ?: return
+        }
+
+    suspend fun finishFromDb(key: TaskKey, part: ProgressPart, force: Boolean = false) {
+        val terminal = resultFromDb(key, part) ?: return
         val current = tracker.currentPart(key, part)
         if (current != null) {
             if (force) tracker.reconcile(key, part, terminal, true)

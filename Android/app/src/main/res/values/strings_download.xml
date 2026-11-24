@@ -30,6 +30,16 @@
     <string name="download_delete_ja_message">会删除任务记录和这次下载的暂存文件。已加入作品的文件会保留。</string>
     <string name="download_delete_hls_message">会删除任务记录和该任务的分片暂存。</string>
     <string name="download_delete_default_message">只删除任务记录，已下载文件会保留。</string>
+    <string name="download_delete_record">删除任务记录</string>
+    <string name="download_abandon_task">放弃任务</string>
+    <string name="download_abandon_ja_verify_message">放弃等待网页验证的整部作品下载？会删除任务记录和这次下载的暂存文件，已加入作品的文件会保留。</string>
+    <string name="download_retry_translation">重试翻译</string>
+    <string name="download_clear_completed">清除已完成</string>
+    <string name="download_clear_completed_title">清除已完成任务？</string>
+    <string name="download_clear_completed_audio_message">只清除已完成的下载任务记录，已下载的音频文件和已加入作品的内容都会保留。排队中、下载中或仍在获取 B 站字幕的任务不会被清除。</string>
+    <string name="download_clear_completed_subtitle_message">只清除已完成的字幕任务记录，生成的字幕文件和音频都会保留。排队中、进行中或等待发布的任务不会被清除。</string>
+    <string name="download_clear_completed_confirm">清除</string>
+    <string name="subtitle_stopping_retry">任务正在中止，请稍后重试</string>
 
     <!-- 任务状态 -->
     <string name="status_queued">排队</string>
@@ -92,6 +102,9 @@
     <string name="download_save_track_failed">无法保存音轨</string>
     <string name="download_no_address">这个文件没有可用的下载地址</string>
     <string name="stored_audio_tap_hint">点按播放；长按可多选、分享或删除。</string>
+    <string name="stored_subtitle_tap_hint">点按预览字幕；长按可多选、分享或删除。</string>
+    <string name="stored_preview_truncated">文件较大，只显示前面的约 512 KiB。</string>
+    <string name="stored_preview_failed">无法读取这个字幕文件。</string>
     <string name="stored_search_empty_message">清除搜索后再试。</string>
     <string name="stored_clear_search">清除搜索</string>
     <string name="status_polishing">润色中</string>

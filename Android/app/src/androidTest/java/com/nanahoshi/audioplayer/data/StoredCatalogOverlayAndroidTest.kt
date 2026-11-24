@@ -10,12 +10,19 @@ import com.nanahoshi.audioplayer.asmr.AsmrClient
 import com.nanahoshi.audioplayer.bilibili.BilibiliClient
 import com.nanahoshi.audioplayer.data.db.AppDatabase
 import com.nanahoshi.audioplayer.data.db.DownloadStatus
+import com.nanahoshi.audioplayer.data.db.FileKind
+import com.nanahoshi.audioplayer.data.db.FolderEntity
+import com.nanahoshi.audioplayer.data.db.JapaneseAsmrMediaEntity
+import com.nanahoshi.audioplayer.data.db.LibraryFileEntity
 import com.nanahoshi.audioplayer.data.db.QueuedTrack
 import com.nanahoshi.audioplayer.data.db.SubtitlePublicationEntity
 import com.nanahoshi.audioplayer.data.db.TrackEntity
+import com.nanahoshi.audioplayer.data.db.TrackSubtitleBindingEntity
+import com.nanahoshi.audioplayer.data.db.TrackSubtitleKind
 import com.nanahoshi.audioplayer.data.db.TranslateMark
 import com.nanahoshi.audioplayer.data.db.TranslationJobEntity
 import com.nanahoshi.audioplayer.data.db.WhisperJobEntity
+import com.nanahoshi.audioplayer.japaneseasmr.jaIdentity
 import com.nanahoshi.audioplayer.playback.LoadedSubtitles
 import com.nanahoshi.audioplayer.playback.SubtitleCue
 import com.nanahoshi.audioplayer.playback.SubtitleOrigin
@@ -95,12 +102,154 @@ class StoredCatalogOverlayAndroidTest {
         }
     }
 
+    @Test fun fingerprintedOverlayAndGeneratedFileAreKeptWhilePublicationIsPending() = runBlocking {
+        val root = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+            "stored-pending-${UUID.randomUUID()}").apply { mkdirs() }
+        val context = testContext(root)
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        try {
+            val subtitles = SubtitleSource(context, db, BilibiliClient(CredentialStore(context)), AsmrClient())
+            val audio = File(root, "asmr/RJ001/song.mp3").apply { parentFile?.mkdirs(); writeText("audio") }
+            val trackId = db.tracks().insert(TrackEntity(
+                source = TrackSource.ASMR, title = "song", artist = null, durationMs = 1000, coverUri = null,
+                localUri = audio.path, bvid = null, cid = null, page = null, addedAt = 0,
+            ))
+            val row = queueRow(trackId)
+            val overlay = subtitles.expectedOverlayFile(row, listOf(SubtitleCue(0, 1000, "こんにちは")))
+                .apply { parentFile?.mkdirs(); writeText("[]") }
+            val cue = subtitles.generatedFile("abc").apply { writeText("[]") }
+            val whisperId = db.whisper().insert(WhisperJobEntity(
+                title = "song", fingerprint = "abc", trackId = trackId, localPath = audio.path, remoteJobId = null,
+                status = DownloadStatus.DONE, progress = 1f, error = null, awaitRemoteUrl = null,
+            ))
+            val translationId = db.translations().insert(TranslationJobEntity(
+                title = "song", trackId = trackId, remoteUrl = null, queueItemId = row.queueItemId,
+                status = DownloadStatus.RUNNING, error = null, outputFilename = overlay.name,
+            ))
+            db.translations().stagePublication(SubtitlePublicationEntity(overlay.name, "[]", null, translationId, 1))
+            db.translations().stagePublication(SubtitlePublicationEntity(cue.name, "[]", whisperId, null, 1))
+
+            val catalog = StoredCatalog(context, db, subtitles)
+            val items = catalog.list()
+            val overlayItem = items.single { it.path == overlay.absolutePath }
+            assertEquals(trackId, overlayItem.trackId)
+            assertTrue(overlayItem.translationOverlay)
+            catalog.delete(items, deleteSubtitles = true)
+
+            assertFalse(audio.exists())
+            assertTrue(overlay.isFile)
+            assertTrue(cue.isFile)
+            assertNotNull(db.whisper().get(whisperId))
+            assertEquals(2, db.translations().pendingPublications().size)
+
+            subtitles.recoverPublications()
+            catalog.delete(listOf(overlayItem), deleteSubtitles = true)
+            assertFalse(overlay.exists())
+            assertNull(db.translations().get(translationId))
+            assertTrue(cue.isFile)
+        } finally {
+            db.close()
+            root.deleteRecursively()
+        }
+    }
+
     private fun testContext(root: File): Context = object : ContextWrapper(
         InstrumentationRegistry.getInstrumentation().targetContext,
     ) {
         override fun getFilesDir(): File = root
         override fun getApplicationContext(): Context = this
     }
+
+    private fun withSubtitleFixture(test: suspend (AppDatabase, File, SubtitleSource) -> Unit) = runBlocking {
+        val root = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+            "removable-subtitles-${UUID.randomUUID()}").apply { mkdirs() }
+        val context = testContext(root)
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        try {
+            val subtitles = SubtitleSource(context, db, BilibiliClient(CredentialStore(context)), AsmrClient())
+            test(db, root, subtitles)
+        } finally {
+            db.close()
+            root.deleteRecursively()
+        }
+    }
+
+    private suspend fun newTrack(db: AppDatabase, source: TrackSource, folderId: Long? = null): TrackEntity {
+        val id = db.tracks().insert(TrackEntity(
+            source = source, title = "song", artist = null, durationMs = 1000, coverUri = null,
+            localUri = null, bvid = null, cid = null, page = null, addedAt = 0, folderId = folderId,
+        ))
+        return checkNotNull(db.tracks().getById(id))
+    }
+
+    @Test fun removableSubtitleDetectionCountsCorruptOverlayWithoutGeneratedFile() =
+        withSubtitleFixture { db, root, subtitles ->
+            val track = newTrack(db, TrackSource.ASMR)
+            val name = checkNotNull(overlayFileName(track.id, null, null, null))
+            File(root, "subtitles/$name").apply {
+                parentFile?.mkdirs()
+                writeText("{not-json")
+            }
+            assertTrue(subtitles.hasRemovableSubtitlesForTrack(track))
+
+            val untouched = newTrack(db, TrackSource.ASMR)
+            assertFalse(subtitles.hasRemovableSubtitlesForTrack(untouched))
+        }
+
+    @Test fun removableSubtitleDetectionCountsJapaneseAsmrIdentityOverlay() =
+        withSubtitleFixture { db, root, subtitles ->
+            val folder = db.folders().insert(FolderEntity(name = "work", position = 0, asmrSourceId = "RJ123456"))
+            val track = newTrack(db, TrackSource.JAPANESE_ASMR, folder)
+            db.japaneseAsmr().upsertMedia(
+                JapaneseAsmrMediaEntity("51", "p:abc", track.id, "DIRECT", "voice", 1000, null),
+            )
+            val name = checkNotNull(overlayFileName(track.id, jaIdentity("51", "p:abc"), null, null))
+            File(root, "subtitles/$name").apply {
+                parentFile?.mkdirs()
+                writeText("[]")
+            }
+            assertTrue(subtitles.hasRemovableSubtitlesForTrack(track))
+        }
+
+    @Test fun removableSubtitleDetectionCountsCorruptAndEmptyGeneratedFiles() =
+        withSubtitleFixture { db, root, subtitles ->
+            val track = newTrack(db, TrackSource.ASMR)
+            val fingerprint = "abc123"
+            db.whisper().insert(WhisperJobEntity(
+                title = "song", fingerprint = fingerprint, trackId = track.id, localPath = null,
+                remoteJobId = null, status = DownloadStatus.DONE, progress = 1f, error = null, awaitRemoteUrl = null,
+            ))
+            val cue = subtitles.generatedFile(fingerprint).apply {
+                parentFile?.mkdirs()
+                writeText("not json")
+            }
+            assertTrue(subtitles.hasRemovableSubtitlesForTrack(track))
+
+            cue.writeText("{\"cues\":[]}")
+            assertTrue(subtitles.hasRemovableSubtitlesForTrack(track))
+
+            assertTrue(cue.delete())
+            assertFalse(subtitles.hasRemovableSubtitlesForTrack(track))
+        }
+
+    @Test fun manualBindingWithoutGeneratedFilesIsNotRemovable() =
+        withSubtitleFixture { db, root, subtitles ->
+            val folder = db.folders().insert(FolderEntity(name = "work", position = 0))
+            val srt = File(root, "work/manual.srt").apply {
+                parentFile?.mkdirs()
+                writeText("1\n00:00:01,000 --> 00:00:02,000\nはい\n")
+            }
+            val fileId = db.files().insert(LibraryFileEntity(
+                folderId = folder, name = "manual.srt", kind = FileKind.TEXT, remoteUrl = "", addedAt = 0,
+                asmrWorkId = 1, fileHash = "asmr:manual.srt", localUri = srt.path,
+            ))
+            val track = newTrack(db, TrackSource.ASMR, folder)
+            db.trackSubtitles().upsert(TrackSubtitleBindingEntity(
+                trackId = track.id, kind = TrackSubtitleKind.LIBRARY_FILE, fileId = fileId,
+                displayName = "manual.srt", updatedAt = 0,
+            ))
+            assertFalse(subtitles.hasRemovableSubtitlesForTrack(track))
+        }
 
     private fun queueRow(trackId: Long?, queueItemId: Long = 1L) = QueuedTrack(
         queueItemId = queueItemId, position = 0, trackId = trackId, source = TrackSource.ASMR,
@@ -132,7 +281,7 @@ class StoredCatalogOverlayAndroidTest {
                 status = DownloadStatus.RUNNING, error = null,
             ))
             val subtitleDir = File(root, "subtitles").apply { mkdirs() }
-            val overlay = File(subtitleDir, overlayFileName(trackId, null, null, null)!!)
+            val overlay = subtitles.expectedOverlayFile(row, source.sourceCues)
 
             // 目标被目录占用时，文件替换失败，任务仍可重新提交。
             assertTrue(overlay.mkdir())
@@ -436,7 +585,7 @@ class StoredCatalogOverlayAndroidTest {
             // 核对读不到源（模拟网络抖动/源暂时缺失）：不丢弃已完成的翻译。
             assertTrue(srt.delete())
             assertTrue(subtitles.saveTranslations(row, revised, source))
-            val overlay = File(File(root, "subtitles"), overlayFileName(trackId, null, null, null)!!)
+            val overlay = subtitles.expectedOverlayFile(row, source.sourceCues)
             assertEquals(subtitleSourceFingerprint(source.sourceCues), parseGeneratedSubtitles(overlay.readText())?.sourceFingerprint)
             // 源恢复且一致 → 译文套用；源变化 → 不套用。
             srt.writeText(originalSrt)

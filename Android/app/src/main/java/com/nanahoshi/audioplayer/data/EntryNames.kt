@@ -2,10 +2,11 @@ package com.nanahoshi.audioplayer.data
 
 import com.nanahoshi.audioplayer.asmr.AsmrNode
 import com.nanahoshi.audioplayer.data.db.FileKind
+import com.nanahoshi.audioplayer.data.db.LibraryFileEntity
 
 private val audioExtensions = setOf("mp3", "flac", "wav", "m4a", "ogg", "aac")
 private val imageExtensions = setOf("jpg", "jpeg", "png", "webp", "gif")
-private val textExtensions = setOf("txt", "lrc", "srt")
+private val textExtensions = setOf("txt", "lrc", "srt", "vtt")
 private val subtitleExtensions = setOf("lrc", "vtt", "srt")
 
 fun isSubtitleFile(name: String): Boolean = fileExtension(name) in subtitleExtensions
@@ -24,6 +25,11 @@ fun libraryFileSource(hash: String): TrackSource? = when {
     hash.isNotBlank() -> TrackSource.ASMR
     else -> null
 }
+
+fun resolveLibraryFileSource(file: LibraryFileEntity, jaFileIds: Set<Long> = emptySet()): TrackSource? =
+    if (file.id in jaFileIds || file.remoteUrl.startsWith("japaneseasmr://", ignoreCase = true)) {
+        TrackSource.JAPANESE_ASMR
+    } else libraryFileSource(file.fileHash)
 
 fun rawFileKey(hash: String?): String? {
     if (hash.isNullOrBlank()) return null

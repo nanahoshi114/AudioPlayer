@@ -42,7 +42,9 @@ fun WorkFactsBlock(
             FactLine(stringResource(R.string.work_fact_va), facts.vas.joinToString("、").ifBlank { "—" }, singleLine)
             FactLine(null, facts.sourceId.ifBlank { "—" }, singleLine)
             FactLine(stringResource(R.string.work_fact_release), facts.release.ifBlank { "—" }, singleLine)
-            FactLine(stringResource(R.string.work_fact_tags), facts.tags.joinToString("、").ifBlank { "—" }, singleLine)
+            if (facts.tags.isNotEmpty()) {
+                FactLine(stringResource(R.string.work_fact_tags), facts.tags.joinToString("、"), singleLine)
+            }
             if (!footnote.isNullOrBlank()) FactLine(null, footnote, singleLine)
         }
     }

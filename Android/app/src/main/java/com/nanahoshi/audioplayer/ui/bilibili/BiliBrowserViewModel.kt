@@ -107,12 +107,16 @@ class BiliBrowserViewModel(app: Application) : AndroidViewModel(app) {
     fun closeUploader() { collections.cancel(); uploads.cancel(); cancelParts(); uploader = null; selected = emptySet() }
     fun refreshUploader() {
         val user = uploader ?: return
+        selected = emptySet()
         if (showingCollections) collections.start { graph.bilibili.collections.catalogue(user.mid, it) }
         else uploads.start { graph.bilibili.uploaderVideos(user.mid, it) }
     }
     fun toggle(id: String) { selected = if (id in selected) selected - id else selected + id }
     fun clearSelection() { selected = emptySet() }
-    fun selectAll() { selected = if (selected.size == shownVideos.items.size) emptySet() else shownVideos.items.map { it.bvid }.toSet() }
+    fun selectAll() {
+        val ids = shownVideos.items.map { it.bvid }.toSet()
+        selected = if (ids.isNotEmpty() && ids.all { it in selected }) selected - ids else selected + ids
+    }
     fun cancelParts() { partGeneration++; partJob?.cancel(); partJob = null; resolving = false; choice = null }
 
     internal fun prepare(action: BiliAction, targets: List<BiliVideoHit>) {

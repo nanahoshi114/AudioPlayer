@@ -1,7 +1,7 @@
 package com.nanahoshi.audioplayer.dlsite
 
 import com.nanahoshi.audioplayer.data.RemoteTextPreview
-import com.nanahoshi.audioplayer.data.readRemoteTextPreview
+import com.nanahoshi.audioplayer.data.ExternalFileDownloader
 import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.data.withResponse
 
@@ -20,6 +20,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
@@ -79,6 +80,11 @@ data class SignedPlayFile(
     val url: String,
     val cookie: String,
 )
+
+internal fun isTrustedDlsitePlayHost(host: String): Boolean {
+    val h = host.lowercase()
+    return h == "dlsite.com" || h.endsWith(".dlsite.com")
+}
 
 data class DlsitePurchase(
     val workno: String,
@@ -366,21 +372,10 @@ class DlsiteClient(private val credentials: CredentialStore) {
 
     fun playCookie(): String? = playAccessCookie ?: cookieHeader()
 
-    internal suspend fun readText(url: String, referer: String, authed: Boolean, limit: Int = TEXT_LIMIT): RemoteTextPreview =
-        withContext(Dispatchers.IO) {
-            val request = request(
-                url,
-                referer,
-                acceptJson = false,
-                authed = authed,
-                cookieOverride = if (authed) playCookie() else null,
-            )
-            client.newCall(request).execute().use { response ->
-                if (response.code == 401) throw DlsiteException(TextRef.Res(R.string.dlsite_error_login_expired), statusCode = 401)
-                if (!response.isSuccessful) throw DlsiteException(TextRef.Res(R.string.dlsite_error_file_open))
-                response.body?.byteStream()?.readRemoteTextPreview(limit) ?: RemoteTextPreview("")
-            }
-        }
+    private val externalFiles by lazy { ExternalFileDownloader(sign = ::signedPlayFile) }
+
+    internal suspend fun readText(preview: RemotePreview, limit: Int = TEXT_LIMIT): RemoteTextPreview =
+        withContext(Dispatchers.IO) { externalFiles.readText(preview, limit) }
 
     fun cookieHeader(): String? {
         val cookie = credentials.dlsiteCookie() ?: return null
@@ -426,8 +421,11 @@ class DlsiteClient(private val credentials: CredentialStore) {
             if (response.code == 401) throw DlsiteException(TextRef.Res(R.string.dlsite_error_login_expired), statusCode = 401)
             if (!response.isSuccessful) throw DlsiteException(TextRef.Res(R.string.dlsite_error_connection))
             val root = JSONObject(body)
-            val url = root.optString("url")
-            if (url.isBlank()) throw DlsiteException(TextRef.Res(R.string.dlsite_error_no_play_url))
+            val signedUrl = root.optString("url").toHttpUrlOrNull()
+            if (signedUrl == null || signedUrl.scheme != "https" || signedUrl.port != 443 ||
+                signedUrl.username.isNotEmpty() || signedUrl.password.isNotEmpty() || !isTrustedDlsitePlayHost(signedUrl.host)
+            ) throw DlsiteException(TextRef.Res(R.string.dlsite_error_no_play_url))
+            val url = signedUrl.toString()
             val directory = if (url.endsWith("/")) url else "$url/"
             val extras = buildList {
                 add(cookiesOf(root.optJSONObject("cookies")))

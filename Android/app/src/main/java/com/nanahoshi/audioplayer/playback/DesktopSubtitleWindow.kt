@@ -12,6 +12,8 @@ import android.graphics.drawable.RippleDrawable
 import android.hardware.display.DisplayManager
 import android.hardware.input.InputManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import android.util.TypedValue
@@ -29,6 +31,8 @@ import android.widget.ScrollView
 import android.widget.TextView
 import kotlin.math.abs
 import kotlin.math.roundToInt
+
+private const val BLANK_HOLD_MS = 2500L
 
 internal data class DesktopSubtitleContent(
     val line: String,
@@ -70,6 +74,9 @@ internal class DesktopSubtitleWindow(
     private var content: DesktopSubtitleContent? = null
     private var expanded = false
     private var draggedPosition: DesktopSubtitlePosition? = null
+    private var holdBlankUntilMs = 0L
+    // 悬浮窗可能已被 WindowManager 移除，不能依赖 View 的 Handler 取消待执行回调。
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var attached = false
     private var retryWindowAt = 0L
     private val caption = DesktopSubtitleCaption(context).apply {
@@ -79,13 +86,13 @@ internal class DesktopSubtitleWindow(
         }
         label.setOnTouchListener(CaptionDrag())
     }
-    private val previous = button(android.R.drawable.ic_media_previous, context.getString(R.string.a11y_previous), onPrevious)
-    private val toggle = button(android.R.drawable.ic_media_pause, context.getString(R.string.a11y_pause), onToggle)
-    private val next = button(android.R.drawable.ic_media_next, context.getString(R.string.a11y_next), onNext)
-    private val lock = button(android.R.drawable.ic_lock_lock, context.getString(R.string.desktop_subtitle_lock)) {
+    private val previous = button(R.drawable.ic_desktop_skip_previous, context.getString(R.string.a11y_previous), onPrevious)
+    private val toggle = button(R.drawable.ic_desktop_pause, context.getString(R.string.a11y_pause), onToggle)
+    private val next = button(R.drawable.ic_desktop_skip_next, context.getString(R.string.a11y_next), onNext)
+    private val lock = button(R.drawable.ic_desktop_lock, context.getString(R.string.desktop_subtitle_lock)) {
         preferences.lockDesktop(true)
     }
-    private val close = button(android.R.drawable.ic_menu_close_clear_cancel, context.getString(R.string.desktop_subtitle_close)) {
+    private val close = button(R.drawable.ic_desktop_close, context.getString(R.string.desktop_subtitle_close)) {
         preferences.enableDesktop(false)
     }
     private val controls = LinearLayout(context).apply {
@@ -99,12 +106,27 @@ internal class DesktopSubtitleWindow(
         background = GradientDrawable().apply {
             setColor(0xe61b1d23.toInt())
             cornerRadius = dp(18).toFloat()
+            setStroke(dp(1), 0x2EFFFFFF)
         }
         addView(caption, LinearLayout.LayoutParams(-1, -2))
         addView(controls, LinearLayout.LayoutParams(-1, -2))
     }
+    private val clearBlankHold = Runnable {
+        holdBlankUntilMs = 0L
+        render()
+    }
+
+    private fun cancelBlankHold() {
+        mainHandler.removeCallbacks(clearBlankHold)
+        holdBlankUntilMs = 0L
+    }
 
     fun show(value: DesktopSubtitleContent?, scrollProgress: Float = 0f) {
+        if (holdBlankUntilMs != 0L &&
+            (value == null || value.settings.locked != content?.settings?.locked || value.line.isNotBlank())
+        ) {
+            cancelBlankHold()
+        }
         if (value == content) {
             if (!attached && value != null) render()
             caption.follow(scrollProgress)
@@ -123,7 +145,8 @@ internal class DesktopSubtitleWindow(
 
     private fun render() {
         val value = content
-        if (value == null || (value.line.isBlank() && !expanded && draggedPosition == null)) {
+        val holdingBlank = SystemClock.uptimeMillis() < holdBlankUntilMs
+        if (value == null || (value.line.isBlank() && !expanded && draggedPosition == null && !holdingBlank)) {
             removeWindow()
             return
         }
@@ -133,7 +156,7 @@ internal class DesktopSubtitleWindow(
         controls.visibility = if (expanded) View.VISIBLE else View.GONE
         previous.isEnabled = value.hasPrevious
         next.isEnabled = value.hasNext
-        toggle.setImageResource(if (value.playWhenReady) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play)
+        toggle.setImageResource(if (value.playWhenReady) R.drawable.ic_desktop_pause else R.drawable.ic_desktop_play)
         toggle.contentDescription = if (value.playWhenReady) context.getString(R.string.a11y_pause) else context.getString(R.string.a11y_play)
         params.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
         if (Build.VERSION.SDK_INT >= 30) {
@@ -152,7 +175,7 @@ internal class DesktopSubtitleWindow(
             removeWindow()
             return
         }
-        params.width = minOf(safe.width(), dp(320))
+        params.width = (safe.width() - dp(16)).coerceAtLeast(0).coerceAtMost(dp(320)).coerceAtMost(safe.width())
         val controlsHeight = if (expanded) controlHeight else 0
         val captionHeight = caption.fitHeight(params.width, safe.height(), controlsHeight)
         params.height = (captionHeight + controlsHeight).coerceAtMost(safe.height())
@@ -187,6 +210,7 @@ internal class DesktopSubtitleWindow(
     }
 
     private fun removeWindow() {
+        cancelBlankHold()
         if (!attached) return
         attached = false
         try {
@@ -265,10 +289,17 @@ internal class DesktopSubtitleWindow(
                     draggedPosition = null
                     if (position == null) {
                         view.performClick()
-                    } else if (position != preferences.desktop.value.position) {
-                        preferences.moveDesktop(position)
                     } else {
-                        render()
+                        if (content?.line?.isBlank() == true && !preferences.desktop.value.locked) {
+                            mainHandler.removeCallbacks(clearBlankHold)
+                            holdBlankUntilMs = SystemClock.uptimeMillis() + BLANK_HOLD_MS
+                            mainHandler.postDelayed(clearBlankHold, BLANK_HOLD_MS)
+                        }
+                        if (position != preferences.desktop.value.position) {
+                            preferences.moveDesktop(position)
+                        } else {
+                            render()
+                        }
                     }
                 }
                 MotionEvent.ACTION_CANCEL -> {

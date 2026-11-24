@@ -15,6 +15,8 @@ import com.nanahoshi.audioplayer.text.userTextOr
 import com.nanahoshi.audioplayer.japaneseasmr.JaBuzzVerification
 import com.nanahoshi.audioplayer.japaneseasmr.JaDownloadVerification
 import com.nanahoshi.audioplayer.japaneseasmr.JaFailure
+import com.nanahoshi.audioplayer.japaneseasmr.JaMegaFatalException
+import com.nanahoshi.audioplayer.japaneseasmr.JaMegaManifestInvalidException
 import com.nanahoshi.audioplayer.japaneseasmr.JaPostRef
 import com.nanahoshi.audioplayer.japaneseasmr.JaVisibleDownload
 import com.nanahoshi.audioplayer.japaneseasmr.JaTransferVerification
@@ -83,6 +85,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.coroutines.CoroutineContext
 
 private const val JA_HLS = "JAPANESE_ASMR_HLS"
+private const val JA_MANIFEST_LIFETIME_MS = 120_000L
 
 internal const val DOWNLOAD_LIBRARY_REQUIRED = PersistedErrors.LIBRARY_REQUIRED
 
@@ -105,6 +108,7 @@ class DownloadCenter internal constructor(
     internal val progress: TaskProgressCenter = TaskProgressCenter(db),
     jaWorkHttp: OkHttpClient = JapaneseAsmrClient.newWorkClient(),
     internal val preferences: DownloadPreferences = DownloadPreferences(context),
+    private val subtitleBindings: SubtitleBindingStore? = null,
     private val notice: (String) -> Unit = {},
 ) {
     private val appContext = context.applicationContext
@@ -153,7 +157,15 @@ class DownloadCenter internal constructor(
     private val originals = DlsiteOriginalStore(appContext, db, dlsite, library)
 
 
-    private data class AvailableManifest(val manifest: JaWorkManifest, val expires: Long)
+    private data class AvailableManifest(
+        val manifest: JaWorkManifest,
+        val rootFolderId: Long,
+        val expires: Long,
+        val pureMega: Boolean = manifest.pureMega,
+    ) {
+        fun withoutMegaAddresses(): AvailableManifest =
+            if (pureMega) copy(manifest = manifest.forMegaRetention(keepInitialAddress = false)) else this
+    }
     internal data class WorkVerification(
         val entry: JaWorkEntry,
         val taskId: Long?,
@@ -181,6 +193,7 @@ class DownloadCenter internal constructor(
         val buzz: JaBuzzVerification? = null,
         val retryFileLink: String? = null,
         val verifiedBuzzPages: Map<String, JaVisibleDownload> = emptyMap(),
+        val rootFolderId: Long? = null,
     )
 
     internal sealed interface WorkVerificationResult {
@@ -193,6 +206,50 @@ class DownloadCenter internal constructor(
     private val jaWaitingEntries = ConcurrentHashMap<Long, WaitingWorkVerification>()
 
     private fun clockMs() = System.nanoTime() / 1_000_000
+
+    private fun invalidateWorkManifests(rj: String, keepJobId: Long? = null) {
+        jaWorkManifests.entries.removeIf { it.key != keepJobId && it.value.manifest.entry.post.rj == rj }
+    }
+
+    private fun rememberManifest(jobId: Long, rootId: Long, manifest: JaWorkManifest): JaWorkManifest =
+        synchronized(jaWorkManifests) {
+            invalidateWorkManifests(manifest.entry.post.rj, keepJobId = jobId)
+            val retained = if (manifest.pureMega) manifest.forMegaRetention(keepInitialAddress = true) else manifest
+            val expires = manifest.resolvedAtMs + JA_MANIFEST_LIFETIME_MS
+            if (manifest.pureMega || clockMs() < expires) {
+                jaWorkManifests[jobId] = AvailableManifest(retained, rootId, expires)
+            } else {
+                jaWorkManifests.remove(jobId)
+            }
+            retained
+        }
+
+    private fun cachedManifest(job: DownloadEntity): JaWorkManifest? {
+        val cached = jaWorkManifests[job.id] ?: return null
+        if (cached.rootFolderId != job.workFolderId || cached.manifest.entry.post.postId != job.fileKey ||
+            cached.manifest.entry.post.rj != job.workKey ||
+            job.jaEntryKey?.let { it != jaHash(cached.manifest.entry.address) } == true
+        ) {
+            jaWorkManifests.remove(job.id, cached)
+            return null
+        }
+        if (!cached.pureMega) {
+            jaWorkManifests.remove(job.id, cached)
+            return cached.manifest.takeIf { clockMs() < cached.expires }
+        }
+        if (clockMs() < cached.expires) return cached.manifest
+        val stripped = cached.withoutMegaAddresses()
+        jaWorkManifests.replace(job.id, cached, stripped)
+        return stripped.manifest
+    }
+
+    private fun invalidateRootManifests(removedIds: Set<Long>) {
+        jaWorkManifests.entries.removeIf { it.value.rootFolderId in removedIds }
+        jaWaitingEntries.entries.removeIf { it.value.rootFolderId in removedIds }
+        jaVerifications.forEach { (token, request) ->
+            if (request.rootId in removedIds && jaVerifications.remove(token, request)) request.result.complete(null)
+        }
+    }
 
     internal suspend fun jaWorkEntries(posts: List<JaPostRef>): List<JaWorkEntry> = withContext(Dispatchers.IO) {
         posts.flatMap { post ->
@@ -361,7 +418,7 @@ class DownloadCenter internal constructor(
             check(libraryTarget(job) != null) { PersistedErrors.JA_POST_REMOVED }
             db.downloads().reserveWorkTask(post.rj, 0)?.let { return@withTransaction Enqueued(it.id, false) }
             val id = db.downloads().insert(job)
-            jaWorkManifests[id] = AvailableManifest(manifest, manifest.resolvedAtMs + 120_000L)
+            rememberManifest(id, rootId, manifest)
             registerJob(id)
             Enqueued(id, true)
         }
@@ -391,8 +448,7 @@ class DownloadCenter internal constructor(
     }
 
     private suspend fun downloadJaWork(job: DownloadEntity, report: TaskReporter) {
-        val cached = jaWorkManifests.remove(job.id)?.takeIf { clockMs() < it.expires }?.manifest
-            ?.takeIf { it.entry.post.postId == job.fileKey && it.entry.post.rj == job.workKey }
+        val cached = cachedManifest(job)
         suspend fun phase(phase: ProgressPhase) {
             report.phase(phase)
             db.downloads().setPhase(job.id, phase.name)
@@ -400,6 +456,13 @@ class DownloadCenter internal constructor(
         phase(ProgressPhase.RESOLVING)
         try {
             val entry = cached?.entry ?: entryForJob(job)
+            suspend fun readManifest(): JaWorkManifest {
+                val fresh = jaWorkClient.manifest(entry)
+                requireRunningTarget(job)
+                if (fresh.pureMega) return rememberManifest(job.id, requireNotNull(job.workFolderId), fresh)
+                synchronized(jaWorkManifests) { invalidateWorkManifests(entry.post.rj) }
+                return fresh
+            }
             suspend fun run(manifest: JaWorkManifest): TextRef? = try {
                 library.jaWorkFiles.execute(job, manifest, jaWorkClient, report, ::phase) { requireRunningTarget(job) }
             } catch (verify: JaTransferVerification) {
@@ -409,23 +472,35 @@ class DownloadCenter internal constructor(
                 null
             }
             val message = try {
-                run(cached ?: jaWorkClient.manifest(entry))
+                run(cached ?: readManifest())
             } catch (expired: JaWorkAddressExpired) {
                 if (expired.sessionRequired && cached?.fromVerifiedPage == true) throw expired
                 phase(ProgressPhase.RESOLVING)
                 requireRunningTarget(job)
-                run(jaWorkClient.manifest(entry))
+                run(readManifest())
             }
-            if (message != null) notice(appContext.resolve(message))
+            if (message != null) {
+                // Acceptance already evicted older manifests. Preserve a new job accepted just after publication.
+                jaWorkManifests.remove(job.id)
+                notice(appContext.resolve(message))
+            }
         } catch (verify: JaDownloadVerification) {
             waitForJaWorkVerification(job, WaitingWorkVerification(JaWorkEntry(jaPostForJob(job), verify.entry)))
         } catch (verify: JaBuzzVerification) {
             waitForJaWorkVerification(job, WaitingWorkVerification(verify.entry, verify, verify.fileLink))
+        } catch (failure: JaWorkException) {
+            if (failure is JaMegaManifestInvalidException ||
+                failure is JaMegaFatalException && failure.userText == TextRef.Res(R.string.ja_error_mega_share_expired) ||
+                failure.persistedError == PersistedErrors.JA_ENTRY_CHANGED
+            ) jaWorkManifests.remove(job.id)
+            throw failure
+        } finally {
+            jaWorkManifests.computeIfPresent(job.id) { _, value -> value.withoutMegaAddresses() }
         }
     }
 
     private suspend fun waitForJaWorkVerification(job: DownloadEntity, pending: WaitingWorkVerification) {
-        jaWaitingEntries[job.id] = pending
+        jaWaitingEntries[job.id] = pending.copy(rootFolderId = job.workFolderId)
         db.downloads().waitForJaVerification(job.id)
         notice(appContext.getString(R.string.download_ja_verify_notice))
     }
@@ -475,8 +550,10 @@ class DownloadCenter internal constructor(
 
     fun cancel(id: Long) {
         scope.launch {
-            jaWorkManifests.remove(id)
             if (db.downloads().stopActive(id, PersistedErrors.CANCELLED) > 0) {
+                jaWorkManifests.computeIfPresent(id) { _, value ->
+                    if (value.pureMega) value.withoutMegaAddresses() else null
+                }
                 progress.finishFromDb(TaskKey(TaskKind.DOWNLOAD, id), ProgressPart.DOWNLOAD, true)
                 runners[id]?.cancel()
             }
@@ -638,6 +715,8 @@ class DownloadCenter internal constructor(
 
     fun observe(): Flow<List<DownloadEntity>> = db.downloads().observe()
 
+    fun observeVisible(): Flow<List<DownloadEntity>> = db.downloads().observeVisible()
+
     internal fun observeActive(): Flow<List<DownloadEntity>> = db.downloads().observeActive()
 
     private val startup = scope.async {
@@ -678,6 +757,15 @@ class DownloadCenter internal constructor(
 
     init {
         progress.watchDownloads()
+        scope.launch {
+            var previous = emptySet<Long>()
+            library.observeAllFolders().map { folders -> folders.mapTo(mutableSetOf()) { it.id } }
+                .distinctUntilChanged().collect { ids ->
+                    val removed = previous - ids
+                    if (removed.isNotEmpty()) invalidateRootManifests(removed)
+                    previous = ids
+                }
+        }
         scope.launch {
             observe().map { jobs -> jobs.map { Triple(it.id, it.status, it.pendingBiliSubtitle) } }
                 .distinctUntilChanged().collect { jobs ->
@@ -810,6 +898,12 @@ class DownloadCenter internal constructor(
 
     suspend fun deleteDownloaded(tracks: List<TrackEntity>, deleteSubtitles: Boolean): DeleteResult =
         deleteLocalCopies(db, filesDir, subtitles, tracks, deleteSubtitles)
+
+    internal suspend fun deleteLocalTargets(
+        plan: LocalRemovalPlan,
+        deleteSubtitles: Boolean,
+        bindings: SubtitleBindingStore? = null,
+    ): DeleteResult = deleteLocalTargets(db, filesDir, subtitles, bindings ?: subtitleBindings, plan, deleteSubtitles)
 
     suspend fun enqueue(tracks: List<TrackEntity>): Int = prepare {
         tracks.count { enqueueTrack(it.id).added }
@@ -1057,7 +1151,9 @@ class DownloadCenter internal constructor(
                 if (manifest.entry.post.postId != job.fileKey || manifest.entry.post.rj != job.workKey ||
                     job.jaEntryKey?.let { it != jaHash(manifest.entry.address) } == true
                 ) return@withTransaction null
-                jaWorkManifests[id] = AvailableManifest(manifest, manifest.resolvedAtMs + 120_000L)
+                rememberManifest(id, requireNotNull(target.folderId), manifest)
+            } else {
+                jaWorkManifests.computeIfPresent(id) { _, value -> value.withoutMegaAddresses() }
             }
             jaWaitingEntries.remove(id)
             bindLibraryTarget(job, target)
@@ -1066,6 +1162,19 @@ class DownloadCenter internal constructor(
             registerJob(id)
             id
         }
+    }
+
+    suspend fun deleteTerminal(id: Long) {
+        val dao = db.downloads()
+        when (dao.get(id)?.status) {
+            DownloadStatus.FAILED -> deleteFailed(id)
+            DownloadStatus.DONE -> dao.dismissDone(id, System.currentTimeMillis())
+            else -> Unit
+        }
+    }
+
+    suspend fun clearCompleted() {
+        db.downloads().dismissAllDone(System.currentTimeMillis())
     }
 
     /** 删除失败任务并回收它的压缩包暂存；排队、下载中和已完成的任务不允许删。 */

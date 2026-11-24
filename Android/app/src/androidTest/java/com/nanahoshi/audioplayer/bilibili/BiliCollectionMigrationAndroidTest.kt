@@ -6,6 +6,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.nanahoshi.audioplayer.data.TrackSource
 import com.nanahoshi.audioplayer.data.db.*
+import com.nanahoshi.audioplayer.data.removeV24SchemaChanges
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Test
@@ -31,6 +32,7 @@ class BiliCollectionMigrationAndroidTest {
         seed.close()
         // Reconstruct the schema from before the collection and subtitle task migrations.
         SQLiteDatabase.openDatabase(context.getDatabasePath(name).path, null, SQLiteDatabase.OPEN_READWRITE).use {
+            it.removeV24SchemaChanges()
             it.execSQL("ALTER TABLE queue_items DROP COLUMN mediaKind")
             it.execSQL("ALTER TABLE queue_items DROP COLUMN mediaPathHash")
             it.execSQL("DROP TABLE japaneseasmr_download_entries")
@@ -42,6 +44,11 @@ class BiliCollectionMigrationAndroidTest {
             it.execSQL("DROP TABLE japaneseasmr_media")
             it.execSQL("DROP TABLE japaneseasmr_posts")
             it.execSQL("DROP TABLE subtitle_publications")
+            it.execSQL("ALTER TABLE downloads DROP COLUMN dismissedAt")
+            it.execSQL("ALTER TABLE whisper_jobs DROP COLUMN createdAt")
+            it.execSQL("ALTER TABLE whisper_jobs DROP COLUMN dismissedAt")
+            it.execSQL("ALTER TABLE translation_jobs DROP COLUMN createdAt")
+            it.execSQL("ALTER TABLE translation_jobs DROP COLUMN dismissedAt")
             val addedColumns = mapOf(
                 "downloads" to listOf("workFolderId", "pendingBiliSubtitle", "progressSummary"),
                 "whisper_jobs" to listOf("remoteSubmittedAt", "progressSummary"),
@@ -57,7 +64,7 @@ class BiliCollectionMigrationAndroidTest {
             it.execSQL("CREATE UNIQUE INDEX index_bili_import_intents_batchId ON bili_import_intents (batchId)")
             it.version = 16
         }
-        val migrated = Room.databaseBuilder(context, AppDatabase::class.java, name).addMigrations(AppDatabase.MIGRATION_16_17, AppDatabase.MIGRATION_17_18, AppDatabase.MIGRATION_18_19, AppDatabase.MIGRATION_19_20, AppDatabase.MIGRATION_20_21, AppDatabase.MIGRATION_21_22).build()
+        val migrated = Room.databaseBuilder(context, AppDatabase::class.java, name).addMigrations(AppDatabase.MIGRATION_16_17, AppDatabase.MIGRATION_17_18, AppDatabase.MIGRATION_18_19, AppDatabase.MIGRATION_19_20, AppDatabase.MIGRATION_20_21, AppDatabase.MIGRATION_21_22, AppDatabase.MIGRATION_22_23, AppDatabase.MIGRATION_23_24).build()
         val fresh = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
         try {
             assertEquals(track, migrated.playlists().items(playlist).single().trackId)
@@ -67,7 +74,7 @@ class BiliCollectionMigrationAndroidTest {
             assertNull(migrated.translations().get(translation)?.kind)
             fun schema(database: AppDatabase): List<String> {
                 val sql = database.openHelper.writableDatabase
-                assertEquals(22, sql.version)
+                assertEquals(24, sql.version)
                 return buildList {
                     for (table in listOf("playlists", "playlist_items", "bili_collections", "bili_collection_videos",
                         "downloads", "whisper_jobs", "translation_jobs", "subtitle_publications")) {

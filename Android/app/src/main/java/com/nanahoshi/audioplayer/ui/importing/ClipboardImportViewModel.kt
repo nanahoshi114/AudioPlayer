@@ -11,7 +11,8 @@ import android.content.Context
 import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.nanahoshi.audioplayer.bilibili.BiliPart
+import com.nanahoshi.audioplayer.bilibili.BiliImportRequest
+import com.nanahoshi.audioplayer.bilibili.BiliVideoDetails
 import com.nanahoshi.audioplayer.bilibili.BilibiliException
 import com.nanahoshi.audioplayer.data.*
 import com.nanahoshi.audioplayer.graph
@@ -57,7 +58,7 @@ class ClipboardImportViewModel(app: Application) : AndroidViewModel(app) {
                         if (error.code == -404 || error.code == 404) return@withContext null
                         throw error
                     }
-                    val parts = details.parts.filter { it.cid > 0 }.distinctBy { it.cid }
+                    val parts = details.parts.filter { it.cid > 0 }.distinctBy { it.cid }.sortedBy { it.page }
                     check(parts.isNotEmpty())
                     val saved = parts.all { graph.db.tracks().findByBvid(it.bvid, it.cid) != null }
                     ClipboardImportPreview(target, details.video.title, details.video.coverUrl, saved, parts, biliVideo = details.video)
@@ -104,14 +105,12 @@ class ClipboardImportViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         }
-        override suspend fun save(preview: ClipboardImportPreview, selectedParts: List<BiliPart>): String? {
+        override suspend fun chooseBiliParts(preview: ClipboardImportPreview): List<BiliImportRequest>? =
+            graph.biliImportRequests.choose(listOf(BiliVideoDetails(checkNotNull(preview.biliVideo), preview.parts)))
+
+        override suspend fun save(preview: ClipboardImportPreview, biliRequests: List<BiliImportRequest>): String {
             when (preview.target.source) {
-                ClipboardSource.BILIBILI -> {
-                    val details = com.nanahoshi.audioplayer.bilibili.BiliVideoDetails(checkNotNull(preview.biliVideo), preview.parts)
-                    val requests = graph.biliImportRequests.choose(listOf(details)) ?: return null
-                    requests.forEach { graph.library.importBili(it) }
-                    return getApplication<Application>().getString(R.string.online_added_to_library)
-                }
+                ClipboardSource.BILIBILI -> biliRequests.forEach { graph.library.importBili(it) }
                 ClipboardSource.ASMR -> {
                     val work = preview.dlsiteWork
                     if (work == null) {
@@ -158,7 +157,7 @@ class ClipboardImportViewModel(app: Application) : AndroidViewModel(app) {
         rememberHandled = { preferences.edit().putString("last_handled", it).apply() }, message = { graph.show(it) })
 
     fun inspectClipboard() {
-        if (controller.state?.saving == true) return
+        if (controller.state?.busy == true) return
         inspectJob?.cancel()
         val clipboard = getApplication<Application>().getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
         // 某些系统会拒绝读取；保持当前页面，不记录剪贴板或异常原文。

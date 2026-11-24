@@ -2,12 +2,14 @@ package com.nanahoshi.audioplayer.ui.components
 
 import com.nanahoshi.audioplayer.R
 import androidx.compose.ui.res.stringResource
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -27,7 +29,10 @@ fun DlsiteDownloadDialog(requests: DlsiteDownloadRequests) {
         onDismissRequest = { requests.answer(prompt.id, null) },
         title = { Text(stringResource(R.string.dlsite_download_pick_title)) },
         text = {
-            Column(Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState())) {
+            Column(
+                Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 Text(
                     stringResource(
                         if (prompt.allowPartial) R.string.dlsite_download_partial_warning
@@ -41,18 +46,29 @@ fun DlsiteDownloadDialog(requests: DlsiteDownloadRequests) {
             }
         },
         confirmButton = {
-            Column(Modifier.fillMaxWidth()) {
-                TextButton(onClick = { requests.answer(prompt.id, DlsiteDownloadMode.ARCHIVE) }, modifier = Modifier.fillMaxWidth()) {
+            Column(
+                Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                FilledTonalButton(
+                    onClick = { requests.answer(prompt.id, DlsiteDownloadMode.ARCHIVE) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
                     Text(stringResource(R.string.dlsite_download_archive))
                 }
                 if (prompt.allowPartial) {
-                    TextButton(onClick = { requests.answer(prompt.id, DlsiteDownloadMode.PARTIAL) }, modifier = Modifier.fillMaxWidth()) {
+                    TextButton(
+                        onClick = { requests.answer(prompt.id, DlsiteDownloadMode.PARTIAL) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
                         Text(stringResource(R.string.dlsite_download_selected))
                     }
                 }
-                TextButton(onClick = { requests.answer(prompt.id, null) }, modifier = Modifier.fillMaxWidth()) {
-                    Text(stringResource(R.string.common_cancel))
-                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = { requests.answer(prompt.id, null) }, modifier = Modifier.fillMaxWidth()) {
+                Text(stringResource(R.string.common_cancel))
             }
         },
     )

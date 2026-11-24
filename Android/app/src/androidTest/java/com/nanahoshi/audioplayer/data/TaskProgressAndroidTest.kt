@@ -55,6 +55,7 @@ class TaskProgressAndroidTest {
         original.close()
         // 从当前完整 schema 删除本次新增列，构造真实的 v19 三表结构。
         SQLiteDatabase.openDatabase(app.getDatabasePath(name).path, null, SQLiteDatabase.OPEN_READWRITE).use { old ->
+            old.removeV24SchemaChanges()
             for (table in listOf("downloads", "whisper_jobs", "translation_jobs")) old.execSQL("ALTER TABLE $table DROP COLUMN progressSummary")
             old.execSQL("ALTER TABLE downloads DROP COLUMN jaEntryKey")
             old.execSQL("ALTER TABLE downloads DROP COLUMN jaReplace")
@@ -66,9 +67,14 @@ class TaskProgressAndroidTest {
             old.execSQL("ALTER TABLE queue_items DROP COLUMN mediaKind")
             old.execSQL("DROP TABLE japaneseasmr_media")
             old.execSQL("DROP TABLE japaneseasmr_posts")
+            old.execSQL("ALTER TABLE downloads DROP COLUMN dismissedAt")
+            old.execSQL("ALTER TABLE whisper_jobs DROP COLUMN createdAt")
+            old.execSQL("ALTER TABLE whisper_jobs DROP COLUMN dismissedAt")
+            old.execSQL("ALTER TABLE translation_jobs DROP COLUMN createdAt")
+            old.execSQL("ALTER TABLE translation_jobs DROP COLUMN dismissedAt")
             old.version = 19
         }
-        val upgraded = Room.databaseBuilder(app, AppDatabase::class.java, name).addMigrations(AppDatabase.MIGRATION_19_20, AppDatabase.MIGRATION_20_21, AppDatabase.MIGRATION_21_22).build()
+        val upgraded = Room.databaseBuilder(app, AppDatabase::class.java, name).addMigrations(AppDatabase.MIGRATION_19_20, AppDatabase.MIGRATION_20_21, AppDatabase.MIGRATION_21_22, AppDatabase.MIGRATION_22_23, AppDatabase.MIGRATION_23_24).build()
         val fresh = Room.inMemoryDatabaseBuilder(app, AppDatabase::class.java).build()
         try {
             assertNull(upgraded.downloads().get(audio)!!.progressSummary)
@@ -76,7 +82,7 @@ class TaskProgressAndroidTest {
             assertNull(upgraded.translations().get(translation)!!.progressSummary)
             assertEquals("fixture", upgraded.downloads().get(audio)!!.title)
             fun columns(db: AppDatabase) = buildList {
-                assertEquals(22, db.openHelper.writableDatabase.version)
+                assertEquals(24, db.openHelper.writableDatabase.version)
                 for (table in listOf("downloads", "whisper_jobs", "translation_jobs")) {
                     db.openHelper.writableDatabase.query("PRAGMA table_info($table)").use { cursor ->
                         while (cursor.moveToNext()) add(table + "|" + (1 until cursor.columnCount).joinToString("|") { cursor.getString(it) ?: "NULL" })
@@ -93,13 +99,20 @@ class TaskProgressAndroidTest {
         val asr = db.whisper().insert(whisper().copy(progressSummary = encoded))
         val translated = db.translations().insert(translation().copy(progressSummary = encoded))
         db.downloads().requeue(audio)
-        db.whisper().requeueWithFile(asr, "fixture", "sha", null, "/audio", null, null, true, WHISPER_MODEL_QWEN)
+        assertEquals(1, db.whisper().requeueWithFile(asr, "fixture", "sha", null, "/audio", null, null, true, WHISPER_MODEL_QWEN))
         db.translations().requeue(translated)
         assertNull(db.downloads().get(audio)!!.progressSummary)
         assertNull(db.whisper().get(asr)!!.progressSummary)
         assertNull(db.translations().get(translated)!!.progressSummary)
         db.whisper().setProgressSummary(asr, encoded)
-        db.whisper().requeueForDownload(asr)
+        assertEquals(0, db.whisper().requeueForDownload(asr))
+        assertEquals(encoded, db.whisper().get(asr)!!.progressSummary)
+        db.whisper().fail(asr, "fixture")
+        db.translations().stagePublication(SubtitlePublicationEntity("sha.json", "{}", asr, null, 1))
+        assertEquals(0, db.whisper().requeueWithFile(asr, "fixture", "sha", null, "/audio", null, null, true, WHISPER_MODEL_QWEN))
+        assertEquals(0, db.whisper().requeueForDownload(asr))
+        db.translations().clearPublication("sha.json")
+        assertEquals(1, db.whisper().requeueForDownload(asr))
         assertNull(db.whisper().get(asr)!!.progressSummary)
     }
 

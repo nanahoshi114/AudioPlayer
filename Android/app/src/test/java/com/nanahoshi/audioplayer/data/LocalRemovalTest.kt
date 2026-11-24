@@ -1,10 +1,13 @@
 package com.nanahoshi.audioplayer.data
 
+import com.nanahoshi.audioplayer.data.db.FileKind
+import com.nanahoshi.audioplayer.data.db.LibraryFileEntity
 import com.nanahoshi.audioplayer.data.db.TrackEntity
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 import java.io.File
+import java.nio.file.Files
 import kotlin.io.path.createTempDirectory
 
 class LocalRemovalTest {
@@ -78,5 +81,31 @@ class LocalRemovalTest {
     @Test
     fun remoteUrlIsNotALocalCopy() = withFilesDir { dir ->
         assertNull(track(TrackSource.ASMR, "https://example.com/a.mp3").localRemoval(dir))
+    }
+
+    private fun libraryFile(path: String?) = LibraryFileEntity(
+        folderId = null, name = "subtitle.srt", kind = FileKind.TEXT, remoteUrl = "",
+        addedAt = 0, asmrWorkId = 1, fileHash = "dlsite:subtitle", localUri = path,
+    )
+
+    @Test
+    fun libraryFileRequiresAnExistingAppOwnedFile() = withFilesDir { dir ->
+        val file = File(dir, "subtitle.srt").apply { writeText("subtitle") }
+        assertEquals(LocalRemoval.DOWNLOAD, libraryFile(file.absolutePath).localRemoval(dir))
+        assertNull(libraryFile(File(dir, "missing.srt").absolutePath).localRemoval(dir))
+        assertNull(libraryFile(File(dir, "sub").apply { mkdirs() }.absolutePath).localRemoval(dir))
+        assertNull(libraryFile("content://fixture/subtitle").localRemoval(dir))
+        assertNull(libraryFile(file.toURI().toString()).localRemoval(dir))
+        assertNull(libraryFile(null).localRemoval(dir))
+    }
+
+    @Test
+    fun libraryFileRejectsOutsideFilesAndSymlinksThatEscapeFilesDir() = withFilesDir { parent ->
+        val dir = File(parent, "files").apply { mkdirs() }
+        val outside = File(parent, "files-other/subtitle.srt").apply { parentFile?.mkdirs(); writeText("subtitle") }
+        val link = File(dir, "link.srt")
+        Files.createSymbolicLink(link.toPath(), outside.toPath())
+        assertNull(libraryFile(outside.absolutePath).localRemoval(dir))
+        assertNull(libraryFile(link.absolutePath).localRemoval(dir))
     }
 }

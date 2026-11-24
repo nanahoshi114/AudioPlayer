@@ -3,8 +3,14 @@ package com.nanahoshi.audioplayer.ui.library
 import com.nanahoshi.audioplayer.R
 import androidx.compose.ui.res.stringResource
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -13,10 +19,13 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyItemScope
@@ -28,6 +37,7 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
@@ -44,6 +54,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.Saver
@@ -54,11 +65,14 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.nanahoshi.audioplayer.data.TrackSource
+import com.nanahoshi.audioplayer.data.isSubtitleFile
+import com.nanahoshi.audioplayer.data.localRemoval
 import com.nanahoshi.audioplayer.data.db.FileKind
 import com.nanahoshi.audioplayer.data.db.FolderEntity
 import com.nanahoshi.audioplayer.data.db.LibraryFileEntity
@@ -72,8 +86,11 @@ import com.nanahoshi.audioplayer.ui.components.SourceBadge
 import com.nanahoshi.audioplayer.ui.formatDuration
 import com.nanahoshi.audioplayer.ui.theme.LocalReduceMotion
 import com.nanahoshi.audioplayer.ui.theme.LocalSourceColors
+import com.nanahoshi.audioplayer.ui.theme.Motion
 import com.nanahoshi.audioplayer.asmr.WorkFacts
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -201,13 +218,16 @@ internal fun PlaylistPickDialog(
         text = {
             LazyColumn(Modifier.heightIn(max = 420.dp)) {
                 items(playlists, key = { it.id }) { playlist ->
-                    Text(
-                        playlist.name,
-                        modifier = Modifier
+                    Box(
+                        Modifier
                             .fillMaxWidth()
+                            .heightIn(min = 48.dp)
                             .clickable { onPick(playlist.id) }
-                            .padding(vertical = 12.dp),
-                    )
+                            .padding(vertical = 8.dp),
+                        contentAlignment = Alignment.CenterStart,
+                    ) {
+                        Text(playlist.name)
+                    }
                 }
             }
         },
@@ -226,7 +246,11 @@ internal fun ConfirmRemoveDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.library_remove_from_library)) },
         text = { Text(message) },
-        confirmButton = { TextButton(onClick = onConfirm) { Text(stringResource(R.string.common_remove)) } },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text(stringResource(R.string.common_remove), color = MaterialTheme.colorScheme.error)
+            }
+        },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) } },
     )
 }
@@ -236,6 +260,7 @@ internal fun ItemName(name: String, expanded: Boolean) {
     Text(
         name,
         maxLines = if (expanded) Int.MAX_VALUE else 1,
+        softWrap = expanded,
         overflow = if (expanded) TextOverflow.Clip else TextOverflow.Ellipsis,
     )
 }
@@ -255,6 +280,7 @@ internal fun FolderRow(
     modifier: Modifier = Modifier,
 ) {
     var menu by remember { mutableStateOf(false) }
+    val reduce = LocalReduceMotion.current
     if (folder.biliBvid != null) {
         BiliVideoPreviewRow(folder, biliArtist, selected, selecting, onClick, onLongClick, onDelete, modifier)
         return
@@ -277,13 +303,21 @@ internal fun FolderRow(
     }
     val container by animateColorAsState(
         if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
+        animationSpec = if (reduce) snap() else tween(Motion.short),
         label = "folderSelected",
     )
     ListItem(
         headlineContent = { ItemName(folder.name, selected) },
         supportingContent = { Text(stringResource(R.string.library_folder)) },
         leadingContent = {
-            AnimatedContent(targetState = selecting, label = "folderLead") { on ->
+            AnimatedContent(
+                targetState = selecting,
+                transitionSpec = {
+                    if (reduce) EnterTransition.None togetherWith ExitTransition.None
+                    else fadeIn(tween(Motion.short)) togetherWith fadeOut(tween(Motion.short))
+                },
+                label = "folderLead",
+            ) { on ->
                 if (on) {
                     Checkbox(checked = selected, onCheckedChange = { onClick() })
                 } else {
@@ -326,8 +360,10 @@ private fun BiliVideoPreviewRow(
     modifier: Modifier = Modifier,
 ) {
     var menu by remember { mutableStateOf(false) }
+    val reduce = LocalReduceMotion.current
     val container by animateColorAsState(
         if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
+        animationSpec = if (reduce) snap() else tween(Motion.short),
         label = "biliVideoSelected",
     )
     Row(
@@ -335,12 +371,17 @@ private fun BiliVideoPreviewRow(
             .fillMaxWidth()
             .background(container)
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.Top,
     ) {
-        if (selecting) Checkbox(checked = selected, onCheckedChange = { onClick() })
-        else CoverImage(folder.coverUri, size = 64.dp)
-        Column(Modifier.padding(start = 12.dp).weight(1f)) {
+        Box(Modifier.size(64.dp), contentAlignment = Alignment.Center) {
+            if (selecting) {
+                Checkbox(checked = selected, onCheckedChange = { onClick() })
+            } else {
+                CoverImage(folder.coverUri, size = 64.dp, shape = MaterialTheme.shapes.small)
+            }
+        }
+        Column(Modifier.padding(start = 16.dp).weight(1f)) {
             Text(
                 folder.name,
                 style = MaterialTheme.typography.titleMedium,
@@ -393,8 +434,10 @@ private fun WorkPreviewRow(
         release = "",
         sourceId = folder.asmrSourceId.orEmpty(),
     )
+    val reduce = LocalReduceMotion.current
     val container by animateColorAsState(
         if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
+        animationSpec = if (reduce) snap() else tween(Motion.short),
         label = "workSelected",
     )
     Row(
@@ -402,17 +445,26 @@ private fun WorkPreviewRow(
             .fillMaxWidth()
             .background(container)
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.Top,
     ) {
-        AnimatedContent(targetState = selecting, label = "workLead") { on ->
-            if (on) {
-                Checkbox(checked = selected, onCheckedChange = { onClick() })
-            } else {
-                CoverImage(folder.coverUri, size = 64.dp)
+        Box(Modifier.size(64.dp), contentAlignment = Alignment.Center) {
+            AnimatedContent(
+                targetState = selecting,
+                transitionSpec = {
+                    if (reduce) EnterTransition.None togetherWith ExitTransition.None
+                    else fadeIn(tween(Motion.short)) togetherWith fadeOut(tween(Motion.short))
+                },
+                label = "workLead",
+            ) { on ->
+                if (on) {
+                    Checkbox(checked = selected, onCheckedChange = { onClick() })
+                } else {
+                    CoverImage(folder.coverUri, size = 64.dp, shape = MaterialTheme.shapes.small)
+                }
             }
         }
-        Column(Modifier.padding(start = 12.dp).weight(1f)) {
+        Column(Modifier.padding(start = 16.dp).weight(1f)) {
             Text(
                 facts.title.ifBlank { facts.sourceId },
                 style = MaterialTheme.typography.titleMedium,
@@ -459,7 +511,7 @@ private fun WorkPreviewRow(
 /** App 自己下载到 filesDir 的副本；关联的用户文件是 content: / file: URI。 */
 internal fun TrackEntity.isAppCopy(): Boolean = localUri?.startsWith("/") == true
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
 @Composable
 internal fun TrackRow(
     track: TrackEntity,
@@ -474,8 +526,10 @@ internal fun TrackRow(
     onDeleteDownloaded: (() -> Unit)?,
     onDelete: (() -> Unit)?,
     modifier: Modifier = Modifier,
+    onBindSubtitle: (() -> Unit)? = null,
 ) {
     var menu by remember { mutableStateOf(false) }
+    val reduce = LocalReduceMotion.current
     val downloaded = when (track.source) {
         TrackSource.BILIBILI, TrackSource.YOUTUBE -> track.localUri?.startsWith("/") == true &&
             java.io.File(track.localUri).isFile
@@ -492,7 +546,10 @@ internal fun TrackRow(
                 if (artist != null) {
                     Text(artist, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
                     SourceBadge(track.source)
                     Text(formatDuration(track.durationMs), style = MaterialTheme.typography.labelMedium)
                     if (downloaded) {
@@ -505,7 +562,14 @@ internal fun TrackRow(
             }
         },
         leadingContent = {
-            AnimatedContent(targetState = selecting, label = "trackLead") { on ->
+            AnimatedContent(
+                targetState = selecting,
+                transitionSpec = {
+                    if (reduce) EnterTransition.None togetherWith ExitTransition.None
+                    else fadeIn(tween(Motion.short)) togetherWith fadeOut(tween(Motion.short))
+                },
+                label = "trackLead",
+            ) { on ->
                 if (on) {
                     Checkbox(checked = selected, onCheckedChange = { onClick() })
                 } else {
@@ -521,6 +585,9 @@ internal fun TrackRow(
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     DropdownMenuItem(text = { Text(stringResource(R.string.library_play_next)) }, onClick = { menu = false; onPlayNext() })
                     DropdownMenuItem(text = { Text(stringResource(R.string.library_add_queue)) }, onClick = { menu = false; onAppend() })
+                    if (onBindSubtitle != null) {
+                        DropdownMenuItem(text = { Text(stringResource(R.string.library_track_bind_subtitle)) }, onClick = { menu = false; onBindSubtitle() })
+                    }
                     if (!downloaded && onDownload != null) {
                         DropdownMenuItem(text = { Text(stringResource(R.string.library_download_track)) }, onClick = { menu = false; onDownload() })
                     }
@@ -542,39 +609,101 @@ internal fun TrackRow(
     )
 }
 
+@OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
 @Composable
 internal fun FileRow(
     file: LibraryFileEntity,
     onClick: () -> Unit,
     onDelete: (() -> Unit)?,
     modifier: Modifier = Modifier,
+    selecting: Boolean = false,
+    selected: Boolean = false,
+    onLongClick: () -> Unit = {},
+    onBindSubtitle: (() -> Unit)? = null,
+    onDeleteDownloaded: (() -> Unit)? = null,
 ) {
+    val context = LocalContext.current
+    val reduce = LocalReduceMotion.current
     var menu by remember { mutableStateOf(false) }
-    val icon = when (file.kind) {
-        FileKind.IMAGE -> Icons.Default.Image
-        FileKind.TEXT -> Icons.Default.Description
-        FileKind.OTHER -> Icons.AutoMirrored.Filled.InsertDriveFile
+    val subtitleFile = isSubtitleFile(file.name)
+    val downloaded by produceState(initialValue = false, key1 = file.id, key2 = file.localUri) {
+        value = withContext(Dispatchers.IO) { file.localRemoval(context.filesDir) != null }
     }
-    val label = when (file.kind) {
-        FileKind.IMAGE -> stringResource(R.string.file_kind_image)
-        FileKind.TEXT -> stringResource(R.string.file_kind_text)
-        FileKind.OTHER -> stringResource(R.string.file_kind_other)
+    val icon = when {
+        subtitleFile -> Icons.Default.Subtitles
+        file.kind == FileKind.IMAGE -> Icons.Default.Image
+        file.kind == FileKind.TEXT -> Icons.Default.Description
+        else -> Icons.AutoMirrored.Filled.InsertDriveFile
     }
+    val label = when {
+        subtitleFile -> stringResource(R.string.file_kind_subtitle)
+        file.kind == FileKind.IMAGE -> stringResource(R.string.file_kind_image)
+        file.kind == FileKind.TEXT -> stringResource(R.string.file_kind_text)
+        else -> stringResource(R.string.file_kind_other)
+    }
+    val hasMenuActions = (subtitleFile && onBindSubtitle != null) ||
+        (downloaded && onDeleteDownloaded != null) ||
+        onDelete != null
     ListItem(
-        headlineContent = { Text(file.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-        supportingContent = { Text(label) },
-        leadingContent = { Icon(icon, contentDescription = null) },
+        headlineContent = { ItemName(file.name, selected) },
+        supportingContent = {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(label)
+                if (downloaded) {
+                    LabelBadge(stringResource(R.string.library_badge_downloaded), MaterialTheme.colorScheme.tertiary)
+                }
+            }
+        },
+        leadingContent = {
+            AnimatedContent(
+                targetState = selecting,
+                transitionSpec = {
+                    if (reduce) EnterTransition.None togetherWith ExitTransition.None
+                    else fadeIn(tween(Motion.short)) togetherWith fadeOut(tween(Motion.short))
+                },
+                label = "fileLead",
+            ) { on ->
+                if (on) {
+                    Checkbox(checked = selected, onCheckedChange = { onClick() })
+                } else {
+                    Icon(icon, contentDescription = null)
+                }
+            }
+        },
         trailingContent = {
-            if (onDelete != null) {
+            if (!selecting && hasMenuActions) {
                 IconButton(onClick = { menu = true }) {
                     Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.a11y_file_actions))
                 }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    DropdownMenuItem(text = { Text(stringResource(R.string.library_remove_from_library)) }, onClick = { menu = false; onDelete() })
+                    if (subtitleFile && onBindSubtitle != null) {
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.library_bind_subtitle_to_audio)) },
+                            onClick = { menu = false; onBindSubtitle() },
+                        )
+                    }
+                    if (downloaded && onDeleteDownloaded != null) {
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.library_action_delete_downloads)) },
+                            onClick = { menu = false; onDeleteDownloaded() },
+                        )
+                    }
+                    if (onDelete != null) {
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.library_remove_from_library)) },
+                            onClick = { menu = false; onDelete() },
+                        )
+                    }
                 }
             }
         },
-        modifier = modifier.clickable(onClick = onClick),
+        modifier = modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick),
+        colors = ListItemDefaults.colors(
+            containerColor = if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
+        ),
     )
 }
 
@@ -664,15 +793,20 @@ private fun CachePickDialog(
         text = {
             Column {
                 Text(message)
-                options.forEach { (value, label) ->
-                    Text(
-                        label,
-                        style = MaterialTheme.typography.titleMedium,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onPick(value) }
-                            .padding(vertical = 14.dp),
-                    )
+                LazyColumn(Modifier.heightIn(max = 320.dp)) {
+                    items(options) { option ->
+                        val (value, label) = option
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 48.dp)
+                                .clickable { onPick(value) }
+                                .padding(vertical = 8.dp),
+                            contentAlignment = Alignment.CenterStart,
+                        ) {
+                            Text(label, style = MaterialTheme.typography.titleMedium)
+                        }
+                    }
                 }
             }
         },

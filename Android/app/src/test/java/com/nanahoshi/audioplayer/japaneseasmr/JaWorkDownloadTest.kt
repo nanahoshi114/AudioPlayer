@@ -8,6 +8,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.Call
 import okhttp3.EventListener
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -20,6 +21,7 @@ import okhttp3.ResponseBody
 import okhttp3.ResponseBody.Companion.toResponseBody
 import okio.Buffer
 import okio.ByteString.Companion.decodeBase64
+import okio.ByteString.Companion.toByteString
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -30,6 +32,9 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import javax.crypto.Cipher
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 class JaWorkDownloadTest {
     @get:Rule val temporary = TemporaryFolder()
@@ -496,7 +501,304 @@ class JaWorkDownloadTest {
         assertFalse(crypto.verify(destination))
         val errors = listOf("https://mega.nz/folder/Fixture1#$share", "https://mega.nz/file/Fixture1#invalid")
         assertTrue(errors.all { runCatching { JaMegaShare.parse(it.toHttpUrl()) }.exceptionOrNull() is JaWorkException })
-        assertEquals("fixture.mp3", JaMegaShare.parse("https://mega.nz/#!Fixture1!$share".toHttpUrl()).crypto.name(attributes))
+        val legacy = JaMegaShare.parse("https://mega.nz/#!Fixture1!$share".toHttpUrl()) as JaMegaShare.SingleFile
+        assertEquals("fixture.mp3", legacy.crypto.name(attributes))
+    }
+
+    @Test fun folderSharesListOnceAndResumeAtTheNodeWithoutFetchingCompleteStagingAgain() = runBlocking {
+        for (link in listOf(folderShare(), legacyFolderShare())) {
+            val commands = mutableListOf<String>()
+            val storagePaths = mutableListOf<String>()
+            val client = client { request ->
+                assertNull(request.header("Cookie"))
+                if (request.url.host == "g.api.mega.co.nz") {
+                    assertEquals(PUBLIC, request.url.queryParameter("n"))
+                    val command = Buffer().also { request.body!!.writeTo(it) }.readUtf8()
+                    commands += command
+                    when (commands.size) {
+                        1 -> reply(request, 200, folderTree(
+                            directory(SUB, ROOT, "Nested"),
+                            directory("Empty___", ROOT, "Empty"),
+                            file(AUDIO, SUB, "voice.mp3"),
+                            file("Zero____", ROOT, "zero.txt", size = 0),
+                            file("BadSlash", ROOT, "not/a/path"),
+                            file("Other___", "Other___", "outside"),
+                        ).toResponseBody())
+                        2 -> reply(request, 200, ticket("ready").toResponseBody())
+                        else -> error("Unexpected MEGA API request")
+                    }
+                } else {
+                    storagePaths += request.url.encodedPath
+                    val bytes = if (storagePaths.size == 1) truncatedBody(megaCiphertext.copyOf(7), 32)
+                        else megaCiphertext.copyOfRange(7, 32).toResponseBody()
+                    reply(request, 200, bytes)
+                }
+            }
+            val manifest = client.manifest(entry, JaVisibleDownload(link, ""))
+            assertEquals(listOf("Nested/voice.mp3", "zero.txt"), manifest.files.map { it.relativePath })
+            assertEquals(1, manifest.skipped)
+            assertEquals(listOf("""[{"a":"f","c":1,"r":1,"ca":1}]"""), commands)
+            val dir = temporary.newFolder()
+            val destination = File(dir, "voice.mp3")
+            val voice = manifest.files.first()
+            client.download(voice, destination) {}
+            client.download(voice, destination) {}
+            val empty = File(dir, "zero.txt")
+            client.download(manifest.files.last(), empty) {}
+            assertTrue(empty.isFile)
+            assertEquals(0L, empty.length())
+            assertEquals("Japanese ASMR fixture bytes v1.\n", destination.readText())
+            assertEquals(listOf("/ready/0-31", "/ready/7-31"), storagePaths)
+            assertEquals("""[{"a":"g","n":"$AUDIO","g":1,"ssl":2}]""", commands.last())
+            assertEquals(2, commands.size)
+        }
+    }
+
+    @Test fun folderFocusUsesTheSelectorTypeAndOnlySharesDescendantsOfTheRoot() = runBlocking {
+        val tree = folderTree(
+            directory(SUB, ROOT, "Nested"),
+            file(AUDIO, SUB, "voice.mp3"),
+            file("Other___", ROOT, "other.mp3"),
+            directory("Foreign_", "Missing_", "Outside"),
+            file("Stray___", "Foreign_", "stray.mp3"),
+            directory("Broken__", ROOT, "Broken").replace("\"a\":", "\"broken\":"),
+            file("Unread__", "Broken__", "unread.mp3"),
+            file("FileSub_", AUDIO, "version.mp3"),
+        )
+        val client = client { request -> reply(request, 200, tree.toResponseBody()) }
+        for (link in listOf(folderShare("/folder/$SUB"), legacyFolderShare("!$SUB"),
+            folderShare("/file/$AUDIO"), legacyFolderShare("?$AUDIO"))
+        ) {
+            assertEquals("voice.mp3", client.manifest(entry, JaVisibleDownload(link, "")).files.single().relativePath)
+        }
+        for (link in listOf(legacyFolderShare("!$AUDIO"), legacyFolderShare("?$SUB"), folderShare("/file/Stray___"),
+            folderShare("/file/Unread__"), folderShare("/file/FileSub_"))
+        ) {
+            assertEquals(TextRef.Res(R.string.ja_error_mega_share_expired),
+                manifestError(client, link).userText)
+        }
+    }
+
+    @Test fun folderErrorsDistinguishInvalidRootEmptyAndUnusableBranches() = runBlocking {
+        val empty = folderTree(directory(SUB, ROOT, "Empty"), file(AUDIO, AUDIO, "orphan.mp3"))
+        val broken = folderTree(directory(SUB, ROOT, "Broken").replace("\"a\":", "\"broken\":"),
+            file(AUDIO, SUB, "voice.mp3"))
+        for ((body, link, expected) in listOf(
+            Triple(empty, folderShare(), R.string.ja_error_mega_empty_folder),
+            Triple(broken, folderShare(), R.string.ja_error_download_unavailable),
+            Triple(empty, folderShare().replace(megaFolderKey.toByteString().base64Url().trimEnd('='), "AAAAAAAAAAAAAAAAAAAAAA"),
+                R.string.ja_error_mega_share_expired),
+            Triple("""[{"f":[]}]""", folderShare(), R.string.ja_error_mega_share_expired),
+        )) {
+            val client = client { request -> reply(request, 200, body.toResponseBody()) }
+            assertEquals(TextRef.Res(expected), manifestError(client, link).userText)
+        }
+        val duplicate = folderTree(file(AUDIO, ROOT, "Voice.mp3"), file("Other___", ROOT, "voice.mp3"))
+        val client = client { request -> reply(request, 200, duplicate.toResponseBody()) }
+        val manifest = client.manifest(entry, JaVisibleDownload(folderShare(), ""))
+        assertEquals(1, manifest.files.size)
+        assertEquals(1, manifest.skipped)
+    }
+
+    @Test fun megaResumesOnTheRefreshedAddressAndInvalidatesOnlyAfterTheNewAddressIsRejected() = runBlocking {
+        for (rejectFresh in listOf(false, true)) {
+            var apiCalls = 0
+            val paths = mutableListOf<String>()
+            val client = client { request ->
+                if (request.url.host == "g.api.mega.co.nz") {
+                    apiCalls++
+                    reply(request, 200, ticket("fresh").toResponseBody())
+                } else {
+                    paths += request.url.encodedPath
+                    when (request.url.encodedPath) {
+                        "/old/0-31" -> reply(request, 403)
+                        "/fresh/0-31" -> if (rejectFresh) reply(request, 410)
+                            else reply(request, 200, truncatedBody(megaCiphertext.copyOf(7), 32))
+                        "/fresh/7-31" -> reply(request, 200, megaCiphertext.copyOfRange(7, 32).toResponseBody())
+                        else -> error("Unexpected storage request")
+                    }
+                }
+            }
+            val destination = File(temporary.newFolder(), "file")
+            if (rejectFresh) {
+                val failure = runCatching { client.download(megaRemote("old"), destination) {} }.exceptionOrNull()
+                assertTrue(failure is JaMegaManifestInvalidException)
+                assertEquals(listOf("/old/0-31", "/fresh/0-31"), paths)
+            } else {
+                client.download(megaRemote("old"), destination) {}
+                assertEquals(listOf("/old/0-31", "/fresh/0-31", "/fresh/7-31"), paths)
+                assertEquals("Japanese ASMR fixture bytes v1.\n", destination.readText())
+            }
+            assertEquals(1, apiCalls)
+        }
+    }
+
+    @Test fun megaFileLengthMismatchInvalidatesTheManifest() = runBlocking {
+        for ((body, error) in listOf(
+            ByteArray(33).toResponseBody() to R.string.ja_error_file_length_changed,
+            truncatedBody(ByteArray(33), -1) to R.string.ja_error_file_length_check,
+        )) {
+            val client = client { request ->
+                assertEquals("/old/0-31", request.url.encodedPath)
+                reply(request, 200, body)
+            }
+            val destination = File(temporary.newFolder(), "file")
+            val failure = runCatching { client.download(megaRemote("old"), destination) {} }.exceptionOrNull()
+            assertTrue(failure is JaMegaManifestInvalidException)
+            assertEquals(TextRef.Res(error), (failure as JaMegaManifestInvalidException).userText)
+        }
+    }
+
+    @Test fun megaTransferSkipsNetworkWhenThePartialAlreadyHasFullLength() = runBlocking {
+        var requests = 0
+        val client = client { requests++; error("unexpected storage request") }
+        val destination = File(temporary.newFolder(), "file").apply { writeBytes(ByteArray(32)) }
+        client.transferMega(megaRemote("old"), megaRemote("old").transfer as JaFileTransfer.Mega, destination) {}
+        assertEquals(0, requests)
+        assertEquals(32, destination.length())
+    }
+
+    @Test fun megaTransferDeletesAnOversizedPartialAndFailsWithoutRequestingAnInvalidRange() = runBlocking {
+        var requests = 0
+        val client = client { requests++; error("unexpected storage request") }
+        val destination = File(temporary.newFolder(), "file").apply { writeBytes(ByteArray(33)) }
+        val failure = runCatching {
+            client.transferMega(megaRemote("old"), megaRemote("old").transfer as JaFileTransfer.Mega, destination) {}
+        }.exceptionOrNull()
+        assertTrue(failure is JaWorkException)
+        assertFalse(failure is JaMegaManifestInvalidException)
+        assertEquals(TextRef.Res(R.string.ja_error_file_length_check), (failure as JaWorkException).userText)
+        assertFalse(destination.exists())
+        assertEquals(0, requests)
+    }
+
+    @Test fun megaCipherCopyTreatsLengthMismatchAndOverrunAsInvalidManifest() = runBlocking {
+        var requests = 0
+        val client = client { requests++; error("unexpected storage request") }
+        val request = Request.Builder().url("https://store.userstorage.mega.co.nz/old/0-31").build()
+        val crypto = JaMegaCrypto(megaShareKey)
+        for ((body, expected) in listOf(
+            ByteArray(33).toResponseBody() to R.string.ja_error_file_length_changed,
+            truncatedBody(ByteArray(33), -1) to R.string.ja_error_file_length_check,
+        )) {
+            val destination = File(temporary.newFolder(), "file")
+            val failure = runCatching {
+                client.copy(reply(request, 200, body), destination, 0L, 32L, {}, crypto.cipherAt(0))
+            }.exceptionOrNull()
+            assertTrue(failure is JaMegaManifestInvalidException)
+            assertEquals(TextRef.Res(expected), (failure as JaWorkException).userText)
+        }
+        assertEquals(0, requests)
+    }
+
+    @Test fun megaRefreshExhaustionKeepsTheBusyErrorAndNeverRevisitsTheOldAddress() = runBlocking {
+        var apiCalls = 0
+        var storageCalls = 0
+        val client = client { request ->
+            if (request.url.host == "g.api.mega.co.nz") {
+                apiCalls++
+                reply(request, 200, """[{"e":-4}]""".toResponseBody())
+            } else {
+                storageCalls++
+                reply(request, 404)
+            }
+        }
+        val failure = runCatching {
+            client.download(megaRemote("old"), File(temporary.newFolder(), "file")) {}
+        }.exceptionOrNull()
+        assertTrue(failure is JaMegaTransientException)
+        assertEquals(TextRef.Res(R.string.ja_error_mega_busy), (failure as JaWorkException).userText)
+        assertEquals(3, apiCalls)
+        assertEquals(1, storageCalls)
+    }
+
+    @Test fun megaStopsOnQuotaAndChangedSizeAndRetriesTemporaryListErrors() = runBlocking {
+        for (body in listOf("""[{"s":10,"e":-17}]""", """[{"e":-17}]""", "[-17]", "-17")) {
+            var calls = 0
+            val client = client { request ->
+                calls++
+                reply(request, 200, body.toResponseBody())
+            }
+            assertEquals(TextRef.Res(R.string.ja_error_mega_quota), manifestError(client, folderShare()).userText)
+            assertEquals(1, calls)
+        }
+        for ((address, response, expected) in listOf(
+            Triple("old", 509, R.string.ja_error_mega_quota),
+            Triple(null, 200, R.string.ja_error_mega_size_changed),
+        )) {
+            var calls = 0
+            val client = client { request ->
+                calls++
+                reply(request, response, ticket("changed", 33).toResponseBody())
+            }
+            val failure = runCatching {
+                client.download(megaRemote(address), File(temporary.newFolder(), "file")) {}
+            }.exceptionOrNull() as JaWorkException
+            assertEquals(TextRef.Res(expected), failure.userText)
+            assertEquals(1, calls)
+        }
+        val responses = ArrayDeque(listOf("-3", "[-18]", folderTree(file(AUDIO, ROOT, "voice.mp3"))))
+        val client = client { request -> reply(request, 200, responses.removeFirst().toResponseBody()) }
+        assertEquals("voice.mp3", client.manifest(entry, JaVisibleDownload(folderShare(), "")).files.single().relativePath)
+        assertTrue(responses.isEmpty())
+    }
+
+    @Test fun megaListIsLimitedByBytesAndMetaRefreshRetainsTheWholeUrl() = runBlocking {
+        val folder = folderTree(file(AUDIO, ROOT, "voice.mp3"))
+        val sizeInBytes = folder.toByteArray().size
+        val padding = "界".repeat((8 * 1024 * 1024 - sizeInBytes) / 3)
+        val padded = folder.replace("\"f\":", "\"padding\":\"$padding\",\"f\":")
+        val oversized = client { request -> reply(request, 200, padded.toResponseBody()) }
+        assertEquals(TextRef.Res(R.string.ja_error_download_unavailable),
+            manifestError(oversized, folderShare()).userText)
+
+        val client = client { request -> reply(request, 200, folder.toResponseBody()) }
+        val url = folderShare().replace("#", "?ticket=one;two#")
+        val visible = JaVisibleDownload(entry.address, """<meta http-equiv="refresh" content="0; URL = $url">""")
+        assertEquals("voice.mp3", client.manifest(entry, visible).files.single().relativePath)
+        assertFalse(megaRemote("a-private-ticket").toString().contains("a-private-ticket"))
+        val share = JaMegaShare.parse(folderShare().toHttpUrl())
+        assertFalse(share.toString().contains(folderShare().substringAfter('#')))
+    }
+
+    private suspend fun manifestError(client: JaWorkClient, link: String): JaWorkException =
+        runCatching { client.manifest(entry, JaVisibleDownload(link, "")) }.exceptionOrNull() as JaWorkException
+
+    private companion object {
+        const val PUBLIC = "Public__"
+        const val ROOT = "Root____"
+        const val SUB = "Nested__"
+        const val AUDIO = "Audio___"
+        val megaFolderKey = ByteArray(16) { (it + 3).toByte() }
+        val megaShareKey = "EBAQEBAQEBAQanTjPPw3cxAREhMUFRYXGGN-6DDxOXw".decodeBase64()!!.toByteArray()
+        val megaCiphertext = "x4eoobM-v_3_B2mHstVMHOdAttKMGGXGy8gx6gAkZCE".decodeBase64()!!.toByteArray()
+
+        fun folderShare(selector: String = "") = "https://mega.nz/folder/$PUBLIC#${encode(megaFolderKey)}$selector"
+        fun legacyFolderShare(selector: String = "") = "https://mega.nz/#F!$PUBLIC!${encode(megaFolderKey)}$selector"
+        fun folderTree(vararg nodes: String) = """[{"f":[${(listOf(directory(ROOT, "Foreign_", "Shared")) + nodes).joinToString(",")}]}]"""
+        fun directory(id: String, parent: String, name: String): String =
+            node(id, parent, 1, name, ByteArray(16) { (it + 31).toByte() })
+
+        fun file(id: String, parent: String, name: String, size: Int = 32): String =
+            node(id, parent, 0, name, if (size == 0) ByteArray(32) else megaShareKey, size)
+
+        fun node(id: String, parent: String, type: Int, name: String, key: ByteArray, size: Int = 0): String {
+            val attributeKey = if (type == 1) key else ByteArray(16) { (key[it].toInt() xor key[it + 16].toInt()).toByte() }
+            val raw = """MEGA{"n":${JsonPrimitive(name)}}""".toByteArray()
+            val attributes = Cipher.getInstance("AES/CBC/NoPadding").apply {
+                init(Cipher.ENCRYPT_MODE, SecretKeySpec(attributeKey, "AES"), IvParameterSpec(ByteArray(16)))
+            }.doFinal(raw.copyOf((raw.size + 15) and 15.inv()))
+            val wrapped = Cipher.getInstance("AES/ECB/NoPadding").apply {
+                init(Cipher.ENCRYPT_MODE, SecretKeySpec(megaFolderKey, "AES"))
+            }.doFinal(key)
+            return """{"h":"$id","p":"$parent","t":$type,"a":"${encode(attributes)}","k":"Foreign_:${encode(ByteArray(key.size))}/$ROOT:${encode(wrapped)}","s":$size}"""
+        }
+
+        fun encode(bytes: ByteArray) = bytes.toByteString().base64Url().trimEnd('=')
+        fun ticket(route: String, size: Int = 32) = """[{"g":"https://store.userstorage.mega.co.nz/$route","s":$size}]"""
+        fun megaRemote(route: String?) = JaRemoteFile("voice.mp3", 32, null,
+            JaFileTransfer.Mega(JaMegaFileSource.FolderFile(PUBLIC, AUDIO), JaMegaCrypto(megaShareKey),
+                route?.let { "https://store.userstorage.mega.co.nz/$it".toHttpUrl() }))
     }
 
     @Test fun archiveKeepsFirstCanonicalPathAndRejectsTraversal() {

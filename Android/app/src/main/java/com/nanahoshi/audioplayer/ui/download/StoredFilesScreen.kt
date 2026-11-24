@@ -15,39 +15,48 @@ import kotlinx.coroutines.CancellationException
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Album
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Icon
+import com.nanahoshi.audioplayer.playback.SubtitleCue
+import com.nanahoshi.audioplayer.playback.parseGeneratedSubtitles
 import com.nanahoshi.audioplayer.ui.components.AppTopBar
 import com.nanahoshi.audioplayer.ui.components.DeleteAudioDialog
 import com.nanahoshi.audioplayer.ui.components.EmptyState
 import com.nanahoshi.audioplayer.ui.components.ErrorState
 import com.nanahoshi.audioplayer.ui.components.LoadingState
+import com.nanahoshi.audioplayer.ui.components.SearchField
 import com.nanahoshi.audioplayer.ui.components.SelectionAction
 import com.nanahoshi.audioplayer.ui.components.SelectionTopBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -64,19 +73,23 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.nanahoshi.audioplayer.data.StoredCatalog
 import com.nanahoshi.audioplayer.data.StoredItem
 import com.nanahoshi.audioplayer.data.StoredKind
+import com.nanahoshi.audioplayer.data.decodeTextBytes
 import com.nanahoshi.audioplayer.data.formatByteSize
+import com.nanahoshi.audioplayer.data.readBoundedBytes
 import com.nanahoshi.audioplayer.data.storedItemMatches
 import com.nanahoshi.audioplayer.graph
 import com.nanahoshi.audioplayer.ui.EmptyHint
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.Locale
 
 class StoredFilesViewModel(app: Application) : AndroidViewModel(app) {
     private val graph = app.graph()
-    private val catalog = StoredCatalog(app, graph.db, graph.subtitles)
+    private val catalog = graph.storedCatalog
     var items by mutableStateOf<List<StoredItem>>(emptyList())
         private set
     var loading by mutableStateOf(true)
@@ -203,6 +216,7 @@ fun StoredFilesScreen(
     var query by rememberSaveable { mutableStateOf("") }
     var selecting by remember { mutableStateOf(false) }
     var selected by remember { mutableStateOf(setOf<String>()) }
+    var preview by remember { mutableStateOf<StoredItem?>(null) }
     val categoryItems = remember(viewModel.items, showAudio) {
         viewModel.items.filter { (it.kind == StoredKind.AUDIO) == showAudio }
     }
@@ -228,6 +242,9 @@ fun StoredFilesScreen(
             onCancel = viewModel::cancelDelete,
         )
     }
+    preview?.let { item ->
+        SubtitlePreviewDialog(item = item, onDismiss = { preview = null })
+    }
     Column(Modifier.fillMaxSize()) {
         if (selecting) {
             SelectionTopBar(
@@ -236,6 +253,7 @@ fun StoredFilesScreen(
                     selecting = false
                     selected = emptySet()
                 },
+                pinDestructiveWhenFits = true,
                 actions = buildList {
                     add(
                         SelectionAction(
@@ -262,7 +280,15 @@ fun StoredFilesScreen(
                 },
             )
         } else {
-            AppTopBar(title = stringResource(R.string.stored_title), onBack = onBack)
+            AppTopBar(
+                title = stringResource(R.string.stored_title),
+                onBack = onBack,
+                actions = {
+                    IconButton(onClick = viewModel::refresh, enabled = !viewModel.loading) {
+                        Icon(Icons.Default.Refresh, contentDescription = stringResource(R.string.a11y_refresh))
+                    }
+                },
+            )
         }
         SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
             SegmentedButton(
@@ -270,29 +296,29 @@ fun StoredFilesScreen(
                 onClick = { showAudio = true },
                 shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
                 enabled = !selecting,
-            ) { Text(stringResource(R.string.stored_segment_audio)) }
+            ) { Text(stringResource(R.string.stored_segment_audio), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
             SegmentedButton(
                 selected = !showAudio,
                 onClick = { showAudio = false },
                 shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
                 enabled = !selecting,
-            ) { Text(stringResource(R.string.stored_segment_subtitle)) }
+            ) { Text(stringResource(R.string.stored_segment_subtitle), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
         }
-        OutlinedTextField(
+        SearchField(
             value = query,
             onValueChange = { query = it },
-            placeholder = { Text(stringResource(R.string.stored_search_hint)) },
-            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-            singleLine = true,
-            shape = RoundedCornerShape(28.dp),
+            placeholder = stringResource(R.string.stored_search_hint),
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
         )
         when {
-            viewModel.loading && visible.isEmpty() -> LoadingState(stringResource(R.string.stored_loading), Modifier.fillMaxSize())
+            viewModel.loading && visible.isEmpty() -> LoadingState(
+                stringResource(R.string.stored_loading),
+                Modifier.weight(1f).fillMaxWidth(),
+            )
             viewModel.error != null && visible.isEmpty() -> ErrorState(
                 message = viewModel.error!!,
                 onRetry = viewModel::refresh,
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier.weight(1f).fillMaxWidth(),
             )
             categoryItems.isEmpty() -> EmptyState(
                 title = stringResource(
@@ -303,18 +329,19 @@ fun StoredFilesScreen(
                     if (showAudio) R.string.stored_audio_empty_message
                     else R.string.stored_subtitle_empty_message,
                 ),
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier.weight(1f).fillMaxWidth(),
             )
             visible.isEmpty() -> EmptyState(
                 title = stringResource(R.string.stored_search_empty_title),
                 message = stringResource(R.string.stored_search_empty_message),
                 actionLabel = stringResource(R.string.stored_clear_search),
                 onAction = { query = "" },
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier.weight(1f).fillMaxWidth(),
             )
             else -> LazyColumn(
                 state = if (showAudio) audioListState else subtitleListState,
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = PaddingValues(bottom = 24.dp),
             ) {
                 if (viewModel.loading) {
                     item(key = "loading") { LoadingState(stringResource(R.string.stored_loading)) }
@@ -324,7 +351,7 @@ fun StoredFilesScreen(
                 if (!selecting) {
                     item(key = "selection-hint") {
                         Text(
-                            stringResource(if (showAudio) R.string.stored_audio_tap_hint else R.string.stored_long_press_hint),
+                            stringResource(if (showAudio) R.string.stored_audio_tap_hint else R.string.stored_subtitle_tap_hint),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
@@ -349,7 +376,7 @@ fun StoredFilesScreen(
                                 item.workCode?.takeIf { it.isNotBlank() },
                                 formatByteSize(item.bytes),
                             )
-                            Text(bits.joinToString(" · "))
+                            Text(bits.joinToString(" · "), maxLines = 2, overflow = TextOverflow.Ellipsis)
                         },
                         colors = if (on) {
                             ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
@@ -360,7 +387,10 @@ fun StoredFilesScreen(
                             onLongClickLabel = stringResource(R.string.stored_select_file),
                             onClick = {
                                 if (!selecting) {
-                                    viewModel.play(item)
+                                    when (item.kind) {
+                                        StoredKind.AUDIO -> viewModel.play(item)
+                                        else -> preview = item
+                                    }
                                     return@combinedClickable
                                 }
                                 selected = if (on) selected - item.path else selected + item.path
@@ -376,6 +406,99 @@ fun StoredFilesScreen(
                 }
             }
         }
+    }
+}
+
+private const val SUBTITLE_PREVIEW_LIMIT = 512 * 1024
+
+private class SubtitlePreviewContent(
+    val raw: String,
+    val cues: List<SubtitleCue>?,
+    val truncated: Boolean,
+)
+
+@Composable
+private fun SubtitlePreviewDialog(item: StoredItem, onDismiss: () -> Unit) {
+    var content by remember(item.path) { mutableStateOf<SubtitlePreviewContent?>(null) }
+    var failed by remember(item.path) { mutableStateOf(false) }
+    LaunchedEffect(item.path) {
+        content = null
+        failed = false
+        val loaded = withContext(Dispatchers.IO) {
+            runCatching { readSubtitlePreview(File(item.path), item.kind) }
+        }
+        loaded.onSuccess { content = it }.onFailure { failed = true }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(item.name, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+        text = {
+            val loaded = content
+            when {
+                failed -> Text(stringResource(R.string.stored_preview_failed))
+                loaded == null -> LoadingState(stringResource(R.string.stored_loading))
+                else -> SelectionContainer {
+                    Column(
+                        Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        if (loaded.truncated) {
+                            Text(
+                                stringResource(R.string.stored_preview_truncated),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        val cues = loaded.cues
+                        if (cues == null) {
+                            Text(loaded.raw, style = MaterialTheme.typography.bodySmall)
+                        } else {
+                            cues.forEach { cue ->
+                                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Text(
+                                        "${subtitleTime(cue.startMs)} → ${subtitleTime(cue.endMs)}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    Text(cue.text, style = MaterialTheme.typography.bodyMedium)
+                                    cue.translation?.takeIf { it.isNotBlank() }?.let { translation ->
+                                        Text(
+                                            translation,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = MaterialTheme.colorScheme.primary,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_close)) }
+        },
+    )
+}
+
+private fun readSubtitlePreview(file: File, kind: StoredKind): SubtitlePreviewContent {
+    if (!file.isFile) throw java.io.IOException("subtitle missing")
+    val (bytes, clipped) = file.inputStream().use { readBoundedBytes(it, SUBTITLE_PREVIEW_LIMIT) }
+    val raw = decodeTextBytes(bytes, clipped)
+    val cues = if (kind == StoredKind.GENERATED) parseGeneratedSubtitles(raw)?.displayCues else null
+    return SubtitlePreviewContent(raw, cues, clipped)
+}
+
+private fun subtitleTime(milliseconds: Long): String {
+    val safe = milliseconds.coerceAtLeast(0L)
+    val hours = safe / 3_600_000L
+    val minutes = safe / 60_000L % 60L
+    val seconds = safe / 1_000L % 60L
+    val millis = safe % 1_000L
+    return if (hours > 0L) {
+        String.format(Locale.US, "%d:%02d:%02d.%03d", hours, minutes, seconds, millis)
+    } else {
+        String.format(Locale.US, "%02d:%02d.%03d", minutes, seconds, millis)
     }
 }
 

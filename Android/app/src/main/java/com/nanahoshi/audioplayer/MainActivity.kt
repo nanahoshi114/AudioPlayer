@@ -6,6 +6,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.SystemBarStyle
@@ -69,15 +70,20 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.IntOffset
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.nanahoshi.audioplayer.data.db.DownloadStatus
+import com.nanahoshi.audioplayer.ui.components.LocalActiveTopBarOwner
 import com.nanahoshi.audioplayer.ui.components.LocalTopBarOverride
+import com.nanahoshi.audioplayer.ui.components.TopBarOverrideController
+import com.nanahoshi.audioplayer.ui.components.libraryTopBarOwnerKey
 import com.nanahoshi.audioplayer.ui.theme.LocalReduceMotion
 import com.nanahoshi.audioplayer.ui.theme.Motion
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -87,18 +93,18 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.navigation.NavBackStackEntry
 import androidx.navigation.NavController
-import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
-import androidx.navigation.navArgument
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
-import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
+import androidx.navigation.navigation
 import com.nanahoshi.audioplayer.ui.download.DownloadScreen
 import com.nanahoshi.audioplayer.ui.download.StoredFilesScreen
 import com.nanahoshi.audioplayer.ui.asmr.MineScreen
 import com.nanahoshi.audioplayer.ui.asmr.PurchasesScreen
 import com.nanahoshi.audioplayer.ui.asmr.OnlineSearchScreen
+import com.nanahoshi.audioplayer.ui.asmr.OnlineSearchSource
 import com.nanahoshi.audioplayer.ui.asmr.OnlineWorkScreen
 import com.nanahoshi.audioplayer.ui.asmr.JapaneseAsmrVerificationScreen
 import com.nanahoshi.audioplayer.ui.library.FavoriteScreen
@@ -115,6 +121,7 @@ import com.nanahoshi.audioplayer.ui.settings.ModelSettingsScreen
 import com.nanahoshi.audioplayer.ui.settings.SettingsScreen
 import com.nanahoshi.audioplayer.ui.theme.AudioPlayerTheme
 import com.nanahoshi.audioplayer.ui.importing.ClipboardImportDialog
+import com.nanahoshi.audioplayer.data.ClipboardImportStage
 import com.nanahoshi.audioplayer.ui.components.openJapaneseAsmrInBrowser
 import com.nanahoshi.audioplayer.ui.importing.ClipboardImportViewModel
 import kotlinx.coroutines.delay
@@ -233,7 +240,7 @@ class MainActivity : ComponentActivity() {
 internal fun NavController.popJaDownloadVerification(entry: NavBackStackEntry): Boolean =
     currentBackStackEntry?.id == entry.id && popBackStack()
 
-private object Routes {
+internal object Routes {
     const val Library = "library"
     const val BiliCollection = "bilibili/collection?ref={ref}"
     fun biliCollection(ref: com.nanahoshi.audioplayer.bilibili.BiliCollection): String {
@@ -279,6 +286,58 @@ private object Routes {
     fun playlist(id: Long) = "playlist/$id"
 }
 
+internal object TabGraphs {
+    const val Library = "tab/library"
+    const val Playlists = "tab/playlists"
+    const val Online = "tab/online"
+    const val Mine = "tab/mine"
+    const val Settings = "tab/settings"
+
+    val all = setOf(Library, Playlists, Online, Mine, Settings)
+}
+
+internal fun activeTabGraph(backStackRoutes: List<String?>): String? =
+    backStackRoutes.lastOrNull { it in TabGraphs.all }
+
+private fun isTab(route: String?) = route == Routes.Library || route == Routes.Playlists ||
+    route == Routes.Online || route == Routes.Mine || route == Routes.Settings
+
+internal fun showBottomDock(route: String?) = isTab(route) ||
+    route == Routes.OnlineWork || route == Routes.LibraryWork || route == Routes.BiliVideo ||
+    route == Routes.Playlist || route == Routes.BiliCollection
+
+internal fun returnsToLibraryOnBack(route: String?) = isTab(route) && route != Routes.Library
+
+internal enum class TabNavigationAction { Stay, PopToRoot, Switch }
+
+internal fun tabNavigationAction(
+    activeGraph: String?,
+    currentRoute: String?,
+    targetGraph: String,
+    targetRootRoute: String,
+): TabNavigationAction = when {
+    currentRoute == targetRootRoute -> TabNavigationAction.Stay
+    activeGraph == targetGraph -> TabNavigationAction.PopToRoot
+    else -> TabNavigationAction.Switch
+}
+
+internal fun isSameLibraryWork(route: String?, previousFolderId: Long?, targetFolderId: Long): Boolean =
+    route == Routes.LibraryWork && previousFolderId == targetFolderId
+
+private fun NavController.navigateTab(targetGraph: String, targetRootRoute: String) {
+    val activeGraph = activeTabGraph(currentBackStack.value.map { it.destination.route })
+    when (tabNavigationAction(activeGraph, currentDestination?.route, targetGraph, targetRootRoute)) {
+        TabNavigationAction.Stay -> Unit
+        TabNavigationAction.PopToRoot -> popBackStack(targetRootRoute, inclusive = false)
+        TabNavigationAction.Switch -> navigate(targetGraph) {
+            // Keep the save-state anchor separate from every tab graph.
+            popUpTo(graph.id) { saveState = true }
+            launchSingleTop = true
+            restoreState = true
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun PlayerApp(
@@ -286,8 +345,9 @@ private fun PlayerApp(
     openTaskPage: MutableStateFlow<String?>,
 ) {
     val navController = rememberNavController()
-    val backStack by navController.currentBackStackEntryAsState()
-    val route = backStack?.destination?.route
+    val backStack by navController.currentBackStack.collectAsStateWithLifecycle()
+    val currentEntry = backStack.lastOrNull()
+    val route = currentEntry?.destination?.route
     LaunchedEffect(route, navController, openTaskPage) {
         if (route == null) return@LaunchedEffect
         openTaskPage.collect { destination ->
@@ -297,26 +357,44 @@ private fun PlayerApp(
             }
         }
     }
-    var lastTab by remember { mutableStateOf(Routes.Library) }
+    val tabInBackStack = activeTabGraph(backStack.map { it.destination.route })
+    var lastTabGraph by rememberSaveable { mutableStateOf(TabGraphs.Library) }
     SideEffect {
-        if (isTab(route)) lastTab = route!!
+        if (tabInBackStack != null) lastTabGraph = tabInBackStack
     }
-    val highlight = if (isTab(route)) route else lastTab
+    val activeGraph = tabInBackStack ?: lastTabGraph
     val showTopBar = isTab(route)
-    val showBottomDock = showTopBar || route == Routes.OnlineWork || route == Routes.LibraryWork || route == Routes.BiliVideo
+    val showBottomDock = showBottomDock(route)
+    BackHandler(enabled = returnsToLibraryOnBack(route)) {
+        if (returnsToLibraryOnBack(navController.currentDestination?.route)) {
+            navController.navigateTab(TabGraphs.Library, Routes.Library)
+            if (navController.currentDestination?.route != Routes.Library) {
+                navController.popBackStack(Routes.Library, inclusive = false)
+            }
+        }
+    }
     val context = LocalContext.current
     val graph = (context.applicationContext as AudioPlayerApplication).graph
     com.nanahoshi.audioplayer.ui.components.DlsiteDownloadDialog(graph.dlsiteDownloadRequests)
     val messages = graph.messages
     val message by messages.collectAsStateWithLifecycle()
-    com.nanahoshi.audioplayer.ui.bilibili.BiliImportDialog(graph.biliImportRequests)
+    val biliImportPrompt by graph.biliImportRequests.prompt.collectAsStateWithLifecycle()
+    com.nanahoshi.audioplayer.ui.bilibili.BiliImportDialog(graph.biliImportRequests, biliImportPrompt)
     val sleepFinished by graph.player.sleepFinished
         .collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     val clipboardController = clipboardImport.controller
     val pendingLookup = clipboardController.pendingLookup
     val lifecycle = LocalLifecycleOwner.current.lifecycle
-    val topBarOverride = remember { mutableStateOf<(@Composable () -> Unit)?>(null) }
+    var onlineSource by rememberSaveable { mutableStateOf(OnlineSearchSource.WORKS) }
+    val topBarOverride = remember { TopBarOverrideController() }
+    val activeTopBarOwner = currentEntry?.let { entry ->
+        when (route) {
+            Routes.Library -> libraryTopBarOwnerKey(entry.id)
+            Routes.Online -> onlineSource.topBarOwnerKey(entry.id)
+            else -> null
+        }
+    }
     val reduceMotion = LocalReduceMotion.current
     val downloads by graph.downloads.observe().collectAsStateWithLifecycle(emptyList())
     val whisperJobs by graph.whisper.observe().collectAsStateWithLifecycle(emptyList())
@@ -396,32 +474,40 @@ private fun PlayerApp(
             },
         )
     }
-    if (!sleepFinished) clipboardController.state?.let { state ->
+    if (!sleepFinished && biliImportPrompt == null) clipboardController.state?.takeUnless {
+        it.stage == ClipboardImportStage.CHOOSING_BILI_PARTS
+    }?.let { state ->
         ClipboardImportDialog(state, clipboardController::dismiss, clipboardController::confirm) { workno ->
-            clipboardController.dismiss()
             val article = state.preview.jaArticle?.post
             val external = state.preview.jaBrowserUrl
             val verification = state.preview.jaVerificationPage
             if (verification != null) {
-                navController.navigate(Routes.japaneseAsmrVerification(verification))
+                clipboardController.beginJaVerification(state.preview)?.let { token ->
+                    navController.navigate(Routes.japaneseAsmrVerification(verification, operation = "CLIPBOARD_IMPORT", token = token))
+                }
             } else if (external != null) {
+                clipboardController.dismiss()
                 context.openJapaneseAsmrInBrowser(external)
             } else {
+                clipboardController.dismiss()
                 navController.navigate(Routes.onlineWork(article?.rj ?: workno, jaPost = article?.postId)) { launchSingleTop = true }
             }
         }
     }
     SharedTransitionLayout {
     val shared = this
-    CompositionLocalProvider(LocalTopBarOverride provides topBarOverride) {
+    CompositionLocalProvider(
+        LocalTopBarOverride provides topBarOverride,
+        LocalActiveTopBarOwner provides activeTopBarOwner,
+    ) {
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             AnimatedVisibility(visible = showTopBar, enter = barEnter, exit = barExit) {
-                val selection = topBarOverride.value
-                if (route == Routes.Library && selection != null) {
-                    selection()
+                val selection = topBarOverride.entry?.takeIf { it.ownerKey == activeTopBarOwner }
+                if (selection != null) {
+                    key(selection.ownerKey) { selection.content() }
                 } else {
                     TopAppBar(
                         title = {
@@ -460,7 +546,7 @@ private fun PlayerApp(
             }
         },
         bottomBar = {
-            AnimatedVisibility(visible = showBottomDock || route == Routes.BiliCollection || route == Routes.Playlist, enter = dockEnter, exit = dockExit) {
+            AnimatedVisibility(visible = showBottomDock, enter = dockEnter, exit = dockExit) {
                 val dockScope = this
                 Column {
                     MiniPlayer(
@@ -472,64 +558,34 @@ private fun PlayerApp(
                             )
                         },
                     )
-                    if (showBottomDock) NavigationBar {
+                    NavigationBar {
                         NavigationBarItem(
-                            selected = highlight == Routes.Library,
-                            onClick = {
-                                navController.navigate(Routes.Library) {
-                                    popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                                    launchSingleTop = true
-                                    restoreState = true
-                                }
-                            },
+                            selected = activeGraph == TabGraphs.Library,
+                            onClick = { navController.navigateTab(TabGraphs.Library, Routes.Library) },
                             icon = { Icon(Icons.Default.LibraryMusic, contentDescription = null) },
                             label = { Text(stringResource(R.string.nav_library)) },
                         )
                         NavigationBarItem(
-                            selected = highlight == Routes.Playlists,
-                            onClick = {
-                                navController.navigate(Routes.Playlists) {
-                                    popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                                    launchSingleTop = true
-                                    restoreState = true
-                                }
-                            },
+                            selected = activeGraph == TabGraphs.Playlists,
+                            onClick = { navController.navigateTab(TabGraphs.Playlists, Routes.Playlists) },
                             icon = { Icon(Icons.AutoMirrored.Filled.QueueMusic, contentDescription = null) },
                             label = { Text(stringResource(R.string.nav_playlists)) },
                         )
                         NavigationBarItem(
-                            selected = highlight == Routes.Online,
-                            onClick = {
-                                navController.navigate(Routes.Online) {
-                                    popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                                    launchSingleTop = true
-                                    restoreState = true
-                                }
-                            },
+                            selected = activeGraph == TabGraphs.Online,
+                            onClick = { navController.navigateTab(TabGraphs.Online, Routes.Online) },
                             icon = { Icon(Icons.Default.Search, contentDescription = null) },
                             label = { Text(stringResource(R.string.nav_online)) },
                         )
                         NavigationBarItem(
-                            selected = highlight == Routes.Mine,
-                            onClick = {
-                                navController.navigate(Routes.Mine) {
-                                    popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                                    launchSingleTop = true
-                                    restoreState = true
-                                }
-                            },
+                            selected = activeGraph == TabGraphs.Mine,
+                            onClick = { navController.navigateTab(TabGraphs.Mine, Routes.Mine) },
                             icon = { Icon(Icons.Default.Person, contentDescription = null) },
                             label = { Text(stringResource(R.string.nav_mine)) },
                         )
                         NavigationBarItem(
-                            selected = highlight == Routes.Settings,
-                            onClick = {
-                                navController.navigate(Routes.Settings) {
-                                    popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                                    launchSingleTop = true
-                                    restoreState = true
-                                }
-                            },
+                            selected = activeGraph == TabGraphs.Settings,
+                            onClick = { navController.navigateTab(TabGraphs.Settings, Routes.Settings) },
                             icon = { Icon(Icons.Default.Settings, contentDescription = null) },
                             label = { Text(stringResource(R.string.nav_settings)) },
                         )
@@ -540,7 +596,7 @@ private fun PlayerApp(
     ) { padding ->
         NavHost(
             navController = navController,
-            startDestination = Routes.Library,
+            startDestination = TabGraphs.Library,
             // 子页面自带顶栏，也会再垫一次状态栏高度；这里先声明已经垫过，避免顶部出现两份空白。
             modifier = Modifier.padding(padding).consumeWindowInsets(padding),
             enterTransition = {
@@ -588,20 +644,22 @@ private fun PlayerApp(
                 }
             },
         ) {
-            composable(Routes.Library) {
-                LibraryScreen(
-                    onOpenPreview = { fileId -> navController.navigate(Routes.preview(fileId)) },
-                    onOpenLibraryWork = { id -> navController.navigate(Routes.libraryWork(id)) },
-                    onOpenBiliVideo = { id -> navController.navigate(Routes.biliVideo(id)) },
-                    onVerifyJaDownload = { token -> navController.navigate(Routes.jaDownloadVerification(token)) },
-                    onImportOnline = {
-                        navController.navigate(Routes.Online) {
-                            popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                            launchSingleTop = true
-                            restoreState = true
-                        }
-                    },
-                )
+            navigation(route = TabGraphs.Library, startDestination = Routes.Library) {
+                composable(Routes.Library) { entry ->
+                    LibraryScreen(
+                        topBarOwnerKey = libraryTopBarOwnerKey(entry.id),
+                        onOpenPreview = { fileId -> navController.navigate(Routes.preview(fileId)) },
+                        onOpenLibraryWork = { id -> navController.navigate(Routes.libraryWork(id)) },
+                        onOpenBiliVideo = { id -> navController.navigate(Routes.biliVideo(id)) },
+                        onVerifyJaDownload = { token -> navController.navigate(Routes.jaDownloadVerification(token)) },
+                        onImportOnline = {
+                            navController.navigateTab(TabGraphs.Online, Routes.Online)
+                            if (navController.currentDestination?.route != Routes.Online) {
+                                navController.popBackStack(Routes.Online, inclusive = false)
+                            }
+                        },
+                    )
+                }
             }
             composable(
                 route = Routes.LibraryWork,
@@ -619,24 +677,37 @@ private fun PlayerApp(
             }
             composable(Routes.BiliVideo, arguments = listOf(navArgument("folderId") { type = NavType.LongType })) { entry ->
                 val id = entry.arguments?.getLong("folderId") ?: return@composable
-                com.nanahoshi.audioplayer.ui.bilibili.BiliVideoScreen(id, onBack = { navController.popBackStack() })
+                com.nanahoshi.audioplayer.ui.bilibili.BiliVideoScreen(
+                    id,
+                    onBack = { if (navController.currentBackStackEntry?.id == entry.id) navController.popBackStack() },
+                )
             }
             composable(Routes.BiliCollection, arguments = listOf(navArgument("ref") { type = NavType.StringType })) { entry ->
                 val ref = runCatching {
                     com.nanahoshi.audioplayer.bilibili.biliLibraryJson.decodeFromString(
                         com.nanahoshi.audioplayer.bilibili.BiliCollection.serializer(), entry.arguments?.getString("ref").orEmpty())
                 }.getOrNull()
-                if (ref != null) com.nanahoshi.audioplayer.ui.bilibili.BiliCollectionScreen(initial = ref, onBack = { navController.popBackStack() })
+                if (ref != null) com.nanahoshi.audioplayer.ui.bilibili.BiliCollectionScreen(
+                    initial = ref,
+                    onBack = { if (navController.currentBackStackEntry?.id == entry.id) navController.popBackStack() },
+                )
                 else com.nanahoshi.audioplayer.ui.bilibili.BiliCollectionRouteError(onBack = { navController.popBackStack() })
             }
-            composable(Routes.Playlists) {
-                PlaylistListScreen(onOpen = { id -> navController.navigate(Routes.playlist(id)) })
+            navigation(route = TabGraphs.Playlists, startDestination = Routes.Playlists) {
+                composable(Routes.Playlists) {
+                    PlaylistListScreen(onOpen = { id -> navController.navigate(Routes.playlist(id)) })
+                }
             }
-            composable(Routes.Online) {
-                OnlineSearchScreen(onOpenWork = { sourceId -> navController.navigate(Routes.onlineWork(sourceId)) },
-                    onOpenBiliCollection = { ref ->
-                        navController.navigate(Routes.biliCollection(ref))
-                    })
+            navigation(route = TabGraphs.Online, startDestination = Routes.Online) {
+                composable(Routes.Online) { entry ->
+                    OnlineSearchScreen(
+                        entryId = entry.id,
+                        source = onlineSource,
+                        onSourceChange = { onlineSource = it },
+                        onOpenWork = { sourceId -> navController.navigate(Routes.onlineWork(sourceId)) },
+                        onOpenBiliCollection = { ref -> navController.navigate(Routes.biliCollection(ref)) },
+                    )
+                }
             }
             composable(
                 route = Routes.OnlineWork,
@@ -647,8 +718,21 @@ private fun PlayerApp(
             ) { entry ->
                 val sourceId = entry.arguments?.getString("sourceId").orEmpty()
                 OnlineWorkScreen(
-                    sourceId,
+                    sourceId = sourceId,
                     onBack = { navController.popBackStack() },
+                    onOpenLibraryWork = { folderId ->
+                        if (navController.currentBackStackEntry?.id == entry.id) {
+                            val previous = navController.previousBackStackEntry
+                            val backToSameWork = isSameLibraryWork(
+                                previous?.destination?.route, previous?.arguments?.getLong("folderId"), folderId,
+                            )
+                            if (backToSameWork) {
+                                navController.popBackStack()
+                            } else {
+                                navController.navigate(Routes.libraryWork(folderId)) { launchSingleTop = true }
+                            }
+                        }
+                    },
                     onOpenPreview = { fileId -> navController.navigate(Routes.preview(fileId)) },
                     onOpenRemotePreview = { navController.navigate(Routes.RemotePreview) },
                     onVerifyJapaneseAsmr = { page, rj, cleanup ->
@@ -675,20 +759,24 @@ private fun PlayerApp(
                 val mediaKey = args.getString("mediaKey")
                 val operation = args.getString("operation") ?: "SYNC"
                 val token = args.getString("token").orEmpty()
-                val request = token.takeIf { it.isNotEmpty() }?.let(graph.jaRefreshRequests::get)
+                val request = token.takeIf { operation == "REFRESH" && it.isNotEmpty() }?.let(graph.jaRefreshRequests::get)
                 val url = request?.post?.url ?: args.getString("url").orEmpty()
                 val expected = request?.post?.rj ?: args.getString("rj")?.takeIf { it.isNotEmpty() }
                 JapaneseAsmrVerificationScreen(
                     url = url,
                     expectedRj = expected,
                     onBack = {
+                        if (navController.currentBackStackEntry?.id != entry.id) return@JapaneseAsmrVerificationScreen
                         if (request != null) graph.jaRefreshRequests.finish(token, null)
+                        if (operation == "CLIPBOARD_IMPORT") clipboardController.finishJaVerification(token, null)
                         navController.popBackStack()
                     },
                     onArticle = { article ->
+                        if (navController.currentBackStackEntry?.id != entry.id) return@JapaneseAsmrVerificationScreen
                         when {
                             request != null -> graph.jaRefreshRequests.finish(token, article)
                             operation == "PLAYBACK" -> graph.player.resumeVerifiedTrack(queueId, mediaKey, article)
+                            operation == "CLIPBOARD_IMPORT" -> clipboardController.finishJaVerification(token, article)
                             else -> navController.previousBackStackEntry?.savedStateHandle
                                 ?.set("jaVerifiedArticle", "${article.post.postId}:$operation")
                         }
@@ -700,28 +788,32 @@ private fun PlayerApp(
                 val id = entry.arguments?.getString("listId")?.takeIf { it == "LL" || it == "WL" } ?: return@composable
                 com.nanahoshi.audioplayer.ui.youtube.YouTubeBrowser(playlistId = id, onBack = { navController.popBackStack() })
             }
-            composable(Routes.Mine) {
-                MineScreen(
-                    onOpenPurchases = { navController.navigate(Routes.Purchases) },
-                    onOpenFavorites = { navController.navigate(Routes.favorites(null)) },
-                    onOpenYouTubeList = { navController.navigate("youtube/list/$it") },
-                )
+            navigation(route = TabGraphs.Mine, startDestination = Routes.Mine) {
+                composable(Routes.Mine) {
+                    MineScreen(
+                        onOpenPurchases = { navController.navigate(Routes.Purchases) },
+                        onOpenFavorites = { navController.navigate(Routes.favorites(null)) },
+                        onOpenYouTubeList = { navController.navigate("youtube/list/$it") },
+                    )
+                }
             }
-            composable(Routes.Settings) {
-                SettingsScreen(
-                    onOpenStored = { navController.navigate(Routes.Stored) },
-                    onOpenModels = { navController.navigate(Routes.ModelSettings) },
-                    onOpenCache = { navController.navigate(Routes.CacheSettings) },
-                    onOpenAppearance = { navController.navigate(Routes.Appearance) },
-                    onOpenAbout = { navController.navigate(Routes.About) },
-                )
+            navigation(route = TabGraphs.Settings, startDestination = Routes.Settings) {
+                composable(Routes.Settings) {
+                    SettingsScreen(
+                        onOpenStored = { navController.navigate(Routes.Stored) },
+                        onOpenModels = { navController.navigate(Routes.ModelSettings) },
+                        onOpenCache = { navController.navigate(Routes.CacheSettings) },
+                        onOpenAppearance = { navController.navigate(Routes.Appearance) },
+                        onOpenAbout = { navController.navigate(Routes.About) },
+                    )
+                }
             }
             composable(Routes.Playlist) { entry ->
                 val id = entry.arguments?.getString("id")?.toLongOrNull() ?: return@composable
                 PlaylistDetailScreen(
                     id,
-                    onBack = { navController.popBackStack() },
-                    onDeleted = { navController.popBackStack() },
+                    onBack = { if (navController.currentBackStackEntry?.id == entry.id) navController.popBackStack() },
+                    onDeleted = { if (navController.currentBackStackEntry?.id == entry.id) navController.popBackStack() },
                 )
             }
             composable(Routes.NowPlaying) {
@@ -829,6 +921,3 @@ private fun PlayerApp(
     }
     }
 }
-
-private fun isTab(route: String?) = route == Routes.Library || route == Routes.Playlists ||
-    route == Routes.Online || route == Routes.Mine || route == Routes.Settings

@@ -16,6 +16,8 @@
     <string name="settings_desktop_subtitles_summary">离开播放器后，在其他应用上层显示字幕</string>
     <string name="settings_lock_desktop_subtitles">锁定桌面字幕</string>
     <string name="settings_lock_desktop_subtitles_summary">锁定后，触摸会传给下方的应用。请回到本页解锁。</string>
+    <string name="settings_cross_source_subtitles_title">作品跨来源借用字幕</string>
+    <string name="settings_cross_source_subtitles_summary">当前来源缺少匹配字幕时，自动借用同一作品其他来源的字幕</string>
     <string name="settings_section_app">应用</string>
     <string name="settings_about_title">关于</string>
     <string name="settings_about_summary">版本 %1$s · 检查更新</string>
@@ -86,6 +88,15 @@
     <string name="settings_clear">清除</string>
     <string name="settings_whisper_section">听写</string>
     <string name="settings_translate_section">翻译</string>
+    <string name="settings_whisper_card_title">听写配置（需点保存）</string>
+    <string name="settings_translate_card_title">翻译接口配置（需点保存）</string>
+    <string name="settings_translate_behavior_title">翻译行为选项（即时生效）</string>
+    <string name="settings_translate_behavior_platform">当前生效的翻译平台：%1$s。下面的选项会立即保存。</string>
+    <string name="settings_api_key_label">API Key</string>
+    <string name="settings_clear_title">清除配置</string>
+    <string name="settings_clear_whisper_message">将清除「%1$s」保存的 API Key 和自定义地址（%2$s）。听写模型选择会保留。</string>
+    <string name="settings_clear_whisper_message_no_address">将清除「%1$s」保存的 API Key。听写模型选择会保留。</string>
+    <string name="settings_clear_translate_message">将清除「%1$s」保存的 API Key 和模型名（%2$s）。</string>
     <string name="settings_address_label">地址</string>
     <string name="settings_model_name_optional">模型名（可选）</string>
     <string name="settings_model_default_hint">留空使用 %1$s</string>

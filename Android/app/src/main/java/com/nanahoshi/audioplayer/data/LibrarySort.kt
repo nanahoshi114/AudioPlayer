@@ -15,6 +15,15 @@ class LibraryPreferences(context: Context) {
     private val prefs = context.getSharedPreferences("library", Context.MODE_PRIVATE)
     private val sortState = MutableStateFlow(read())
     val sort: StateFlow<LibrarySort> = sortState
+    private val subtitleFilesState = MutableStateFlow(prefs.getBoolean(SHOW_SUBTITLE_FILES, false))
+    val showSubtitleFiles: StateFlow<Boolean> = subtitleFilesState
+
+    fun setShowSubtitleFiles(enabled: Boolean) {
+        prefs.edit().putBoolean(SHOW_SUBTITLE_FILES, enabled).apply()
+        subtitleFilesState.value = enabled
+    }
+
+    fun toggleSubtitleFiles() = setShowSubtitleFiles(!subtitleFilesState.value)
 
     fun toggle() {
         val next = if (sortState.value == LibrarySort.NAME) LibrarySort.ADDED else LibrarySort.NAME
@@ -31,6 +40,7 @@ class LibraryPreferences(context: Context) {
 
     private companion object {
         const val KEY = "sort"
+        const val SHOW_SUBTITLE_FILES = "show_subtitle_files"
     }
 }
 

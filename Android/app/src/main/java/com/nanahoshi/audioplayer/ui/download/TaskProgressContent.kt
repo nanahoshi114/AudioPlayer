@@ -66,13 +66,15 @@ internal fun TaskProgressContent(
             Text(it.commonText(context), style = MaterialTheme.typography.bodySmall)
             RoundedProgress(progress = it.fraction(), modifier = Modifier.padding(top = 4.dp))
         }
-        TextButton(onClick = { expanded = !expanded }) { Text(stringResource(if (expanded) R.string.progress_collapse else R.string.progress_details)) }
-        if (expanded) {
-            if (visibleParts.isEmpty()) Text(stringResource(R.string.progress_history), style = MaterialTheme.typography.bodySmall)
-            visibleParts.forEach { (part, summary) ->
-                Text(progressPartLabel(context, part), style = MaterialTheme.typography.labelMedium)
-                summary.detailLines(context, runtime?.takeIf { it.part == part }).forEach {
-                    Text(it, style = MaterialTheme.typography.bodySmall)
+        if (visibleParts.isNotEmpty() || live != null) {
+            TextButton(onClick = { expanded = !expanded }) { Text(stringResource(if (expanded) R.string.progress_collapse else R.string.progress_details)) }
+            if (expanded) {
+                if (visibleParts.isEmpty()) Text(stringResource(R.string.progress_history), style = MaterialTheme.typography.bodySmall)
+                visibleParts.forEach { (part, summary) ->
+                    Text(progressPartLabel(context, part), style = MaterialTheme.typography.labelMedium)
+                    summary.detailLines(context, runtime?.takeIf { it.part == part }).forEach {
+                        Text(it, style = MaterialTheme.typography.bodySmall)
+                    }
                 }
             }
         }

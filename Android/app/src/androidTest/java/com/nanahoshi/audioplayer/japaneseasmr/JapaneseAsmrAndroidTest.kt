@@ -26,6 +26,7 @@ import com.nanahoshi.audioplayer.data.TaskKey
 import com.nanahoshi.audioplayer.data.TaskKind
 import com.nanahoshi.audioplayer.data.TaskProgressTracker
 import com.nanahoshi.audioplayer.data.TrackSource
+import com.nanahoshi.audioplayer.data.removeV24SchemaChanges
 import com.nanahoshi.audioplayer.data.db.AppDatabase
 import com.nanahoshi.audioplayer.data.db.DownloadEntity
 import com.nanahoshi.audioplayer.data.db.DownloadStatus
@@ -100,6 +101,7 @@ class JapaneseAsmrAndroidTest {
             localPath = "/voice.wav", remoteJobId = null, status = DownloadStatus.DONE, progress = 1f, error = null, awaitRemoteUrl = null))
         original.close()
         SQLiteDatabase.openDatabase(app.getDatabasePath(name).path, null, SQLiteDatabase.OPEN_READWRITE).use { old ->
+            old.removeV24SchemaChanges()
             old.execSQL("ALTER TABLE downloads DROP COLUMN jaEntryKey")
             old.execSQL("ALTER TABLE downloads DROP COLUMN jaReplace")
             old.execSQL("ALTER TABLE downloads DROP COLUMN jaForce")
@@ -109,9 +111,14 @@ class JapaneseAsmrAndroidTest {
             old.execSQL("DROP TABLE japaneseasmr_download_works")
             old.execSQL("DROP INDEX index_japaneseasmr_media_postId_pathHash")
             old.execSQL("ALTER TABLE japaneseasmr_media DROP COLUMN pathHash")
+            old.execSQL("ALTER TABLE downloads DROP COLUMN dismissedAt")
+            old.execSQL("ALTER TABLE whisper_jobs DROP COLUMN createdAt")
+            old.execSQL("ALTER TABLE whisper_jobs DROP COLUMN dismissedAt")
+            old.execSQL("ALTER TABLE translation_jobs DROP COLUMN createdAt")
+            old.execSQL("ALTER TABLE translation_jobs DROP COLUMN dismissedAt")
             old.version = 21
         }
-        val upgraded = Room.databaseBuilder(app, AppDatabase::class.java, name).addMigrations(AppDatabase.MIGRATION_21_22).build()
+        val upgraded = Room.databaseBuilder(app, AppDatabase::class.java, name).addMigrations(AppDatabase.MIGRATION_21_22, AppDatabase.MIGRATION_22_23, AppDatabase.MIGRATION_23_24).build()
         val fresh = Room.inMemoryDatabaseBuilder(app, AppDatabase::class.java).build()
         try {
             val restored = upgraded.queue().snapshot().single()
@@ -123,7 +130,7 @@ class JapaneseAsmrAndroidTest {
             assertEquals(id, upgraded.whisper().done().single().trackId)
             fun schema(db: AppDatabase): List<String> = buildList {
                 val sql = db.openHelper.writableDatabase
-                assertEquals(22, sql.version)
+                assertEquals(24, sql.version)
                 for (table in listOf("downloads", "queue_items", "japaneseasmr_posts", "japaneseasmr_media",
                     "japaneseasmr_download_works", "japaneseasmr_download_entries", "japaneseasmr_download_packages")) {
                     for (pragma in listOf("table_info", "index_list")) {

@@ -18,6 +18,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -73,6 +78,7 @@ internal fun DlsiteWebLoginDialog(
             webViewClient = object : WebViewClient() {
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                     pageLoading = true
+                    localError = null
                 }
 
                 override fun onPageFinished(view: WebView?, url: String?) {
@@ -102,15 +108,22 @@ internal fun DlsiteWebLoginDialog(
         }
     }
     Dialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = {
+            if (webView.canGoBack()) webView.goBack() else onDismiss()
+        },
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
     ) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
                 AppTopBar(
                     title = stringResource(R.string.dlsite_web_login_title),
-                    onBack = onDismiss,
                     actions = {
+                        IconButton(onClick = { webView.reload() }) {
+                            Icon(Icons.Default.Refresh, contentDescription = stringResource(R.string.dlsite_web_refresh))
+                        }
+                        IconButton(onClick = onDismiss) {
+                            Icon(Icons.Default.Close, contentDescription = stringResource(R.string.a11y_close))
+                        }
                         TextButton(
                             enabled = !loading,
                             onClick = {

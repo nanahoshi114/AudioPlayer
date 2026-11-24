@@ -14,11 +14,11 @@ import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
@@ -28,10 +28,13 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Subtitles
+import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Translate
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -47,6 +50,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
@@ -74,6 +78,7 @@ fun SettingsScreen(
     val limit by viewModel.limitBytes.collectAsStateWithLifecycle()
     val appearance by viewModel.appearance.collectAsStateWithLifecycle()
     val desktop by viewModel.subtitleDisplay.desktop.collectAsStateWithLifecycle()
+    val crossSourceFallback by viewModel.subtitleDisplay.crossSourceFallback.collectAsStateWithLifecycle()
     val downloadConcurrency by viewModel.downloadPreferences.maxConcurrentDownloads.collectAsStateWithLifecycle()
     var choosingDownloadConcurrency by rememberSaveable { mutableStateOf(false) }
     val context = LocalContext.current
@@ -87,7 +92,10 @@ fun SettingsScreen(
     } else {
         stringResource(R.string.settings_cache_usage, formatCacheBytes(used), formatCacheBytes(limit))
     }
-    LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+    LazyColumn(
+        Modifier.fillMaxSize().padding(horizontal = 16.dp),
+        contentPadding = PaddingValues(bottom = 24.dp),
+    ) {
         item(key = "appearance-title") {
             Text(stringResource(R.string.settings_section_appearance), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp, bottom = 8.dp))
         }
@@ -114,7 +122,7 @@ fun SettingsScreen(
                 )
                 HorizontalDivider()
                 SettingsRow(
-                    icon = { Icon(Icons.Default.DownloadDone, contentDescription = null) },
+                    icon = { Icon(Icons.Default.Tune, contentDescription = null) },
                     title = stringResource(R.string.settings_concurrent_downloads),
                     summary = stringResource(R.string.settings_concurrent_downloads_summary, downloadConcurrency),
                     onClick = { choosingDownloadConcurrency = true },
@@ -170,6 +178,14 @@ fun SettingsScreen(
                         onChange = viewModel.subtitleDisplay::lockDesktop,
                     )
                 }
+                HorizontalDivider()
+                SubtitleSwitch(
+                    icon = { Icon(Icons.Default.SwapHoriz, contentDescription = null) },
+                    title = stringResource(R.string.settings_cross_source_subtitles_title),
+                    summary = stringResource(R.string.settings_cross_source_subtitles_summary),
+                    checked = crossSourceFallback,
+                    onChange = viewModel.subtitleDisplay::setCrossSourceFallback,
+                )
             }
         }
         item(key = "app-title") {
@@ -183,7 +199,6 @@ fun SettingsScreen(
                         viewModel.version.display.ifBlank { stringResource(R.string.about_unknown_version) },
                     ), onClick = onOpenAbout)
             }
-            Spacer(Modifier.height(24.dp))
         }
     }
     if (choosingDownloadConcurrency) {
@@ -194,7 +209,7 @@ fun SettingsScreen(
                 Column {
                     DOWNLOAD_CONCURRENCY_OPTIONS.forEach { count ->
                         Row(
-                            Modifier.fillMaxWidth().selectable(
+                            Modifier.fillMaxWidth().defaultMinSize(minHeight = 48.dp).selectable(
                                 selected = count == downloadConcurrency,
                                 role = Role.RadioButton,
                                 onClick = {
@@ -228,16 +243,20 @@ private fun SubtitleSwitch(
         supportingContent = { Text(summary) },
         leadingContent = icon,
         trailingContent = { Switch(checked = checked, onCheckedChange = null) },
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
         modifier = Modifier.toggleable(value = checked, role = Role.Switch, onValueChange = onChange),
     )
 }
 
 @Composable
-private fun SettingsGroup(content: @Composable () -> Unit) {
+internal fun SettingsGroup(
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
     Surface(
         shape = MaterialTheme.shapes.large,
         color = MaterialTheme.colorScheme.surfaceContainer,
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
     ) {
         Column(content = { content() })
     }
@@ -255,6 +274,7 @@ private fun SettingsRow(
         supportingContent = { Text(summary) },
         leadingContent = icon,
         trailingContent = { Icon(Icons.Default.ChevronRight, contentDescription = null) },
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
         modifier = Modifier.clickable(onClick = onClick),
     )
 }

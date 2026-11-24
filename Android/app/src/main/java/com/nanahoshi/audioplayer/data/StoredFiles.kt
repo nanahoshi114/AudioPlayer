@@ -10,8 +10,9 @@ import com.nanahoshi.audioplayer.data.db.TrackEntity
 import com.nanahoshi.audioplayer.data.db.TranslationJobEntity
 import com.nanahoshi.audioplayer.dlsite.DlsiteClient
 import com.nanahoshi.audioplayer.playback.SubtitleSource
-import com.nanahoshi.audioplayer.playback.overlayFileName
+import com.nanahoshi.audioplayer.playback.translationOverlayName
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -43,6 +44,7 @@ class StoredCatalog(
     context: Context,
     private val db: AppDatabase,
     private val subtitles: SubtitleSource,
+    private val bindings: SubtitleBindingStore? = null,
 ) {
     private val appContext = context.applicationContext
     private val filesDir = appContext.filesDir
@@ -51,6 +53,7 @@ class StoredCatalog(
     private val biliRoot = File(filesDir, "bilibili")
     private val jaRoot = File(filesDir, "japaneseasmr")
     private val jaWorkRoot = File(filesDir, "japaneseasmr-downloads")
+    private val customSubtitleRoot = File(filesDir, "custom-subtitles")
 
     suspend fun list(): List<StoredItem> = withContext(Dispatchers.IO) {
         val asmr = asmrRoot.canonicalFile
@@ -229,8 +232,10 @@ class StoredCatalog(
         val overlayFiles = cueFiles(File(filesDir, "subtitles"), overlay = true)
         // 没有覆盖文件时不读翻译任务表；有也只取可能写出覆盖的状态，失败历史不参与命名。
         val translationJobs = if (overlayFiles.isEmpty()) emptyList() else db.translations().overlayCandidates()
-        val trackIds = (jobs.mapNotNull { it.trackId } + translationJobs.mapNotNull { it.trackId }).filter { it > 0L }.distinct()
-        val tracksById = if (trackIds.isEmpty()) emptyMap() else db.tracks().getByIds(trackIds).associateBy { it.id }
+        val customBindings = appSubtitleBindingsByPath(db, filesDir)
+        val trackIds = (jobs.mapNotNull { it.trackId } + translationJobs.mapNotNull { it.trackId } +
+            customBindings.values.flatten().map { it.trackId }).filter { it > 0L }.distinct()
+        val tracksById = trackIds.chunked(500).flatMap { db.tracks().getByIds(it) }.associateBy { it.id }
         fun subtitleItem(
             file: File,
             trackId: Long?,
@@ -279,7 +284,28 @@ class StoredCatalog(
                 source = TrackSource.JAPANESE_ASMR, workKey = ja.first, fileKey = ja.second,
             )
         }
-        storedSort(identified + extra + overlays)
+        val listedPaths = seen + extra.map { canonicalPath(it.path) } + overlays.map { canonicalPath(it.path) }
+        val custom = customSubtitleRoot.listFiles().orEmpty().mapNotNull { candidate ->
+            val file = customSubtitleFile(filesDir, candidate.absolutePath)?.takeIf { it.isFile && it.path !in listedPaths }
+                ?: return@mapNotNull null
+            val binding = customBindings[file.path]?.firstOrNull()
+            val track = binding?.let { tracksById[it.trackId] }
+            val folder = track?.let { workFolder(it.folderId, byId) }
+            val code = realCode(folder?.asmrSourceId)
+            StoredItem(
+                path = file.absolutePath,
+                name = binding?.displayName?.takeIf { it.isNotBlank() } ?: file.name,
+                kind = StoredKind.SUBTITLE,
+                workTitle = folder?.name?.takeIf { it.isNotBlank() },
+                workCode = code,
+                sourceId = code,
+                trackId = track?.id,
+                remoteUrl = null,
+                audioPath = null,
+                bytes = file.length(),
+            )
+        }.distinctBy { it.path }
+        storedSort(identified + extra + overlays + custom)
     }
 
     /** 选中项里带有生成字幕的音频数量；删除前据此决定要不要询问是否一并删除字幕。 */
@@ -297,64 +323,75 @@ class StoredCatalog(
 
     private suspend fun deleteOne(item: StoredItem, deleteSubtitles: Boolean) {
         val file = File(item.path)
-        if (!owned(file)) return
-        if (under(file, jaWorkRoot.canonicalFile)) {
-            deleteJaWorkFile(item, file, deleteSubtitles)
-            return
-        }
+        if (!item.path.startsWith("/") || !owned(file)) return
         when (item.kind) {
             StoredKind.GENERATED -> {
                 if (item.translationOverlay) {
                     subtitles.discardTranslationOverlay(file)
                 } else {
-                    subtitles.discardStored(item.trackId, item.audioPath, item.remoteUrl)
-                    if (file.isFile) file.delete()
+                    subtitles.generatedWriteLock.withLock {
+                        if (subtitles.discardGeneratedFileLocked(file)) subtitles.invalidate()
+                    }
                 }
             }
-            StoredKind.SUBTITLE -> {
-                if (file.isFile && file.delete()) subtitles.invalidate()
+            StoredKind.SUBTITLE -> subtitles.generatedWriteLock.withLock {
+                if (under(file, customSubtitleRoot.canonicalFile)) {
+                    suspend fun removeCustom() = withContext(NonCancellable) {
+                        if (db.withTransaction { deleteCustomSubtitleCopy(db, filesDir, item.path) }) subtitles.invalidate()
+                    }
+                    val lock = bindings?.customSubtitleLock
+                    if (lock == null) removeCustom() else lock.withLock { removeCustom() }
+                } else {
+                    withContext(NonCancellable) {
+                        if (deleteStoredLibraryFileLocked(db, filesDir, item.path) == LibraryFileDeleteOutcome.REMOVED) {
+                            subtitles.invalidate()
+                        }
+                    }
+                }
             }
-            StoredKind.AUDIO -> deleteAudio(item, file, deleteSubtitles)
+            StoredKind.AUDIO -> deleteAudio(item, deleteSubtitles)
         }
     }
 
-    private suspend fun deleteJaWorkFile(item: StoredItem, file: File, deleteSubtitles: Boolean) {
-        subtitles.generatedWriteLock.withLock {
-            db.withTransaction {
-                val entry = db.jaDownloads().entryForPath(item.path) ?: return@withTransaction
-                if (file.isFile && !file.delete()) return@withTransaction
-                val track = entry.trackId?.let { db.tracks().getById(it) }?.takeIf { it.localUri == item.path }
-                if (track != null) db.tracks().clearLocalUri(track.id)
-                val current = entry.fileId?.let { db.files().get(it) }?.takeIf { it.localUri == item.path }
-                if (current != null) db.files().update(current.copy(localUri = null))
-                db.jaDownloads().clearPath(item.path)
-                if (item.kind == StoredKind.AUDIO && deleteSubtitles) {
-                    subtitles.discardStoredLocked(track?.id, item.path, jaWorkFileIdentity(entry.rj, entry.relativePath))
+    private suspend fun deleteAudio(item: StoredItem, deleteSubtitles: Boolean) = subtitles.generatedWriteLock.withLock {
+        withContext(NonCancellable) {
+            val removed = db.withTransaction {
+                val file = File(item.path).canonicalFile
+                if (!owned(file)) return@withTransaction false
+                val paths = setOf(item.path, file.path)
+                val ja = paths.firstNotNullOfOrNull { db.jaDownloads().entryForPath(it) }
+                if (under(file, jaWorkRoot.canonicalFile) && ja == null) return@withTransaction false
+                val tracks = buildList {
+                    item.trackId?.let { db.tracks().getById(it) }?.let(::add)
+                    ja?.trackId?.let { db.tracks().getById(it) }?.let(::add)
+                    paths.mapNotNullTo(this) { db.tracks().findByLocalUri(it) }
+                }.distinctBy { it.id }.filter {
+                    it.localUri?.startsWith("/") == true && filesTouch(it.localUri, file)
                 }
-                if (item.kind == StoredKind.SUBTITLE) subtitles.invalidate()
+                if (tracks.any { it.source == TrackSource.LOCAL }) return@withTransaction false
+                // 删除失败就保留字幕与听写记录。
+                if (file.exists() && (!file.isFile || !file.delete())) return@withTransaction false
+                if (deleteSubtitles) {
+                    val trackIds = tracks.map { it.id }.ifEmpty { listOfNotNull(item.trackId?.takeIf { it > 0L }) }
+                    val excluded = tracks.map { it.id }.toSet()
+                    val identityUrl = ja?.let { jaWorkFileIdentity(it.rj, it.relativePath) } ?: item.remoteUrl
+                    if (trackIds.isEmpty()) subtitles.discardStoredLocked(null, item.path, identityUrl, excluded)
+                    else for (id in trackIds) subtitles.discardStoredLocked(id, item.path, identityUrl, excluded)
+                }
+                deleteBiliSubtitleBeside(file)
+                for (track in tracks) {
+                    if (track.source == TrackSource.BILIBILI) deleteBiliSubtitle(filesDir, track.bvid, track.cid)
+                    db.tracks().clearLocalUri(track.id)
+                    if (ja == null) db.downloads().deleteFinishedForTrack(track.id)
+                    else db.jaDownloads().clearTrackPath(track.id)
+                }
+                for (path in paths) {
+                    if (ja == null) db.downloads().deleteFinishedForPath(path) else db.jaDownloads().clearPath(path)
+                }
+                true
             }
+            if (removed) subtitles.invalidate()
         }
-    }
-
-    private suspend fun deleteAudio(item: StoredItem, file: File, deleteSubtitles: Boolean) {
-        // 删除失败就保留字幕与听写记录，不能出现音频还在、记录已清的状态。
-        if (file.isFile && !file.delete()) return
-        // 选择保留字幕时保留听写和翻译记录，重新下载同一音频会自动匹配。
-        if (deleteSubtitles) subtitles.discardStored(item.trackId, item.path, item.remoteUrl)
-        deleteBiliSubtitleBeside(file)
-        val tracks = buildSet {
-            item.trackId?.takeIf { it > 0L }?.let { add(it) }
-            db.tracks().findByLocalUri(item.path)?.id?.let { add(it) }
-            val canonical = file.canonicalPath
-            if (canonical != item.path) db.tracks().findByLocalUri(canonical)?.id?.let { add(it) }
-        }
-        for (id in tracks) {
-            db.tracks().clearLocalUri(id)
-            db.downloads().deleteFinishedForTrack(id)
-        }
-        db.downloads().deleteFinishedForPath(item.path)
-        val canonical = runCatching { file.canonicalPath }.getOrNull()
-        if (canonical != null && canonical != item.path) db.downloads().deleteFinishedForPath(canonical)
     }
 
     private fun describe(
@@ -767,7 +804,7 @@ internal fun remainingOverlayItems(
 ): List<StoredItem> {
     val byName = HashMap<String, TranslationJobEntity>()
     for (job in jobs) {
-        val name = overlayFileName(job.trackId, job.remoteUrl, job.localUri, job.queueItemId, job.bvid, job.cid) ?: continue
+        val name = translationOverlayName(job) ?: continue
         val current = byName[name]
         if (current == null || job.id > current.id) byName[name] = job
     }

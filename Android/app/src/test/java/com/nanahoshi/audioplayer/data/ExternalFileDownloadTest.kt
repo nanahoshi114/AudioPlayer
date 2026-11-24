@@ -4,17 +4,21 @@ import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.data.db.FileKind
 import com.nanahoshi.audioplayer.dlsite.RemotePreview
 import com.nanahoshi.audioplayer.dlsite.SignedPlayFile
+import com.nanahoshi.audioplayer.dlsite.isTrustedDlsitePlayHost
 import com.nanahoshi.audioplayer.text.TextRef
 import kotlinx.coroutines.*
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.ResponseBody.Companion.toResponseBody
+import okio.Buffer
+import okio.BufferedSource
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.File
 
 class ExternalFileDownloadTest {
     @Test fun previewReportsClippingSeparatelyFromContent() {
@@ -109,5 +113,125 @@ class ExternalFileDownloadTest {
         assertTrue(failure is ExternalFileException)
         assertEquals(TextRef.Res(R.string.external_file_reopen_work), (failure as ExternalFileException).userText)
         assertEquals(0, calls)
+    }
+
+    @Test fun trustedPlayHostsRejectLookalikesAndAddresses() {
+        for (host in listOf("dlsite.com", "play.dlsite.com", "media.play.dlsite.com", "PLAY.DLSITE.COM")) {
+            assertTrue(host, isTrustedDlsitePlayHost(host))
+        }
+        for (host in listOf(
+            "play.dlsite.com.evil.com", "fake-dlsite.com", "dlsite.com.evil", "notdlsite.com",
+            "127.0.0.1", "[::1]", "play.dlsite.com.", "",
+        )) {
+            assertFalse(host, isTrustedDlsitePlayHost(host))
+        }
+    }
+
+    @Test fun downloadFileRejectsUntrustedSignedHostBeforeAnyRequest() = runBlocking {
+        var calls = 0
+        var signs = 0
+        val client = OkHttpClient.Builder().addInterceptor { chain -> calls++; response(chain) }.build()
+        val downloader = ExternalFileDownloader(client) { _, _ ->
+            signs++
+            SignedPlayFile("https://evil.example/optimized/book.pdf", "fixture=value")
+        }
+        val dir = temp.newFolder("untrusted-sign")
+        val failure = runCatching { downloader.downloadFile(preview(true), File(dir, "book.pdf")) }.exceptionOrNull()
+        assertTrue(failure is ExternalFileException)
+        assertEquals(1, signs)
+        assertEquals(0, calls)
+        assertTrue(dir.listFiles().orEmpty().isEmpty())
+    }
+
+    @Test fun downloadFileReSignsOnceAfterUnauthorized() = runBlocking {
+        var signs = 0
+        var calls = 0
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            calls++
+            assertEquals("media.dlsite.com", chain.request().url.host)
+            assertEquals("fixture=$signs", chain.request().header("Cookie"))
+            response(chain, if (calls == 1) 401 else 200)
+        }.build()
+        val downloader = ExternalFileDownloader(client) { _, _ ->
+            signs++
+            SignedPlayFile("https://media.dlsite.com/optimized/book.pdf", "fixture=$signs")
+        }
+        val target = File(temp.newFolder("re-sign"), "book.pdf")
+        downloader.downloadFile(preview(true), target)
+        assertEquals(2, signs)
+        assertEquals(2, calls)
+        assertEquals("%PDF-fixture", target.readText())
+    }
+
+    @Test fun downloadFileGivesUpAfterASingleReSignRetry() = runBlocking {
+        var signs = 0
+        var calls = 0
+        val client = OkHttpClient.Builder().addInterceptor { chain -> calls++; response(chain, 403) }.build()
+        val downloader = ExternalFileDownloader(client) { _, _ ->
+            signs++
+            SignedPlayFile("https://media.dlsite.com/optimized/book.pdf", "fixture=$signs")
+        }
+        val dir = temp.newFolder("re-sign-limit")
+        val failure = runCatching { downloader.downloadFile(preview(true), File(dir, "book.pdf")) }.exceptionOrNull()
+        assertTrue(failure is ExternalFileException)
+        assertEquals(2, signs)
+        assertEquals(2, calls)
+        assertTrue(dir.listFiles().orEmpty().isEmpty())
+    }
+
+    @Test fun downloadFileDropsMediaCookieWhenRedirectedToAnotherOrigin() = runBlocking {
+        val urls = mutableListOf<String>()
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            urls += chain.request().url.toString()
+            if (chain.request().url.host == "media.dlsite.com") {
+                assertEquals("fixture=value", chain.request().header("Cookie"))
+                response(chain, 302, "https://cdn.example.invalid/book.pdf")
+            } else {
+                assertNull(chain.request().header("Cookie"))
+                response(chain)
+            }
+        }.build()
+        val downloader = ExternalFileDownloader(client) { _, _ ->
+            SignedPlayFile("https://media.dlsite.com/optimized/book.pdf", "fixture=value")
+        }
+        val target = File(temp.newFolder("redirect"), "book.pdf")
+        downloader.downloadFile(preview(true), target)
+        assertEquals(2, urls.size)
+        assertEquals("%PDF-fixture", target.readText())
+    }
+
+    @Test fun downloadFileEnforcesContentLengthLimitAndRemovesPartialFile() = runBlocking {
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("fixture")
+                .body(ByteArray(10).toResponseBody("application/octet-stream".toMediaType()))
+                .build()
+        }.build()
+        val downloader = ExternalFileDownloader(client) { _, _ -> error("must not sign") }
+        val dir = temp.newFolder("content-length")
+        val target = File(dir, "cover.jpg")
+        val failure = runCatching { downloader.downloadFile(preview(), target, maxBytes = 5L) }.exceptionOrNull()
+        assertTrue(failure is ExternalFileException)
+        assertFalse(target.exists())
+        assertTrue(dir.listFiles().orEmpty().isEmpty())
+    }
+
+    @Test fun downloadFileEnforcesStreamedBodyLimitWithoutContentLength() = runBlocking {
+        val streamed = object : ResponseBody() {
+            override fun contentType() = "application/octet-stream".toMediaType()
+            override fun contentLength(): Long = -1L
+            override fun source(): BufferedSource = Buffer().write(ByteArray(10))
+        }
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("fixture")
+                .body(streamed)
+                .build()
+        }.build()
+        val downloader = ExternalFileDownloader(client) { _, _ -> error("must not sign") }
+        val dir = temp.newFolder("streamed")
+        val target = File(dir, "cover.jpg")
+        val failure = runCatching { downloader.downloadFile(preview(), target, maxBytes = 5L) }.exceptionOrNull()
+        assertTrue(failure is ExternalFileException)
+        assertFalse(target.exists())
+        assertTrue(dir.listFiles().orEmpty().isEmpty())
     }
 }

@@ -15,6 +15,7 @@ import com.nanahoshi.audioplayer.data.db.DownloadStatus
 import com.nanahoshi.audioplayer.data.db.QueuedTrack
 import com.nanahoshi.audioplayer.data.db.TranslateMark
 import com.nanahoshi.audioplayer.data.db.TranslationJobEntity
+import com.nanahoshi.audioplayer.playback.SubtitleTranslationTarget
 import com.nanahoshi.audioplayer.playback.SubtitleCue
 import com.nanahoshi.audioplayer.playback.GeneratedSubtitles
 import com.nanahoshi.audioplayer.playback.LoadedSubtitles
@@ -42,6 +43,10 @@ import kotlin.coroutines.coroutineContext
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
+internal enum class GeneratedRetryResult {
+    Queued, Duplicate, MissingConfig, MissingSource, AlreadyTranslated, Unavailable,
+}
+
 class TranslateCenter internal constructor(
     context: android.content.Context,
     private val db: AppDatabase,
@@ -61,9 +66,13 @@ class TranslateCenter internal constructor(
         progress.close()
     }
     private val runners = ConcurrentHashMap<Long, Job>()
+    private val attempts = ConcurrentHashMap<Long, Long>()
+    private val nextAttempt = java.util.concurrent.atomic.AtomicLong()
+    // When both are needed, acquire generatedWriteLock before submissions.
     private val submissions = Mutex()
     private val execution = TranslationExecution()
     internal val jobs = db.translations().observe()
+    fun observeVisible() = db.translations().observeVisible()
     private val revision = MutableStateFlow(0L)
     internal val updates = revision.asStateFlow()
 
@@ -93,6 +102,47 @@ class TranslateCenter internal constructor(
         }
     }
 
+    /** The caller holds generatedWriteLock, including through registration of the queued attempt. */
+    internal suspend fun requeueGeneratedTranslation(jobId: Long, createdAt: Long): GeneratedRetryResult = submissions.withLock {
+        db.withTransaction {
+            val dao = db.whisper()
+            val job = dao.get(jobId) ?: return@withTransaction GeneratedRetryResult.Unavailable
+            if (job.status != DownloadStatus.DONE || job.translateStatus != TranslateMark.FAILED) {
+                return@withTransaction GeneratedRetryResult.Unavailable
+            }
+            if (!credentials.hasTranslate()) return@withTransaction GeneratedRetryResult.MissingConfig
+            val model = knownWhisperModel(job.model) ?: return@withTransaction GeneratedRetryResult.MissingSource
+            val document = runCatching { readGenerated(job.fingerprint) }.getOrNull()
+                ?: return@withTransaction GeneratedRetryResult.MissingSource
+            if (document.cues.isEmpty() || !generatedSubtitlesMatch(document, model, job.endpoint, job)) {
+                return@withTransaction GeneratedRetryResult.MissingSource
+            }
+            if (document.displayCues.hasTranslation()) return@withTransaction GeneratedRetryResult.AlreadyTranslated
+            if (hasActiveGenerated(job.fingerprint)) return@withTransaction GeneratedRetryResult.Duplicate
+
+            val nextSummary = decodeProgressSummary(job.progressSummary).without(ProgressPart.TRANSLATION).encodeOrNull()
+            if (dao.requeueTranslation(jobId, createdAt, nextSummary) == 0) {
+                return@withTransaction GeneratedRetryResult.Unavailable
+            }
+            progress.resetPart(TaskKey(TaskKind.WHISPER, jobId), ProgressPart.TRANSLATION)
+            GeneratedRetryResult.Queued
+        }
+    }
+
+    suspend fun deleteTerminal(id: Long) {
+        subtitles.generatedWriteLock.withLock {
+            submissions.withLock {
+                if (runners.containsKey(id)) return
+                val dao = db.translations()
+                when (dao.get(id)?.status) {
+                    DownloadStatus.FAILED -> dao.deleteFailed(id)
+                    DownloadStatus.DONE -> dao.dismissDone(id, System.currentTimeMillis())
+                    else -> Unit
+                }
+            }
+        }
+    }
+
     fun cancel(id: Long) {
         scope.launch {
             if (abandon(id, PersistedErrors.CANCELLED)) runners[id]?.cancel()
@@ -108,14 +158,19 @@ class TranslateCenter internal constructor(
                 report.metadata(credentials.translateModel(), appContext.getString(credentials.translatePlatform().labelRes))
                 report.phase(ProgressPhase.TRANSLATING)
                 val ticket = calls.prepare("whisper-$jobId", report)
-                calls.cancelWithCoroutine(ticket) { applyGenerated(jobId, fingerprint, ticket) }
+                calls.cancelWithCoroutine(ticket) { applyGenerated(jobId, fingerprint, ticket, report) }
             }
         } finally {
             withContext(NonCancellable) { progress.end(report) }
         }
     }
 
-    private suspend fun applyGenerated(jobId: Long, fingerprint: String, ticket: InflightCalls.Ticket): String? {
+    private suspend fun applyGenerated(
+        jobId: Long,
+        fingerprint: String,
+        ticket: InflightCalls.Ticket,
+        report: TaskReporter,
+    ): String? {
         return try {
             val document = readGenerated(fingerprint) ?: return appContext.getString(R.string.translate_no_japanese)
             val job = db.whisper().get(jobId) ?: throw CancellationException()
@@ -131,7 +186,7 @@ class TranslateCenter internal constructor(
             val finished = finishWithPolish(lines, ticket) { whisperTranslating(jobId) }
             if (!whisperTranslating(jobId)) throw CancellationException()
             ticket.progress?.phase(ProgressPhase.SAVING_TRANSLATION)
-            if (!commitTranslated(jobId, fingerprint, document, finished)) return appContext.getString(R.string.translate_subtitle_updated)
+            if (!commitTranslated(jobId, fingerprint, document, finished, report)) return appContext.getString(R.string.translate_subtitle_updated)
             revision.update { it + 1 }
             null
         } catch (cancelled: CancellationException) {
@@ -149,8 +204,9 @@ class TranslateCenter internal constructor(
         fingerprint: String,
         expected: GeneratedSubtitles,
         cues: List<SubtitleCue>,
+        report: TaskReporter,
     ): Boolean = subtitles.generatedWriteLock.withLock {
-        if (readGenerated(fingerprint) != expected) return@withLock false
+        if (!progress.isCurrent(report) || readGenerated(fingerprint) != expected) return@withLock false
         val payload = encodeGeneratedCues(expected.cues, expected.origin, revisedCues = cues)
         subtitles.publishTranslation(generatedFile(fingerprint), payload, jobId, null)
     }
@@ -161,27 +217,28 @@ class TranslateCenter internal constructor(
         expected: LoadedSubtitles?,
     ): Boolean {
         // Reserve the foreground start before any disk access. The service waits for the task row.
-        val queued = kotlinx.coroutines.CompletableDeferred<Long?>()
-        val request = requests.submit(task) { queued.await()?.let { runRow(it, row, task, expected) } ?: false }
+        val queued = kotlinx.coroutines.CompletableDeferred<Pair<Long, Long>?>()
+        val request = requests.submit(task) { queued.await()?.let { (id, token) -> runRow(id, row, task, expected, token) } ?: false }
         request.result.invokeOnCompletion { cause ->
             if (cause is SubtitleTaskStopped) scope.launch {
-                queued.await()?.let { abandon(it, cause.persistedError) }
+                queued.await()?.let { (id, token) -> abandon(id, cause.persistedError, token) }
             }
         }
         try {
             withContext(Dispatchers.IO + NonCancellable) {
                 recovery.join()
-                submissions.withLock {
-                    // expected 非 null 时以其为准（null 即非生成字幕）；仅无快照的 retry 路径才按记录回退。
-                    val fingerprint = if (expected != null) expected.generatedFingerprint else subtitles.generatedFingerprint(row)
+                withSubmissionLock {
+                    val fingerprint = expected?.generatedFingerprint
                     val job = newJob(task, row, fingerprint, expected)
                     if (db.translations().active().any { it.sameTarget(job) } ||
                         fingerprint?.let { db.whisper().activeTranslation(it) != null } == true) {
                         noticeDuplicate()
-                        return@withLock
+                        return@withSubmissionLock
                     }
                     val id = db.translations().insert(job)
-                    queued.complete(id)
+                    val token = nextAttempt.incrementAndGet()
+                    attempts[id] = token
+                    queued.complete(id to token)
                 }
             }
         } finally {
@@ -191,30 +248,35 @@ class TranslateCenter internal constructor(
     }
 
     internal suspend fun retry(id: Long, task: SubtitleTask): Boolean {
-        val ready = kotlinx.coroutines.CompletableDeferred<Pair<Long, QueuedTrack>?>()
+        val ready = kotlinx.coroutines.CompletableDeferred<Triple<Long, QueuedTrack, Long>?>()
         val request = requests.submit(task) {
-            val (nextId, row) = ready.await() ?: return@submit false
-            runRow(nextId, row, task, null)
+            val (nextId, row, token) = ready.await() ?: return@submit false
+            runRow(nextId, row, task, null, token)
         }
         request.result.invokeOnCompletion { cause ->
             if (cause is SubtitleTaskStopped) scope.launch {
-                ready.await()?.let { abandon(it.first, cause.persistedError) }
+                ready.await()?.let { (nextId, _, token) -> abandon(nextId, cause.persistedError, token) }
             }
         }
         try {
             withContext(Dispatchers.IO + NonCancellable) {
                 recovery.join()
-                submissions.withLock {
-                    val job = db.translations().get(id) ?: return@withLock
-                    if (job.status != DownloadStatus.FAILED || job.operation != task) return@withLock
+                withSubmissionLock {
+                    if (runners.containsKey(id)) return@withSubmissionLock
+                    val job = db.translations().get(id) ?: return@withSubmissionLock
+                    if (job.status != DownloadStatus.FAILED || job.operation != task) return@withSubmissionLock
                     val row = restoreRow(job) ?: error(appContext.getString(R.string.translate_source_missing))
                     if (db.translations().active().any { it.sameTarget(job) } ||
                         job.generatedFingerprint?.let { db.whisper().activeTranslation(it) != null } == true) {
                         noticeDuplicate()
-                        return@withLock
+                        return@withSubmissionLock
                     }
                     progress.reset(TaskKey(TaskKind.TRANSLATION, id))
-                    if (db.translations().requeue(id) > 0) ready.complete(id to row)
+                    if (db.translations().requeue(id) > 0) {
+                        val token = nextAttempt.incrementAndGet()
+                        attempts[id] = token
+                        ready.complete(Triple(id, row, token))
+                    }
                 }
             }
         } finally {
@@ -223,9 +285,17 @@ class TranslateCenter internal constructor(
         return request.result.await()
     }
 
-    private suspend fun runRow(id: Long, row: QueuedTrack, task: SubtitleTask, expected: LoadedSubtitles?): Boolean {
+    private suspend fun runRow(id: Long, row: QueuedTrack, task: SubtitleTask, expected: LoadedSubtitles?, token: Long): Boolean {
         val self = coroutineContext[Job]!!
-        runners[id] = self
+        val registered = withSubmissionLock {
+            if (runners.containsKey(id) || attempts[id] != token || db.translations().get(id)?.status != DownloadStatus.QUEUED) {
+                false
+            } else {
+                runners[id] = self
+                true
+            }
+        }
+        if (!registered) return false
         val report = progress.begin(TaskKey(TaskKind.TRANSLATION, id), ProgressPart.TRANSLATION,
             if (task == SubtitleTask.POLISH) ProgressPhase.WAITING_POLISH else ProgressPhase.WAITING_TRANSLATION)
         try {
@@ -233,16 +303,24 @@ class TranslateCenter internal constructor(
             return execution.run { executeRow(id, row, task, expected, report) }
         } catch (cancelled: CancellationException) {
             val reason = coroutineContext.cancellationCause() ?: cancelled
-            abandon(id, (reason as? SubtitleTaskStopped)?.persistedError ?: PersistedErrors.CANCELLED)
+            abandon(id, (reason as? SubtitleTaskStopped)?.persistedError ?: PersistedErrors.CANCELLED, token)
             throw cancelled
         } catch (error: Exception) {
             val stopped = coroutineContext.cancellationCause() as? SubtitleTaskStopped
             val fallback = TextRef.Res(R.string.subtitle_task_failed, listOf(TextRef.Res(task.labelRes)))
-            abandon(id, stopped?.persistedError ?: appContext.resolveNoUrl(error.userTextOr(fallback), fallback))
+            abandon(id, stopped?.persistedError ?: appContext.resolveNoUrl(error.userTextOr(fallback), fallback), token)
             return false
         } finally {
-            runners.remove(id, self)
-            withContext(NonCancellable) { progress.end(report) }
+            withContext(NonCancellable) {
+                try {
+                    progress.end(report)
+                } finally {
+                    withSubmissionLock {
+                        runners.remove(id, self)
+                        attempts.remove(id, token)
+                    }
+                }
+            }
         }
     }
 
@@ -254,19 +332,40 @@ class TranslateCenter internal constructor(
         report.metadata(credentials.translateModel(), appContext.getString(credentials.translatePlatform().labelRes))
         report.phase(ProgressPhase.PREPARING)
         if (!credentials.hasTranslate()) throw UserFacingException(TextRef.Res(R.string.translate_config_required))
-        val loaded = if (job.generatedFingerprint != null) {
-            subtitles.loadGenerated(job.generatedFingerprint) ?: throw UserFacingException(TextRef.Res(R.string.translate_source_missing_short))
-        } else subtitles.load(row)
-        if (expected != null && expected != loaded) throw UserFacingException(TextRef.Res(R.string.translate_updated_restart))
+        val loaded = when {
+            job.targetKind == SubtitleTranslationTarget.OVERLAY -> subtitles.loadNonGenerated(row)
+            job.generatedFingerprint != null ->
+                subtitles.loadGenerated(job.generatedFingerprint) ?: throw UserFacingException(TextRef.Res(R.string.translate_source_missing_short))
+            job.sourceFingerprint != null -> subtitles.loadNonGenerated(row)
+            else -> subtitles.load(row)
+        }
         val inputFingerprint = loaded.inputFingerprint(task)
-        if (job.sourceFingerprint != null && job.sourceFingerprint != inputFingerprint) throw UserFacingException(TextRef.Res(R.string.translate_updated_restart))
-        if (job.sourceFingerprint == null) db.translations().setSourceFingerprint(id, inputFingerprint)
+        if ((expected != null && !expected.matchesInput(loaded, task)) ||
+            (job.sourceFingerprint != null && job.sourceFingerprint != inputFingerprint)
+        ) throw UserFacingException(TextRef.Res(R.string.translate_updated_restart))
+        val fingerprint = loaded.generatedFingerprint
+        val target = if (fingerprint != null) SubtitleTranslationTarget.GENERATED else SubtitleTranslationTarget.OVERLAY
+        val filename = outputFilename(row, loaded)
+        if ((job.targetKind != null && job.targetKind != target) ||
+            (job.outputFilename != null && job.outputFilename != filename)
+        ) throw UserFacingException(TextRef.Res(R.string.translate_updated_restart))
+        if (job.sourceFingerprint == null || job.targetKind == null || job.outputFilename == null) {
+            val captured = withSubmissionLock {
+                db.withTransaction {
+                    if (fingerprint != null && (db.whisper().activeTranslation(fingerprint) != null ||
+                            db.translations().active().any { it.id != id && it.generatedFingerprint == fingerprint })
+                    ) return@withTransaction false
+                    db.translations().setTarget(id, inputFingerprint, target, filename, fingerprint) > 0
+                }
+            }
+            if (!captured) throw UserFacingException(TextRef.Res(R.string.translate_duplicate_notice))
+        }
         val ticket = calls.prepare("row-$id", report)
         val lines = calls.cancelWithCoroutine(ticket) {
             when (task) {
                 SubtitleTask.POLISH -> {
-                    if (!loaded.cues.hasTranslation()) throw UserFacingException(TextRef.Res(R.string.translate_no_polish_text))
-                    val polished = polishAll(loaded.cues, ticket)
+                    if (!loaded.unshiftedCues.hasTranslation()) throw UserFacingException(TextRef.Res(R.string.translate_no_polish_text))
+                    val polished = polishAll(loaded.unshiftedCues, ticket)
                     polished.cues ?: throw UserFacingException(polished.detail)
                 }
                 else -> {
@@ -280,7 +379,7 @@ class TranslateCenter internal constructor(
         }
         if (!translationActive(id)) throw CancellationException()
         report.phase(ProgressPhase.SAVING_TRANSLATION)
-        if (!subtitles.saveTranslations(row, lines, loaded, id, job.generatedFingerprint)) {
+        if (!subtitles.saveTranslations(row, lines, loaded, id, fingerprint, target, filename)) {
             abandon(id, appContext.getString(R.string.translate_save_failed))
             return false
         }
@@ -293,11 +392,22 @@ class TranslateCenter internal constructor(
         return db.translations().get(id)?.status == DownloadStatus.RUNNING
     }
 
-    private suspend fun abandon(id: Long, message: String): Boolean = withContext(NonCancellable + Dispatchers.IO) {
-        val changed = subtitles.generatedWriteLock.withLock { db.translations().failIfActive(id, message) > 0 }
-        if (changed) progress.finishFromDb(TaskKey(TaskKind.TRANSLATION, id), ProgressPart.TRANSLATION, true)
-        changed
-    }
+    private suspend fun abandon(id: Long, message: String, expectedToken: Long? = null): Boolean =
+        withContext(NonCancellable + Dispatchers.IO) {
+            val changed = subtitles.generatedWriteLock.withLock {
+                submissions.withLock {
+                    if (expectedToken != null && attempts[id] != expectedToken) return@withLock false
+                    if (db.translations().failIfActive(id, message) > 0) {
+                        if (expectedToken != null) attempts.remove(id, expectedToken) else attempts.remove(id)
+                        true
+                    } else {
+                        false
+                    }
+                }
+            }
+            if (changed) progress.finishFromDb(TaskKey(TaskKind.TRANSLATION, id), ProgressPart.TRANSLATION, true)
+            changed
+        }
 
     private fun newJob(task: SubtitleTask, row: QueuedTrack, fingerprint: String?, expected: LoadedSubtitles?) =
         TranslationJobEntity(
@@ -313,7 +423,17 @@ class TranslateCenter internal constructor(
             bvid = row.bvid ?: row.workno.takeIf { row.source == TrackSource.BILIBILI },
             cid = row.cid ?: row.fileKey?.toLongOrNull()?.takeIf { row.source == TrackSource.BILIBILI },
             localUri = row.localUri,
+            createdAt = System.currentTimeMillis(),
+            targetKind = expected?.let { if (it.generated) SubtitleTranslationTarget.GENERATED else SubtitleTranslationTarget.OVERLAY },
+            outputFilename = expected?.let { outputFilename(row, it) },
         )
+
+    private fun outputFilename(row: QueuedTrack, loaded: LoadedSubtitles): String =
+        loaded.generatedFingerprint?.let { subtitles.generatedFile(it).name }
+            ?: subtitles.expectedOverlayFile(row, loaded.sourceCues).name
+
+    private suspend fun <T> withSubmissionLock(block: suspend () -> T): T =
+        subtitles.generatedWriteLock.withLock { submissions.withLock { block() } }
 
     private suspend fun restoreRow(job: TranslationJobEntity): QueuedTrack? {
         val queue = db.queue().snapshot().firstOrNull { row ->
@@ -468,7 +588,9 @@ private fun TranslationJobEntity.sameTarget(other: TranslationJobEntity): Boolea
 }
 
 private fun LoadedSubtitles.inputFingerprint(task: SubtitleTask): String =
-    if (task == SubtitleTask.POLISH) {
-        val bytes = encodeGeneratedCues(cues).toByteArray()
-        java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
-    } else subtitleSourceFingerprint(sourceCues)
+    if (task == SubtitleTask.POLISH) subtitleSourceFingerprint(unshiftedCues, includeTranslation = true)
+    else subtitleSourceFingerprint(sourceCues)
+
+private fun LoadedSubtitles.matchesInput(other: LoadedSubtitles, task: SubtitleTask): Boolean =
+    generated == other.generated && generatedFingerprint == other.generatedFingerprint && origin == other.origin &&
+        inputFingerprint(task) == other.inputFingerprint(task)

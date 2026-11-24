@@ -17,6 +17,8 @@ import com.nanahoshi.audioplayer.asmr.AsmrException
 import com.nanahoshi.audioplayer.asmr.AsmrPreview
 import com.nanahoshi.audioplayer.asmr.WorkFacts
 import com.nanahoshi.audioplayer.bilibili.BilibiliException
+import com.nanahoshi.audioplayer.data.BatchExternalPair
+import com.nanahoshi.audioplayer.data.BindExternalResult
 import com.nanahoshi.audioplayer.data.CacheCandidate
 import com.nanahoshi.audioplayer.data.DeleteResult
 import com.nanahoshi.audioplayer.data.DlsiteDownloadMode
@@ -24,23 +26,34 @@ import com.nanahoshi.audioplayer.data.FormatConflict
 import com.nanahoshi.audioplayer.data.LibrarySort
 import com.nanahoshi.audioplayer.data.LocalAudio
 import com.nanahoshi.audioplayer.data.LocalRemoval
+import com.nanahoshi.audioplayer.data.LocalRemovalPlan
+import com.nanahoshi.audioplayer.data.canonicalPath
 import com.nanahoshi.audioplayer.data.findFormatConflicts
 import com.nanahoshi.audioplayer.data.idsToDrop
 import com.nanahoshi.audioplayer.data.TrackSource
 import com.nanahoshi.audioplayer.data.WorkFill
 import com.nanahoshi.audioplayer.data.isSubtitleFile
+import com.nanahoshi.audioplayer.data.loadWorkSubtitleCatalog
 import com.nanahoshi.audioplayer.data.localRemoval
+import com.nanahoshi.audioplayer.data.resolveLibraryFileSource
 import com.nanahoshi.audioplayer.data.sortedForLibrary
 import com.nanahoshi.audioplayer.data.db.FolderEntity
 import com.nanahoshi.audioplayer.data.db.LibraryFileEntity
 import com.nanahoshi.audioplayer.data.db.TrackEntity
+import com.nanahoshi.audioplayer.data.db.TrackSubtitleBindingEntity
 import com.nanahoshi.audioplayer.graph
+import com.nanahoshi.audioplayer.playback.SubtitleCandidateEntry
+import com.nanahoshi.audioplayer.playback.WorkSubtitleCandidate
+import com.nanahoshi.audioplayer.playback.nearestSubtitleWorkRoot
 import com.nanahoshi.audioplayer.playback.pickSubtitleName
+import com.nanahoshi.audioplayer.ui.components.SubtitlePickerActions
+import com.nanahoshi.audioplayer.ui.components.subtitlePickerActions
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -67,6 +80,7 @@ data class LibraryListing(
     val folders: List<FolderEntity>,
     val entries: List<LibraryEntry>,
     val browsing: Boolean = true,
+    val hiddenSubtitleCount: Int = 0,
 )
 
 sealed interface LibraryEntry {
@@ -105,13 +119,18 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         com.nanahoshi.audioplayer.data.LibraryRemovalPolicy(it)
     }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5000), null)
     val currentFolderId = MutableStateFlow<Long?>(null)
-    private val folderScroll = HashMap<Long?, LazyListState>()
-    private val filteredScroll = LazyListState()
+    private val listStates = mutableMapOf<LibraryListKey, LazyListState>()
 
-    fun listState(folderId: Long?, browsing: Boolean): LazyListState {
-        if (!browsing) return filteredScroll
-        return folderScroll.getOrPut(folderId) { LazyListState() }
+    internal fun listState(key: LibraryListKey): LazyListState =
+        listStates.getOrPut(key) { LazyListState() }
+
+    internal fun workListState(folderId: Long?): LazyListState =
+        listState(LibraryListKey(folderId, LibrarySourceFilter.ALL, isSearching = false))
+
+    private fun resetFolderScroll(folderId: Long) {
+        listStates.remove(LibraryListKey(folderId, LibrarySourceFilter.ALL, isSearching = false))
     }
+
     val currentFolder = currentFolderId.flatMapLatest { id ->
         if (id == null) kotlinx.coroutines.flow.flowOf(null) else graph.library.observeFolder(id)
     }
@@ -125,12 +144,21 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     internal val workLocation = MutableStateFlow<WorkFolderLocation?>(null)
     internal val workMissing = MutableStateFlow(false)
     private var openedWorkId: Long? = null
+    val showSubtitleFiles = graph.librarySort.showSubtitleFiles
     private var workPathJob: Job? = null
-    internal val workListing = workLocation.map { it?.request }.distinctUntilChanged()
-        .flatMapLatest { request ->
+    internal val workListing = combine(
+        workLocation.map { it?.request }.distinctUntilChanged(),
+        showSubtitleFiles,
+    ) { request, showSubtitles -> request to showSubtitles }
+        .flatMapLatest { (request, showSubtitles) ->
             if (request == null) emptyFlow()
-            else graph.library.observeFolderListing(request.folderId, LibrarySort.NAME, request.source)
-                .map { LoadedWorkFolder(request, it) }
+            else graph.library.observeFolderListing(
+                folderId = request.folderId,
+                sort = LibrarySort.NAME,
+                source = request.source,
+                showSubtitleFiles = showSubtitles,
+                subtitleTrackIds = graph.observeWorkSubtitleTrackIds(request.folderId, request.source),
+            ).map { LoadedWorkFolder(request, it) }
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
     private val listingSort = combine(sort, workRootId) { global, root ->
         effectiveLibrarySort(global, root)
@@ -140,39 +168,29 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     private var openJob: Job? = null
     private var sourceCheckJob: Job? = null
     private var openGeneration = 0
-    val listing = combine(
+    internal val listing = combine(
         currentFolderId,
         sourceFilter,
         searchQuery,
         listingSort,
         workFileSource,
     ) { folderId, filter, query, sortMode, workSource ->
-        LibraryRequest(folderId, if (folderId != null) LibrarySourceFilter.ALL else filter, query.trim(), sortMode, workSource)
+        LibraryRequest(libraryListKey(folderId, filter, query), query.trim(), sortMode, workSource)
     }.flatMapLatest { request ->
+        val (folderId, filter, isSearching) = request.listKey
         when {
-            request.query.isNotEmpty() -> acrossLibrary { folders, tracks, files ->
-                val found = searchListing(request.query, request.sort, folders, tracks, files, request.folderId)
-                if (request.filter == LibrarySourceFilter.YOUTUBE) {
-                    found.copy(folders = emptyList(), entries = found.entries.filter { it is LibraryEntry.Audio && it.track.source == TrackSource.YOUTUBE })
-                } else if (request.filter != LibrarySourceFilter.LOCAL) {
-                    found
-                } else {
-                    found.copy(
-                        folders = found.folders.filter { it.asmrSourceId == null && it.asmrWorkId == null && it.biliBvid == null },
-                        entries = found.entries.filter { entry ->
-                            entry !is LibraryEntry.Audio || entry.track.source == TrackSource.LOCAL
-                        },
-                    )
-                }
+            isSearching -> acrossLibrary { folders, tracks, files ->
+                val found = searchListing(request.query, request.sort, folders, tracks, files, folderId)
+                applySearchSourceFilter(found, filter)
             }
-            request.filter == LibrarySourceFilter.LOCAL -> combine(
-                graph.library.observeChildFolders(request.folderId),
-                graph.library.observeTracksIn(request.folderId),
-                graph.library.observeFilesIn(request.folderId),
+            filter == LibrarySourceFilter.LOCAL -> combine(
+                graph.library.observeChildFolders(folderId),
+                graph.library.observeTracksIn(folderId),
+                graph.library.observeFilesIn(folderId),
             ) { folders, tracks, files ->
                 LibraryListing(
                     folders = folders
-                        .filter { it.asmrSourceId == null && it.asmrWorkId == null && it.biliBvid == null }
+                        .filter { it.isOrdinaryFolder() }
                         .sortedForLibrary(request.sort),
                     entries = mixedEntries(
                         tracks.filter { it.source == TrackSource.LOCAL },
@@ -182,11 +200,11 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
                     ),
                 )
             }
-            request.filter != LibrarySourceFilter.ALL -> acrossLibrary { folders, tracks, _ ->
-                filteredListing(request.filter, request.sort, folders, tracks)
+            filter != LibrarySourceFilter.ALL -> acrossLibrary { folders, tracks, _ ->
+                filteredListing(filter, request.sort, folders, tracks)
             }
-            else -> graph.library.observeFolderListing(request.folderId, request.sort, request.workSource)
-        }
+            else -> graph.library.observeFolderListing(folderId, request.sort, request.workSource)
+        }.map { LoadedLibraryListing(request.listKey, it) }
     }
     val biliAuthors = graph.library.observeTracks().map { tracks ->
         tracks.filter { it.source == TrackSource.BILIBILI && it.folderId != null }
@@ -197,9 +215,35 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     val busy get() = busyCounter.busy
     val selectedTrackIds = MutableStateFlow<Set<Long>>(emptySet())
     val selectedFolderIds = MutableStateFlow<Set<Long>>(emptySet())
+    val selectedFileIds = MutableStateFlow<Set<Long>>(emptySet())
     private val metaRequested = mutableSetOf<Long>()
 
+    fun toggleSubtitleFiles() {
+        val next = !showSubtitleFiles.value
+        graph.librarySort.setShowSubtitleFiles(next)
+        if (!next) {
+            val visibleSubtitleIds = workListing.value?.listing?.entries.orEmpty()
+                .mapNotNullTo(mutableSetOf()) { entry ->
+                    (entry as? LibraryEntry.File)?.file?.takeIf { isSubtitleFile(it.name) }?.id
+                }
+            selectedFileIds.value = selectedFileIds.value - visibleSubtitleIds
+        }
+    }
+
     init {
+        viewModelScope.launch {
+            combine(workLocation, showSubtitleFiles, selectedFileIds) { location, show, ids ->
+                if (location != null && !show) ids else emptySet()
+            }.distinctUntilChanged().flatMapLatest { ids ->
+                if (ids.isNotEmpty()) graph.library.observeAllFiles() else emptyFlow()
+            }.collect { files ->
+                if (workLocation.value != null && !showSubtitleFiles.value) {
+                    val selected = selectedFileIds.value
+                    val hidden = files.filter { it.id in selected && isSubtitleFile(it.name) }.map { it.id }
+                    selectedFileIds.value = selected - hidden
+                }
+            }
+        }
         viewModelScope.launch {
             combine(currentFolderId, currentFolder) { id, folder -> id to folder }.collect { (id, folder) ->
                 if (workLocation.value != null) return@collect
@@ -216,7 +260,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             val listings = workLocation.map { it == null }.distinctUntilChanged()
                 .flatMapLatest { ordinary -> if (ordinary) listing else emptyFlow() }
             listings.collect { current ->
-                current.folders.forEach { folder ->
+                current.listing.folders.forEach { folder ->
                     if (folder.asmrSourceId == null || !folder.workMeta.isNullOrBlank()) return@forEach
                     if (!metaRequested.add(folder.id)) return@forEach
                     viewModelScope.launch {
@@ -284,7 +328,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         if (location.request !== request) return
         val next = location.enter(folder)
         if (next === location) return
-        folderScroll[folder.id] = LazyListState()
+        resetFolderScroll(folder.id)
         updateWorkLocation(next)
     }
 
@@ -301,7 +345,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun openFolder(folder: FolderEntity) {
-        folderScroll[folder.id] = LazyListState()
+        resetFolderScroll(folder.id)
         searchQuery.value = ""
         pendingAsmr.value = null
         rjLookup?.cancel()
@@ -346,7 +390,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         val location = workLocation.value ?: return
         if (location.request.source == source) return
         val root = location.path.first()
-        folderScroll[root.id] = LazyListState()
+        resetFolderScroll(root.id)
         updateWorkLocation(location.move(listOf(root), source))
         openJob?.cancel()
         sourceCheckJob?.cancel()
@@ -410,16 +454,14 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
                 else -> defaultSource
             }
             updateWorkLocation(location.move(location.path, source))
-        } else {
+        } else if (workFileSource.value != defaultSource) {
             workFileSource.value = defaultSource
+            clearSelection()
         }
         workSources.value = choices
     }
 
     fun setSourceFilter(filter: LibrarySourceFilter) {
-        searchQuery.value = ""
-        pendingAsmr.value = null
-        rjLookup?.cancel()
         sourceFilter.value = filter
         clearSelection()
         if (filter == LibrarySourceFilter.LOCAL) leaveOnlineWork()
@@ -545,74 +587,102 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    internal data class LocalRemovalTargets(
-        val downloads: List<TrackEntity>,
-        val associations: List<TrackEntity>,
-    ) {
-        @get:StringRes
-        val labelRes: Int get() = when {
-            downloads.isNotEmpty() && associations.isNotEmpty() -> R.string.library_action_delete_and_unlink
-            downloads.isNotEmpty() -> R.string.library_action_delete_downloads
-            else -> R.string.library_action_unlink
-        }
-    }
+    internal data class AudioSelection(val tracks: Set<Long>, val folders: Set<Long>, val source: TrackSource?)
+
+    internal val hasSelectedAudio = combine(
+        selectedTrackIds, selectedFolderIds, workFileSource, ::AudioSelection,
+    ).flatMapLatest { selection ->
+        if (selection.tracks.isEmpty() && selection.folders.isEmpty()) flowOf(null)
+        else graph.library.observeLocalRemovalTracks(selection.tracks, selection.folders, selection.source)
+            .map { tracks -> selection.takeIf { tracks.isNotEmpty() } }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    internal fun canInteractWithWorkFile(request: WorkFolderRequest?, file: LibraryFileEntity): Boolean =
+        request != null && workLocation.value?.request === request && (showSubtitleFiles.value || !isSubtitleFile(file.name))
 
     internal data class LocalRemovalSelection(
         val tracks: Set<Long>,
         val folders: Set<Long>,
+        val files: Set<Long>,
         val source: TrackSource?,
     )
 
     internal val selectedLocalRemoval = combine(
-        selectedTrackIds, selectedFolderIds, workFileSource, ::LocalRemovalSelection,
+        selectedTrackIds, selectedFolderIds, selectedFileIds, workFileSource, ::LocalRemovalSelection,
     ).flatMapLatest { selection ->
-        if (selection.tracks.isEmpty() && selection.folders.isEmpty()) flowOf(null)
-        else graph.library.observeLocalRemovalTracks(selection.tracks, selection.folders, selection.source)
-            .map { tracks ->
-                val targets = localRemovalTargets(tracks)
-                targets.takeUnless { it.downloads.isEmpty() && it.associations.isEmpty() }?.let { selection to it }
+        if (selection.tracks.isEmpty() && selection.folders.isEmpty() && selection.files.isEmpty()) flowOf(null)
+        else graph.library.observeLocalRemovalTargets(selection.tracks, selection.folders, selection.files, selection.source)
+            .map { plan ->
+                plan.takeIf { it.hasTargets }?.let { selection to it }
             }
     }.flowOn(Dispatchers.IO).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
-    internal data class PendingAudioDelete(val targets: LocalRemovalTargets, val subtitles: Int)
+    internal data class PendingAudioDelete(
+        val plan: LocalRemovalPlan,
+        val audioCount: Int,
+        val associationCount: Int,
+        val otherFileCount: Int,
+        val workSubtitleCount: Int,
+        val generatedSubtitleCount: Int,
+        val customSubtitleCount: Int,
+    )
 
     internal val pendingAudioDelete = MutableStateFlow<PendingAudioDelete?>(null)
 
     fun deleteDownloadedTrack(track: TrackEntity) = launch {
-        requestDeleteDownloaded(withContext(Dispatchers.IO) { localRemovalTargets(listOf(track)) })
+        requestDeleteDownloaded(graph.library.localRemovalPlan(setOf(track.id), emptySet(), emptySet(), track.source))
     }
 
-    internal fun deleteDownloadedSelection(selection: LocalRemovalSelection, targets: LocalRemovalTargets) = launch {
-        if (selection != LocalRemovalSelection(selectedTrackIds.value, selectedFolderIds.value, workFileSource.value)) return@launch
+    fun deleteDownloadedFile(file: LibraryFileEntity) = launch {
+        requestDeleteDownloaded(graph.library.localRemovalPlan(emptySet(), emptySet(), setOf(file.id), workFileSource.value))
+    }
+
+    internal fun deleteDownloadedSelection(selection: LocalRemovalSelection, plan: LocalRemovalPlan) = launch {
+        if (selection != LocalRemovalSelection(selectedTrackIds.value, selectedFolderIds.value, selectedFileIds.value, workFileSource.value)) return@launch
         clearSelection()
-        requestDeleteDownloaded(targets)
+        requestDeleteDownloaded(plan)
     }
 
-    private suspend fun requestDeleteDownloaded(targets: LocalRemovalTargets) {
-        val subtitles = targets.downloads.count { graph.subtitles.hasGenerated(it.id, it.localUri, it.remoteUrl) }
-        if (subtitles > 0 || (targets.downloads.isNotEmpty() && targets.associations.isNotEmpty())) {
-            pendingAudioDelete.value = PendingAudioDelete(targets, subtitles)
+    private suspend fun requestDeleteDownloaded(plan: LocalRemovalPlan) {
+        if (!plan.hasTargets) return
+        val downloadGroups = plan.audioDownloads.groupBy { it.localUri?.let(::canonicalPath) ?: "id:${it.id}" }
+        val audioCount = downloadGroups.size
+        val associationCount = plan.audioAssociations.distinctBy { it.id }.size
+        val otherFileCount = plan.otherFiles.distinctBy { it.localUri?.let(::canonicalPath) ?: "id:${it.id}" }.size
+        val workSubtitleCount = plan.subtitleFiles.distinctBy { it.localUri?.let(::canonicalPath) ?: "id:${it.id}" }.size
+        val generatedSubtitleCount = downloadGroups.values.count { tracks ->
+            tracks.any { graph.subtitles.hasRemovableSubtitlesForTrack(it) }
+        }
+        val customSubtitleCount = plan.customSubtitlePaths.distinct().size
+        val showDialog = generatedSubtitleCount > 0 ||
+            workSubtitleCount > 0 ||
+            customSubtitleCount > 0 ||
+            otherFileCount > 0 ||
+            (audioCount > 0 && associationCount > 0)
+        if (showDialog) {
+            pendingAudioDelete.value = PendingAudioDelete(
+                plan = plan,
+                audioCount = audioCount,
+                associationCount = associationCount,
+                otherFileCount = otherFileCount,
+                workSubtitleCount = workSubtitleCount,
+                generatedSubtitleCount = generatedSubtitleCount,
+                customSubtitleCount = customSubtitleCount,
+            )
         } else {
-            applyLocalRemoval(targets, deleteSubtitles = true)
+            applyLocalRemoval(plan, deleteSubtitles = true)
         }
     }
 
     fun confirmAudioDelete(deleteSubtitles: Boolean) {
         val pending = pendingAudioDelete.value ?: return
         pendingAudioDelete.value = null
-        launch { applyLocalRemoval(pending.targets, deleteSubtitles) }
+        launch { applyLocalRemoval(pending.plan, deleteSubtitles) }
     }
 
-    private suspend fun applyLocalRemoval(targets: LocalRemovalTargets, deleteSubtitles: Boolean) {
-        val tracks = targets.downloads + targets.associations
-        val result = graph.downloads.deleteDownloaded(tracks, deleteSubtitles)
+    private suspend fun applyLocalRemoval(plan: LocalRemovalPlan, deleteSubtitles: Boolean) {
+        val result = graph.downloads.deleteLocalTargets(plan, deleteSubtitles, graph.subtitleBindings)
         graph.show(deleteDownloadedNotice(result))
-    }
-
-    private fun localRemovalTargets(tracks: List<TrackEntity>): LocalRemovalTargets {
-        val filesDir = getApplication<Application>().filesDir
-        val byAction = tracks.groupBy { it.localRemoval(filesDir) }
-        return LocalRemovalTargets(byAction[LocalRemoval.DOWNLOAD].orEmpty(), byAction[LocalRemoval.ASSOCIATION].orEmpty())
     }
 
     fun cancelAudioDelete() {
@@ -897,25 +967,45 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         graph.player.removeFromLibrary(emptyList(), listOf(id))
     }
 
-    val canRemoveSelection = combine(removalPolicy, selectedTrackIds, selectedFolderIds, graph.library.observeTracks()) { policy, tracks, folders, all ->
-        policy?.allows(all.filter { it.id in tracks }.map { it.folderId }, folders) == true
+    private val selectionParents = combine(
+        selectedTrackIds,
+        selectedFileIds,
+        graph.library.observeTracks(),
+        graph.library.observeAllFiles(),
+    ) { tracks, files, allTracks, allFiles ->
+        buildList {
+            allTracks.forEach { if (it.id in tracks) add(it.folderId) }
+            allFiles.forEach { if (it.id in files) add(it.folderId) }
+        }
+    }
+
+    val canRemoveSelection = combine(
+        removalPolicy,
+        selectionParents,
+        selectedFolderIds,
+    ) { policy, parents, folders ->
+        policy?.allows(parents, folders) == true
     }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5000), false)
 
     fun deleteSelection() {
         val tracks = selectedTrackIds.value.toList()
         val folders = selectedFolderIds.value.toList()
+        val files = selectedFileIds.value.toList()
         clearSelection()
-        graph.player.removeFromLibrary(tracks, folders)
+        graph.player.removeFromLibrary(tracks, folders, files)
     }
 
-    fun beginSelection(trackId: Long? = null, folderId: Long? = null) {
-        if (selectedTrackIds.value.isEmpty() && selectedFolderIds.value.isEmpty()) {
+    fun beginSelection(trackId: Long? = null, folderId: Long? = null, fileId: Long? = null) {
+        if (selectedTrackIds.value.isEmpty() && selectedFolderIds.value.isEmpty() && selectedFileIds.value.isEmpty()) {
             selectedTrackIds.value = listOfNotNull(trackId).toSet()
             selectedFolderIds.value = listOfNotNull(folderId).toSet()
+            selectedFileIds.value = listOfNotNull(fileId).toSet()
         } else if (trackId != null) {
             toggleTrack(trackId)
         } else if (folderId != null) {
             toggleFolder(folderId)
+        } else if (fileId != null) {
+            toggleFile(fileId)
         }
     }
 
@@ -929,9 +1019,15 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         selectedFolderIds.value = if (id in current) current - id else current + id
     }
 
+    fun toggleFile(id: Long) {
+        val current = selectedFileIds.value
+        selectedFileIds.value = if (id in current) current - id else current + id
+    }
+
     fun clearSelection() {
         selectedTrackIds.value = emptySet()
         selectedFolderIds.value = emptySet()
+        selectedFileIds.value = emptySet()
     }
 
     fun playNextSelection() = launch {
@@ -984,13 +1080,146 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         graph.player.append(listOf(track))
     }
 
-    private suspend fun selectedTracks(): List<TrackEntity> =
-        graph.library.orderedSelection(
+    private suspend fun selectedTracks(): List<TrackEntity> {
+        val tracks = graph.library.orderedSelection(
             currentFolderId.value,
             selectedFolderIds.value,
             selectedTrackIds.value,
             effectiveLibrarySort(graph.librarySort.sort.value, workRootId.value),
         )
+        val source = workFileSource.value
+        return if (source == null) tracks else tracks.filter { it.source == source }
+    }
+
+    fun showMessage(@StringRes id: Int) = graph.show(id)
+
+    internal val subtitlePickerActions: SubtitlePickerActions = graph.subtitlePickerActions(viewModelScope)
+
+    internal suspend fun listWorkTracksForSubtitle(
+        file: LibraryFileEntity,
+    ): List<Pair<TrackEntity, TrackSubtitleBindingEntity?>> = withContext(Dispatchers.IO) {
+        val catalog = loadWorkSubtitleCatalog(graph.db, file.folderId)
+        val source = workFileSource.value
+        val candidateTracks = if (catalog != null) {
+            val filtered = if (source == null) catalog.tracks else catalog.tracks.filter { it.source == source }
+            filtered.ifEmpty { catalog.tracks }
+        } else {
+            val folderTracks = graph.library.tracksIn(file.folderId)
+            val filtered = if (source == null) folderTracks else folderTracks.filter { it.source == source }
+            filtered.ifEmpty { folderTracks }
+        }.sortedForLibrary(LibrarySort.NAME)
+        if (candidateTracks.isEmpty()) return@withContext emptyList()
+        val bindings = candidateTracks.map { it.id }.chunked(900)
+            .flatMap { graph.db.trackSubtitles().getForTracks(it) }
+            .associateBy { it.trackId }
+        candidateTracks.map { track -> track to bindings[track.id] }
+    }
+
+    internal suspend fun bindSubtitleFileToTrack(file: LibraryFileEntity, track: TrackEntity) {
+        graph.subtitleBindings.bindLibraryFile(track.id, file.id, file.name)
+        graph.show(R.string.subtitle_file_bound_notice, track.title)
+    }
+
+    internal suspend fun loadBatchSubtitleSetup(currentFolderId: Long?): BatchSubtitleSetup = withContext(Dispatchers.IO) {
+        val targetFolderId = currentFolderId ?: workRootId.value
+        val catalog = loadWorkSubtitleCatalog(graph.db, targetFolderId)
+            ?: return@withContext BatchSubtitleSetup(emptyList(), emptyList(), null, null)
+        val root = nearestSubtitleWorkRoot(targetFolderId, catalog.folders)
+        val source = workFileSource.value
+        val rootLabel = text(R.string.library_root_label)
+        val folderPath = { folderId: Long ->
+            relativeWorkPath(folderId, root?.id, catalog.folders).ifBlank { rootLabel }
+        }
+        val audioFolders = catalog.tracks
+            .filter { source == null || it.source == source }
+            .groupBy { it.folderId }
+            .entries
+            .mapNotNull { (folderId, tracks) ->
+                folderId ?: return@mapNotNull null
+                BatchAudioFolderChoice(
+                    folderId = folderId,
+                    relativePath = folderPath(folderId),
+                    tracks = tracks.sortedForLibrary(LibrarySort.NAME),
+                )
+            }
+            .sortedBy { it.relativePath.lowercase() }
+        val subtitleFolders = catalog.files
+            .mapNotNull { file ->
+                file.folderId?.let { BatchSubtitleFolderKey(it, resolveLibraryFileSource(file, catalog.jaFileIds)) to file }
+            }
+            .groupBy({ it.first }, { it.second })
+            .map { (key, files) ->
+                val entries = files.sortedBy { it.name.lowercase() }
+                    .map { SubtitleCandidateEntry(name = it.name, fileId = it.id) }
+                BatchSubtitleFolderChoice(
+                    key = key,
+                    relativePath = folderPath(key.folderId),
+                    candidates = entries,
+                )
+            }
+            .sortedWith(compareBy({ it.relativePath.lowercase() }, { it.key.source?.name }))
+        val preferredAudio = audioFolders.firstOrNull { it.folderId == targetFolderId }?.folderId
+            ?: audioFolders.firstOrNull()?.folderId
+        val preferredSub = subtitleFolders.firstOrNull { it.key.folderId == targetFolderId && it.key.source == source }?.key
+            ?: subtitleFolders.firstOrNull { it.key.folderId == targetFolderId }?.key
+            ?: subtitleFolders.firstOrNull()?.key
+        BatchSubtitleSetup(audioFolders, subtitleFolders, preferredAudio, preferredSub)
+    }
+
+    private fun relativeWorkPath(
+        folderId: Long?,
+        rootId: Long?,
+        folders: Map<Long, FolderEntity>,
+    ): String {
+        val parts = ArrayList<String>()
+        var current = folderId
+        while (current != null && current != rootId) {
+            val folder = folders[current] ?: break
+            parts += folder.name
+            current = folder.parentId
+        }
+        return parts.asReversed().joinToString("/")
+    }
+
+    internal suspend fun commitBatchLibrarySubtitles(pairs: List<Pair<Long, Long>>) {
+        if (pairs.isEmpty()) return
+        graph.subtitleBindings.batchBindLibraryFiles(pairs)
+        graph.show(R.string.subtitle_batch_bound_count, pairs.size)
+    }
+
+    internal suspend fun commitBatchExternalSubtitles(
+        pairs: List<BatchExternalPair>,
+        treeUri: Uri,
+    ): BindExternalResult {
+        val result = graph.subtitleBindings.batchBindExternalTree(pairs, treeUri)
+        if (result == BindExternalResult.Bound) {
+            graph.show(R.string.subtitle_batch_bound_count, pairs.size)
+        }
+        return result
+    }
+
+    /** 复制在 ViewModel 作用域中执行并返回成功数，弹层关闭或旋转不会中断批量导入。 */
+    internal suspend fun commitBatchExternalCopies(pairs: List<BatchExternalPair>): Int =
+        viewModelScope.async(Dispatchers.IO) {
+            var imported = 0
+            var failed = 0
+            for (pair in pairs) {
+                val ok = try {
+                    graph.subtitleBindings.importAndBindCopy(pair.trackId, pair.uri, pair.displayName)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    false
+                }
+                if (ok) imported++ else failed++
+            }
+            when {
+                imported > 0 && failed > 0 -> graph.show(R.string.subtitle_batch_imported_partial, imported, failed)
+                imported > 0 -> graph.show(R.string.subtitle_batch_imported_count, imported)
+                else -> graph.show(R.string.subtitle_picker_import_failed)
+            }
+            imported
+        }.await()
 
     private fun acrossLibrary(
         block: (List<FolderEntity>, List<TrackEntity>, List<LibraryFileEntity>) -> LibraryListing,
@@ -1038,12 +1267,22 @@ internal class BusyCounter {
 }
 
 private data class LibraryRequest(
-    val folderId: Long?,
-    val filter: LibrarySourceFilter,
+    val listKey: LibraryListKey,
     val query: String,
     val sort: LibrarySort,
     val workSource: TrackSource?,
 )
+
+internal data class LibraryListKey(
+    val folderId: Long?,
+    val filter: LibrarySourceFilter,
+    val isSearching: Boolean,
+)
+
+internal data class LoadedLibraryListing(val key: LibraryListKey, val listing: LibraryListing)
+
+internal fun libraryListKey(folderId: Long?, filter: LibrarySourceFilter, query: String): LibraryListKey =
+    LibraryListKey(folderId, if (folderId == null) filter else LibrarySourceFilter.ALL, query.isNotBlank())
 
 private val RJ_QUERY = Regex("\\d{1,7}")
 
@@ -1129,6 +1368,29 @@ internal fun workRootOf(folderId: Long?, byId: Map<Long, FolderEntity>): FolderE
 private fun FolderEntity.workTags(): List<String> =
     WorkFacts.fromJson(workMeta)?.tags.orEmpty()
 
+private fun FolderEntity.isOrdinaryFolder(): Boolean =
+    asmrSourceId.isNullOrBlank() && asmrWorkId == null && biliBvid == null
+
+internal fun applySearchSourceFilter(found: LibraryListing, filter: LibrarySourceFilter): LibraryListing = when (filter) {
+    LibrarySourceFilter.ALL -> found
+    LibrarySourceFilter.ASMR -> found.copy(
+        folders = found.folders.filter { !it.asmrSourceId.isNullOrBlank() },
+        entries = emptyList(),
+    )
+    LibrarySourceFilter.BILIBILI -> found.copy(
+        folders = found.folders.filter { it.biliBvid != null },
+        entries = found.entries.filter { it is LibraryEntry.Audio && it.track.source == TrackSource.BILIBILI },
+    )
+    LibrarySourceFilter.YOUTUBE -> found.copy(
+        folders = emptyList(),
+        entries = found.entries.filter { it is LibraryEntry.Audio && it.track.source == TrackSource.YOUTUBE },
+    )
+    LibrarySourceFilter.LOCAL -> found.copy(
+        folders = found.folders.filter { it.isOrdinaryFolder() },
+        entries = found.entries.filter { it is LibraryEntry.File || (it is LibraryEntry.Audio && it.track.source == TrackSource.LOCAL) },
+    )
+}
+
 private fun filteredListing(
     filter: LibrarySourceFilter,
     sort: LibrarySort,
@@ -1161,10 +1423,15 @@ internal fun mixedEntries(
     files: List<LibraryFileEntity>,
     sort: LibrarySort,
     subtitlePool: List<LibraryFileEntity> = files,
+    showSubtitleFiles: Boolean = false,
+    subtitleTrackIds: Set<Long>? = null,
 ): List<LibraryEntry> {
-    val visibleFiles = files.filter { !isSubtitleFile(it.name) }
+    val visibleFiles = if (showSubtitleFiles) files else files.filter { !isSubtitleFile(it.name) }
     val rows = buildList {
-        tracks.forEach { add(LibraryEntry.Audio(it, hasSubtitle(it, subtitlePool))) }
+        tracks.forEach { track ->
+            val hasSubtitle = subtitleTrackIds?.contains(track.id) ?: hasSubtitle(track, subtitlePool)
+            add(LibraryEntry.Audio(track, hasSubtitle))
+        }
         visibleFiles.forEach { add(LibraryEntry.File(it)) }
     }
     return when (sort) {
@@ -1186,9 +1453,28 @@ private fun FolderEntity.matchesRj(digits: String): Boolean {
 private fun rjNumber(raw: String): String =
     raw.uppercase().removePrefix("RJ").removePrefix("VJ").filter { it.isDigit() }.trimStart('0').ifEmpty { "0" }
 
+internal val LocalRemovalPlan.hasTargets: Boolean
+    get() = audioDownloads.isNotEmpty() ||
+        audioAssociations.isNotEmpty() ||
+        subtitleFiles.isNotEmpty() ||
+        otherFiles.isNotEmpty()
+
+@get:StringRes
+internal val LocalRemovalPlan.labelRes: Int
+    get() {
+        val hasDeletes = audioDownloads.isNotEmpty() || subtitleFiles.isNotEmpty() || otherFiles.isNotEmpty()
+        val hasAssociations = audioAssociations.isNotEmpty()
+        return when {
+            hasDeletes && hasAssociations -> R.string.library_action_delete_and_unlink
+            hasDeletes -> R.string.library_action_delete_downloads
+            else -> R.string.library_action_unlink
+        }
+    }
+
 internal fun deleteDownloadedNotice(result: DeleteResult): TextRef {
     val parts = buildList {
         if (result.deleted > 0) add(TextRef.Res(R.string.library_deleted_downloads, listOf(result.deleted)))
+        if (result.deletedFiles > 0) add(TextRef.Res(R.string.library_deleted_files, listOf(result.deletedFiles)))
         if (result.unlinked > 0) add(TextRef.Res(R.string.library_unlinked_tracks, listOf(result.unlinked)))
         if (result.changed > 0) add(TextRef.Res(R.string.library_skipped_changed, listOf(result.changed)))
     }

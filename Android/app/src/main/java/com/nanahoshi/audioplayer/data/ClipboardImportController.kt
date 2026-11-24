@@ -3,7 +3,9 @@ package com.nanahoshi.audioplayer.data
 import androidx.compose.runtime.*
 import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.asmr.CatalogLookup
+import com.nanahoshi.audioplayer.bilibili.BiliImportRequest
 import com.nanahoshi.audioplayer.bilibili.BiliPart
+import com.nanahoshi.audioplayer.bilibili.BiliVideoHit
 import com.nanahoshi.audioplayer.dlsite.DlsiteException
 import com.nanahoshi.audioplayer.dlsite.DlsiteShowcase
 import com.nanahoshi.audioplayer.youtube.YouTubeVideo
@@ -18,7 +20,7 @@ internal data class ClipboardDlsiteWork(val product: DlsiteShowcase, val purchas
 internal data class ClipboardImportPreview(
     val target: ClipboardTarget, val title: String, val cover: String?, val alreadySaved: Boolean = false,
     val parts: List<BiliPart> = emptyList(), val youtubeVideo: YouTubeVideo? = null,
-    val biliVideo: com.nanahoshi.audioplayer.bilibili.BiliVideoHit? = null,
+    val biliVideo: BiliVideoHit? = null,
     val dlsiteWork: ClipboardDlsiteWork? = null,
     val jaArticle: JaArticle? = null,
     val jaExternalUrl: String? = null,
@@ -27,21 +29,26 @@ internal data class ClipboardImportPreview(
 ) {
     val jaBrowserUrl get() = jaVerificationPage ?: jaExternalUrl
     val detailsOnly get() = dlsiteWork?.purchased == false || jaDetailsOnly || jaBrowserUrl != null
+    val multiPartBili get() = target.source == ClipboardSource.BILIBILI && parts.size > 1
+    val alreadyInLibrary get() = alreadySaved && !multiPartBili
 }
+
+internal enum class ClipboardImportStage { PREVIEW, CHOOSING_BILI_PARTS, SAVING }
+
 internal data class ClipboardImportState(
     val preview: ClipboardImportPreview,
-    val selected: Set<Long> = emptySet(), val saving: Boolean = false, val error: TextRef? = null,
+    val stage: ClipboardImportStage = ClipboardImportStage.PREVIEW,
+    val error: TextRef? = null,
 ) {
+    val busy get() = stage != ClipboardImportStage.PREVIEW
     val canImport: Boolean
-        get() {
-            if (saving || preview.detailsOnly) return false
-            return if (preview.target.source == ClipboardSource.BILIBILI) preview.parts.any { it.cid in selected }
-            else !preview.alreadySaved
-        }
+        get() = !busy && !preview.detailsOnly && !preview.alreadyInLibrary &&
+            (preview.target.source != ClipboardSource.BILIBILI || preview.parts.isNotEmpty())
 }
 internal interface ClipboardImportBackend {
     suspend fun preview(target: ClipboardTarget): ClipboardImportPreview?
-    suspend fun save(preview: ClipboardImportPreview, selectedParts: List<BiliPart>): String?
+    suspend fun chooseBiliParts(preview: ClipboardImportPreview): List<BiliImportRequest>?
+    suspend fun save(preview: ClipboardImportPreview, biliRequests: List<BiliImportRequest>): String
 }
 
 internal suspend fun clipboardWorkPreview(
@@ -75,9 +82,10 @@ internal class ClipboardImportController(
     private var job: Job? = null
     private var generation = 0L
     private var pendingFingerprint: String? = null
+    private var jaVerification: Pair<String, ClipboardImportPreview>? = null
 
     fun offer(candidate: ClipboardImportCandidate) {
-        if (state?.saving == true) return
+        if (state?.busy == true) return
         val fingerprint = candidate.fingerprint
         if (fingerprint == pendingFingerprint || fingerprint == pendingLookup?.fingerprint) return
         val handled = lastHandled()
@@ -109,7 +117,7 @@ internal class ClipboardImportController(
                 if (token != generation) return@launch
                 rememberHandled(fingerprint)
                 if (preview != null) {
-                    state = ClipboardImportState(preview, selected = preview.parts.map { it.cid }.toSet())
+                    state = ClipboardImportState(preview)
                 } else if (candidate.requiresLookupConfirmation) {
                     message(TextRef.Res(R.string.clipboard_no_work))
                 }
@@ -136,39 +144,67 @@ internal class ClipboardImportController(
         }
     }
     fun dismiss() {
-        if (state?.saving == true) return
+        if (state?.busy == true) return
         generation++
         job?.cancel()
         pendingFingerprint = null
         pendingLookup = null
+        jaVerification = null
         state = null
     }
-    fun togglePart(cid: Long) {
-        val current = state ?: return
-        if (current.saving) return
-        state = current.copy(selected = if (cid in current.selected) current.selected - cid else current.selected + cid)
+
+    fun beginJaVerification(preview: ClipboardImportPreview): String? {
+        val current = state?.takeUnless { it.busy } ?: return null
+        if (current.preview != preview || preview.jaVerificationPage == null) return null
+        dismiss()
+        val token = generation.toString()
+        jaVerification = token to preview
+        return token
     }
-    fun toggleAllParts() {
-        val current = state ?: return
-        if (current.saving) return
-        val all = current.preview.parts.map { it.cid }.toSet()
-        state = current.copy(selected = if (current.selected == all) emptySet() else all)
+
+    fun finishJaVerification(token: String, article: JaArticle?) {
+        val (pendingToken, preview) = jaVerification ?: return
+        if (token != pendingToken || (article != null && article.post.postId != preview.target.id)) return
+        jaVerification = null
+        state = ClipboardImportState(
+            if (article == null) preview else preview.copy(
+                title = article.post.title,
+                cover = article.post.coverUri,
+                jaArticle = article,
+                jaDetailsOnly = article.media.isEmpty(),
+                jaVerificationPage = null,
+            ),
+        )
     }
+
     fun confirm() {
         val current = state?.takeIf { it.canImport } ?: return
         val preview = current.preview
         val token = generation
-        state = current.copy(saving = true, error = null)
-        job = scope.launch {
+        val retry = current.copy(error = null)
+        val stage = if (preview.multiPartBili) ClipboardImportStage.CHOOSING_BILI_PARTS else ClipboardImportStage.SAVING
+        state = retry.copy(stage = stage)
+        job = scope.launch(start = CoroutineStart.UNDISPATCHED) {
             try {
-                val result = backend.save(preview, preview.parts.filter { it.cid in current.selected })
+                ensureActive()
+                val requests = if (preview.target.source == ClipboardSource.BILIBILI) {
+                    backend.chooseBiliParts(preview) ?: return@launch
+                } else emptyList()
+                ensureActive()
+                if (token != generation) return@launch
+                state = retry.copy(stage = ClipboardImportStage.SAVING)
+                val result = backend.save(preview, requests)
+                ensureActive()
                 if (token == generation) {
-                    if (result == null) state = current.copy(saving = false, error = null)
-                    else { state = null; message(TextRef.Raw(result)) }
+                    state = null
+                    message(TextRef.Raw(result))
                 }
-            } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) {
-                if (token == generation) state = current.copy(error = TextRef.Res(R.string.clipboard_add_failed))
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                if (token == generation) state = retry.copy(error = TextRef.Res(R.string.clipboard_add_failed))
+            } finally {
+                if (token == generation && state?.busy == true) state = retry
             }
         }
     }

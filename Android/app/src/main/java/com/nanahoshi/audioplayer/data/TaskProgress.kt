@@ -102,6 +102,8 @@ data class TaskSegmentSummary(
 @Serializable
 data class TaskProgressSummary(val parts: Map<ProgressPart, TaskSegmentSummary> = emptyMap()) {
     fun merge(part: ProgressPart, value: TaskSegmentSummary) = copy(parts = parts + (part to value))
+    fun without(part: ProgressPart): TaskProgressSummary = copy(parts = parts - part)
+    fun encodeOrNull(): String? = if (parts.isEmpty()) null else encode()
 }
 private val progressJson = Json { ignoreUnknownKeys = true; encodeDefaults = false }
 fun decodeProgressSummary(raw: String?): TaskProgressSummary = raw?.let {
@@ -179,6 +181,12 @@ class TaskProgressTracker(
     @Synchronized fun isCurrent(key: TaskKey, token: Long) = entry(key, token) != null
     @Synchronized fun reset(key: TaskKey) {
         entries.keys.filter { it.parent() == key.parent() }.forEach(entries::remove)
+        publish()
+    }
+    @Synchronized fun resetPart(key: TaskKey, part: ProgressPart) {
+        val parts = entries[key] ?: return
+        parts.remove(part) ?: return
+        if (parts.isEmpty()) entries.remove(key)
         publish()
     }
     @Synchronized fun queued(key: TaskKey, part: ProgressPart, phase: ProgressPhase) {

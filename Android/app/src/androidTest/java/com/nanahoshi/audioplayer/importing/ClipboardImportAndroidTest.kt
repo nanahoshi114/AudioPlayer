@@ -55,7 +55,7 @@ class ClipboardImportAndroidTest {
     @Test fun readyPreviewShowsTitleAndCoverBeforeConfirmation() {
         var state by mutableStateOf(ClipboardImportState(
             ClipboardImportPreview(target, "视频标题", null,
-                parts = listOf(BiliPart(target.id, 42, 1, "one", "UP", 1000, ""))), selected = setOf(42)))
+                parts = listOf(BiliPart(target.id, 42, 1, "one", "UP", 1000, "")))))
         var imports = 0
         compose.setContent { MaterialTheme {
             ClipboardImportDialog(state, {}, { imports++ }, {})
@@ -69,14 +69,14 @@ class ClipboardImportAndroidTest {
         compose.runOnIdle { assertEquals(1, imports) }
         compose.runOnIdle { state = state.copy(preview = state.preview.copy(alreadySaved = true)) }
         compose.onNodeWithText("已在音频库").assertIsDisplayed()
-        compose.onNodeWithText("导入").assertIsEnabled()
+        compose.onNodeWithText("导入").assertDoesNotExist()
+        compose.onNodeWithText("关闭").assertIsEnabled()
         compose.onNodeWithText("选择导入方式").assertDoesNotExist()
     }
 
     @Test fun multiPartPreviewDefersSelectionToTheSharedImportDialog() {
         val parts = listOf(BiliPart(target.id, 42, 1, "one", "UP", 1000, ""), BiliPart(target.id, 43, 2, "two", "UP", 1000, ""))
-        val state = ClipboardImportState(ClipboardImportPreview(target, "标题", null, parts = parts),
-            selected = setOf(42, 43))
+        val state = ClipboardImportState(ClipboardImportPreview(target, "标题", null, parts = parts))
         var choices = 0
         compose.setContent { MaterialTheme { ClipboardImportDialog(state, {}, { choices++ }, {}) } }
         compose.onNodeWithText("P2 · two").assertDoesNotExist()

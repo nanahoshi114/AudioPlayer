@@ -23,6 +23,13 @@ internal class SubtitleDisplayPreferences(context: Context) {
     )
     val desktop = _desktop.asStateFlow()
     val appVisible = MutableStateFlow(false)
+    private val fallbackState = MutableStateFlow(prefs.getBoolean("cross_source_fallback", true))
+    val crossSourceFallback = fallbackState.asStateFlow()
+
+    fun setCrossSourceFallback(enabled: Boolean) {
+        prefs.edit().putBoolean("cross_source_fallback", enabled).apply()
+        fallbackState.value = enabled
+    }
 
     fun enableDesktop(enabled: Boolean) {
         prefs.edit().putBoolean("desktop_enabled", enabled).apply()

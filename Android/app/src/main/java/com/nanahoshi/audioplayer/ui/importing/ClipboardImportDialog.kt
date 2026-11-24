@@ -3,10 +3,7 @@ package com.nanahoshi.audioplayer.ui.importing
 import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.text.asString
 import androidx.compose.ui.res.stringResource
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -17,11 +14,9 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.window.DialogProperties
 import com.nanahoshi.audioplayer.data.ClipboardImportState
-import com.nanahoshi.audioplayer.data.ClipboardSource
 import com.nanahoshi.audioplayer.ui.CoverImage
 import com.nanahoshi.audioplayer.ui.components.JAPANESE_ASMR_VERIFY_ACTION
 import com.nanahoshi.audioplayer.ui.components.JAPANESE_ASMR_VERIFY_HINT
-import com.nanahoshi.audioplayer.ui.formatDuration
 
 @Composable
 internal fun ClipboardImportDialog(
@@ -31,14 +26,14 @@ internal fun ClipboardImportDialog(
     onOpenDetails: (String) -> Unit,
 ) {
     val preview = state.preview
-    val multiPartBili = preview.target.source == ClipboardSource.BILIBILI && preview.parts.size > 1
     val sourceLabel = if (preview.dlsiteWork != null) "DLsite" else stringResource(preview.target.source.labelRes)
     val coverDescription = stringResource(R.string.a11y_import_cover)
     AlertDialog(
         onDismissRequest = onDismiss,
-        properties = DialogProperties(dismissOnBackPress = !state.saving, dismissOnClickOutside = !state.saving),
+        properties = DialogProperties(dismissOnBackPress = !state.busy, dismissOnClickOutside = !state.busy),
         title = {
             Text(when {
+                preview.alreadyInLibrary -> stringResource(R.string.online_in_library)
                 preview.jaVerificationPage != null -> stringResource(R.string.import_ja_verify_title)
                 preview.detailsOnly -> stringResource(R.string.import_found_title)
                 else -> stringResource(R.string.import_confirm_title)
@@ -53,17 +48,15 @@ internal fun ClipboardImportDialog(
                     Text("$sourceLabel · ${preview.target.id}", Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodySmall)
                 }
             }
-            if (preview.alreadySaved) Text(
-                stringResource(
-                    if (multiPartBili) R.string.import_already_saved_multi else R.string.import_already_saved,
-                ),
+            if (preview.alreadySaved && preview.multiPartBili) Text(
+                stringResource(R.string.import_already_saved_multi),
                 Modifier.padding(top = 12.dp),
             )
             if (preview.detailsOnly && preview.jaBrowserUrl == null) Text(
                 stringResource(R.string.import_no_source),
                 Modifier.padding(top = 12.dp),
             )
-            if (state.saving) {
+            if (state.busy) {
                 LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 12.dp))
                 Text(stringResource(R.string.import_importing), Modifier.padding(top = 8.dp))
             }
@@ -76,18 +69,19 @@ internal fun ClipboardImportDialog(
                 }
             } else if (preview.detailsOnly || (preview.alreadySaved && preview.jaArticle != null)) {
                 TextButton(onClick = { onOpenDetails(preview.target.id) }) { Text(stringResource(R.string.import_view_details)) }
-            } else if (!preview.alreadySaved || preview.target.source == ClipboardSource.BILIBILI) {
+            } else if (!preview.alreadyInLibrary) {
                 TextButton(onClick = onConfirm, enabled = state.canImport) {
                     Text(when {
-                        multiPartBili -> stringResource(R.string.import_choose_mode)
+                        preview.multiPartBili -> stringResource(R.string.import_choose_mode)
                         else -> stringResource(R.string.import_action)
                     })
                 }
             }
         },
         dismissButton = {
-            val alreadySaved = preview.alreadySaved && preview.target.source != ClipboardSource.BILIBILI
-            TextButton(onClick = onDismiss, enabled = !state.saving) { Text(if (alreadySaved) stringResource(R.string.common_close) else stringResource(R.string.common_cancel)) }
+            TextButton(onClick = onDismiss, enabled = !state.busy) {
+                Text(stringResource(if (preview.alreadyInLibrary) R.string.common_close else R.string.common_cancel))
+            }
         },
     )
 }

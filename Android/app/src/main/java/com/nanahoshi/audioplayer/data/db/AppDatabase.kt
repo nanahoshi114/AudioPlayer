@@ -46,6 +46,7 @@ class DownloadStatusConverter {
         QueueItemEntity::class,
         PlaybackStateEntity::class,
         LibraryFileEntity::class,
+        TrackSubtitleBindingEntity::class,
         DownloadEntity::class,
         WhisperJobEntity::class,
         TranslationJobEntity::class,
@@ -58,7 +59,7 @@ class DownloadStatusConverter {
         JaDownloadEntryEntity::class,
         JaDownloadPackageEntity::class,
     ],
-    version = 22,
+    version = 24,
     exportSchema = false,
 )
 @TypeConverters(TrackSourceConverter::class, FileKindConverter::class, DownloadStatusConverter::class)
@@ -72,6 +73,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun playlists(): PlaylistDao
     abstract fun queue(): QueueDao
     abstract fun files(): LibraryFileDao
+    abstract fun trackSubtitles(): TrackSubtitleDao
     abstract fun downloads(): DownloadDao
     abstract fun whisper(): WhisperDao
     abstract fun translations(): TranslationDao
@@ -101,8 +103,45 @@ abstract class AppDatabase : RoomDatabase() {
                     MIGRATION_19_20,
                     MIGRATION_20_21,
                     MIGRATION_21_22,
+                    MIGRATION_22_23,
+                    MIGRATION_23_24,
                 )
                 .build()
+
+        internal val MIGRATION_23_24 = object : Migration(23, 24) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("""
+                    CREATE TABLE IF NOT EXISTS track_subtitles (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        trackId INTEGER NOT NULL,
+                        kind TEXT NOT NULL,
+                        fileId INTEGER,
+                        uri TEXT,
+                        treeUri TEXT,
+                        displayName TEXT,
+                        offsetMs INTEGER,
+                        updatedAt INTEGER NOT NULL,
+                        FOREIGN KEY(trackId) REFERENCES tracks(id) ON UPDATE NO ACTION ON DELETE CASCADE,
+                        FOREIGN KEY(fileId) REFERENCES library_files(id) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                """.trimIndent())
+                connection.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_track_subtitles_trackId ON track_subtitles(trackId)")
+                connection.execSQL("CREATE INDEX IF NOT EXISTS index_track_subtitles_fileId ON track_subtitles(fileId)")
+                connection.execSQL("ALTER TABLE translation_jobs ADD COLUMN targetKind TEXT")
+                connection.execSQL("ALTER TABLE translation_jobs ADD COLUMN outputFilename TEXT")
+                connection.execSQL("ALTER TABLE whisper_jobs ADD COLUMN forceRegenerate INTEGER")
+            }
+        }
+
+        internal val MIGRATION_22_23 = object : Migration(22, 23) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("ALTER TABLE downloads ADD COLUMN dismissedAt INTEGER")
+                connection.execSQL("ALTER TABLE whisper_jobs ADD COLUMN createdAt INTEGER")
+                connection.execSQL("ALTER TABLE whisper_jobs ADD COLUMN dismissedAt INTEGER")
+                connection.execSQL("ALTER TABLE translation_jobs ADD COLUMN createdAt INTEGER")
+                connection.execSQL("ALTER TABLE translation_jobs ADD COLUMN dismissedAt INTEGER")
+            }
+        }
 
         internal val MIGRATION_21_22 = object : Migration(21, 22) {
             override fun migrate(connection: SQLiteConnection) {

@@ -24,6 +24,7 @@ import com.nanahoshi.audioplayer.ui.components.WorkFileBrowser
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -56,12 +57,14 @@ class WorkBrowserAndroidTest {
         }
         compose.runOnIdle { scope.launch { parent.scrollToItem(30) } }
         compose.waitUntil { parent.firstVisibleItemIndex == 30 }
+        val fullViewport = compose.runOnIdle { parent.layoutInfo.viewportSize.height }
         compose.runOnIdle {
             location.value = child
             count.value = 2
         }
         compose.onNodeWithText("文件 0").assertIsDisplayed()
         compose.runOnIdle {
+            assertTrue(child.layoutInfo.viewportSize.height in 1 until fullViewport)
             location.value = parent
             loading.value = true
         }

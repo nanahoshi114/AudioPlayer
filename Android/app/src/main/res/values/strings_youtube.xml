@@ -30,6 +30,7 @@
     <string name="youtube_saved_login">已保存登录信息</string>
     <string name="youtube_no_login">还没有保存登录信息</string>
     <string name="youtube_cookie_hint">请粘贴 youtube.com 的整段 Cookie</string>
+    <string name="youtube_cookie_invalid">Cookie 不完整，请粘贴整段 Cookie（应包含等号）</string>
     <string name="youtube_saved_confirming">已保存，正在确认登录…</string>
     <string name="youtube_saved_offline">已保存，但无法连接 YouTube。请检查网络后重试。</string>
     <string name="youtube_logged_out">已退出登录</string>

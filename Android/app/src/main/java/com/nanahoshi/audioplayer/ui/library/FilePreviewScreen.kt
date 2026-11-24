@@ -2,25 +2,48 @@ package com.nanahoshi.audioplayer.ui.library
 
 import com.nanahoshi.audioplayer.text.resolveNoUrl
 import com.nanahoshi.audioplayer.text.resolveUserError
+import com.nanahoshi.audioplayer.data.ExternalFileDownloader
+import com.nanahoshi.audioplayer.data.LocalAudio
 import com.nanahoshi.audioplayer.data.RemoteTextPreview
+import com.nanahoshi.audioplayer.data.TrackSource
+import com.nanahoshi.audioplayer.data.libraryFilePreview
+import com.nanahoshi.audioplayer.data.readLocalTextPreview
+import com.nanahoshi.audioplayer.data.resolveLibraryFileSource
 import com.nanahoshi.audioplayer.R
 import androidx.compose.ui.res.stringResource
 import android.app.Application
+import android.net.Uri
+import androidx.annotation.StringRes
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.ensureActive
-import androidx.compose.foundation.gestures.rememberTransformableState
-import androidx.compose.foundation.gestures.transformable
+import kotlinx.coroutines.withContext
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import com.nanahoshi.audioplayer.ui.components.AppTopBar
 import com.nanahoshi.audioplayer.ui.components.LoadingState
 import androidx.compose.runtime.Composable
@@ -30,24 +53,44 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
-import coil.compose.AsyncImage
+import coil.compose.SubcomposeAsyncImage
+import coil.request.ImageRequest
 import com.nanahoshi.audioplayer.asmr.AsmrClient
-import com.nanahoshi.audioplayer.asmr.AsmrException
 import com.nanahoshi.audioplayer.data.db.FileKind
 import com.nanahoshi.audioplayer.dlsite.DlsiteClient
 import com.nanahoshi.audioplayer.dlsite.RemotePreview
 import com.nanahoshi.audioplayer.data.db.LibraryFileEntity
 import com.nanahoshi.audioplayer.data.toHttps
 import com.nanahoshi.audioplayer.graph
+import java.io.File
+import java.util.UUID
 
 class FilePreviewViewModel(app: Application) : AndroidViewModel(app) {
     private val appContext = app.applicationContext
-    private val graph = app.
-    graph()
+    private val graph = app.graph()
+    private val imageCacheDir = File(appContext.cacheDir, "external-open/img-${UUID.randomUUID()}")
+    private val imageDownloader by lazy { ExternalFileDownloader(sign = graph.dlsite::signedPlayFile) }
+
+    internal suspend fun fetchAuthedImage(request: RemotePreview): File = withContext(Dispatchers.IO) {
+        require(request.authed)
+        graph.cache.protect(imageCacheDir)
+        val identity = UUID.nameUUIDFromBytes("${request.workno}\n${request.fileKey}\n${request.url}".toByteArray())
+        val target = File(imageCacheDir, identity.toString())
+        imageDownloader.downloadFile(request, target)
+        target
+    }
+
+    override fun onCleared() {
+        graph.cache.release(imageCacheDir)
+        super.onCleared()
+    }
 
     suspend fun file(id: Long): LibraryFileEntity? = graph.library.libraryFile(id)
 
@@ -55,45 +98,66 @@ class FilePreviewViewModel(app: Application) : AndroidViewModel(app) {
 
     fun externalSession() = com.nanahoshi.audioplayer.data.ExternalFileSession(getApplication(), graph.cache, graph.dlsite)
 
-    suspend fun externalRequest(file: LibraryFileEntity): RemotePreview {
-        val authed = com.nanahoshi.audioplayer.data.libraryFileSource(file.fileHash) == com.nanahoshi.audioplayer.data.TrackSource.DLSITE
-        val key = file.remoteUrl.substringAfter("/optimized/", "").substringBefore('?').takeIf { it.isNotBlank() }
-        val folders = if (authed) graph.db.folders().all().associateBy { it.id } else emptyMap()
-        var folder = folders[file.folderId]
-        val visited = mutableSetOf<Long>()
-        while (folder != null && folder.asmrSourceId.isNullOrBlank() && visited.add(folder.id)) folder = folders[folder.parentId]
-        // RJ 号是字符串标识：祖先目录没有来源编号时，按作品编号找回字符串 workno，保留前导零，不从整数重建。
-        val workno = if (authed) folder?.asmrSourceId
-            ?: file.asmrWorkId.takeIf { it > 0 }?.let { id ->
-                folders.values.firstOrNull { it.asmrWorkId == id && !it.asmrSourceId.isNullOrBlank() }?.asmrSourceId
-            } else null
-        return RemotePreview(file.name, file.remoteUrl, file.kind,
-            if (authed) DlsiteClient.PLAY_REFERER else AsmrClient.REFERER, authed,
-            workno = workno, fileKey = key)
+    suspend fun hasLocalCopy(location: String?): Boolean = withContext(Dispatchers.IO) {
+        if (location.isNullOrBlank()) return@withContext false
+        when {
+            location.startsWith("/") -> java.io.File(location).isFile
+            location.startsWith("file:") -> Uri.parse(location).path?.let { java.io.File(it).isFile } == true
+            location.startsWith("content:") -> LocalAudio.contentUriReadable(appContext, Uri.parse(location))
+            else -> false
+        }
     }
 
-    suspend fun text(url: String): String = try {
-        if (url.startsWith("/")) kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            java.io.File(url).inputStream().use { input ->
-                val bytes = input.takeBytes(512 * 1024 + 1)
-                bytes.copyOfRange(0, minOf(bytes.size, 512 * 1024)).toString(Charsets.UTF_8) +
-                    if (bytes.size > 512 * 1024) appContext.getString(R.string.library_file_truncated) else ""
+    suspend fun localImageModel(location: String?): Any? = withContext(Dispatchers.IO) {
+        if (location.isNullOrBlank()) return@withContext null
+        when {
+            location.startsWith("/") -> java.io.File(location).takeIf { it.isFile }
+            location.startsWith("file:") -> Uri.parse(location).path?.let { java.io.File(it).takeIf { file -> file.isFile } }
+            location.startsWith("content:") -> location.takeIf { LocalAudio.contentUriReadable(appContext, Uri.parse(it)) }
+            else -> null
+        }
+    }
+
+    suspend fun sourceFor(file: LibraryFileEntity): TrackSource? = withContext(Dispatchers.IO) {
+        val jaFileIds = graph.db.jaDownloads().fileIds().toSet()
+        resolveLibraryFileSource(file, jaFileIds)
+    }
+
+    suspend fun externalRequest(file: LibraryFileEntity, resolvedSource: TrackSource? = null): RemotePreview =
+        withContext(Dispatchers.IO) {
+            val source = resolvedSource ?: sourceFor(file)
+            val folders = if (source == TrackSource.DLSITE) graph.db.folders().all().associateBy { it.id } else emptyMap()
+            libraryFilePreview(file, folders, source)
+        }
+
+    suspend fun text(file: LibraryFileEntity): String = withContext(Dispatchers.IO) {
+        val local = try {
+            file.localUri?.let { readLocalTextPreview(appContext, it) }
+        } catch (_: java.io.IOException) {
+            null
+        } catch (_: SecurityException) {
+            null
+        }
+        local?.displayText() ?: run {
+            val source = sourceFor(file)
+            val request = externalRequest(file, source)
+            when {
+                source == TrackSource.JAPANESE_ASMR -> appContext.getString(R.string.library_file_ja_not_downloaded)
+                request.url.isBlank() -> appContext.getString(
+                    if (source == TrackSource.DLSITE) R.string.library_file_not_downloaded
+                    else R.string.library_file_no_local_copy,
+                )
+                else -> remoteText(request)
             }
-        } else graph.asmr.readText(url).displayText()
-    } catch (error: AsmrException) {
-        appContext.resolveUserError(error, R.string.library_file_open_failed)
-    } catch (error: Exception) {
-        appContext.resolveUserError(error, R.string.library_file_open_failed)
+        }
     }
 
     private fun RemoteTextPreview.displayText(): String =
         if (clipped) text + appContext.getString(R.string.library_file_truncated) else text
 
-    fun cookie(): String? = graph.dlsite.playCookie()
-
     suspend fun remoteText(request: RemotePreview): String = try {
         if (request.authed || request.referer.contains("dlsite")) {
-            graph.dlsite.readText(request.url, request.referer.ifBlank { DlsiteClient.STORE_REFERER }, request.authed).displayText()
+            graph.dlsite.readText(request.copy(referer = request.referer.ifBlank { DlsiteClient.STORE_REFERER })).displayText()
         } else {
             graph.asmr.readText(request.url).displayText()
         }
@@ -122,27 +186,79 @@ fun FilePreviewScreen(
         val current = file
         when {
             missing -> Text(stringResource(R.string.library_file_missing), modifier = Modifier.padding(16.dp))
-            current == null -> LoadingState(stringResource(R.string.library_file_loading))
+            current == null -> LoadingState(stringResource(R.string.library_file_loading), Modifier.weight(1f).fillMaxWidth())
             current.kind == FileKind.OTHER -> {
-                var request by remember(current.id) { mutableStateOf<RemotePreview?>(null) }
-                LaunchedEffect(current.id) { request = viewModel.externalRequest(current) }
-                request?.let { ExternalOpenContent(it, current.localUri, viewModel) } ?: LoadingState(stringResource(R.string.library_file_opening))
+                var resolved by remember(current.id, current.localUri) {
+                    mutableStateOf<Triple<Boolean, TrackSource?, RemotePreview>?>(null)
+                }
+                LaunchedEffect(current.id, current.localUri) {
+                    val hasLocal = viewModel.hasLocalCopy(current.localUri)
+                    if (hasLocal) {
+                        resolved = Triple(true, null, RemotePreview(current.name, "", current.kind, "", authed = false))
+                    } else {
+                        val source = viewModel.sourceFor(current)
+                        resolved = Triple(false, source, viewModel.externalRequest(current, source))
+                    }
+                }
+                val state = resolved
+                when {
+                    state == null -> LoadingState(
+                        stringResource(R.string.library_file_opening),
+                        Modifier.weight(1f).fillMaxWidth(),
+                    )
+                    state.first -> ExternalOpenContent(state.third, current.localUri, viewModel)
+                    state.second == TrackSource.JAPANESE_ASMR -> Text(
+                        stringResource(R.string.library_file_ja_not_downloaded),
+                        modifier = Modifier.padding(16.dp),
+                    )
+                    state.third.url.isBlank() -> Text(
+                        stringResource(
+                            if (state.second == TrackSource.DLSITE) R.string.library_file_not_downloaded
+                            else R.string.library_file_no_local_copy,
+                        ),
+                        modifier = Modifier.padding(16.dp),
+                    )
+                    else -> ExternalOpenContent(state.third, null, viewModel)
+                }
             }
             current.kind == FileKind.IMAGE -> {
-                if (current.localUri.isNullOrBlank() && current.remoteUrl.isBlank()) {
-                    Text(stringResource(R.string.library_file_no_local_copy), modifier = Modifier.padding(16.dp))
-                } else {
-                    ZoomImage(
-                        contentDescription = current.name,
-                        image = {
-                            PreviewImage(
-                                model = current.localUri?.let { java.io.File(it) }?.takeIf { it.isFile } ?: current.remoteUrl.toHttps(),
-                                contentDescription = current.name,
-                                modifier = Modifier.fillMaxSize(),
-                                contentScale = ContentScale.Fit,
-                            )
-                        },
+                var resolved by remember(current.id, current.localUri) {
+                    mutableStateOf<Triple<Any?, TrackSource?, RemotePreview?>?>(null)
+                }
+                LaunchedEffect(current.id, current.localUri) {
+                    val localModel = viewModel.localImageModel(current.localUri)
+                    if (localModel != null) {
+                        resolved = Triple(localModel, null, null)
+                    } else {
+                        val source = viewModel.sourceFor(current)
+                        resolved = Triple(null, source, viewModel.externalRequest(current, source))
+                    }
+                }
+                val state = resolved
+                val request = state?.third
+                val hasRemote = request != null && (request.url.isNotBlank() ||
+                    (request.authed && request.workno != null && request.fileKey != null))
+                when {
+                    state == null -> LoadingState(
+                        stringResource(R.string.library_file_loading_image),
+                        Modifier.weight(1f).fillMaxWidth(),
                     )
+                    state.first != null -> ZoomImage(
+                        model = state.first!!,
+                        contentDescription = current.name,
+                    )
+                    state.second == TrackSource.JAPANESE_ASMR -> Text(
+                        stringResource(R.string.library_file_ja_not_downloaded),
+                        modifier = Modifier.padding(16.dp),
+                    )
+                    request == null || !hasRemote -> Text(
+                        stringResource(
+                            if (state.second == TrackSource.DLSITE) R.string.library_file_not_downloaded
+                            else R.string.library_file_no_local_copy,
+                        ),
+                        modifier = Modifier.padding(16.dp),
+                    )
+                    else -> PreviewZoomImage(request, viewModel)
                 }
             }
             else -> TextPreview(current, viewModel)
@@ -152,50 +268,122 @@ fun FilePreviewScreen(
 
 @Composable
 private fun TextPreview(file: LibraryFileEntity, viewModel: FilePreviewViewModel) {
-    val context = androidx.compose.ui.platform.LocalContext.current
     var body by remember(file.id) { mutableStateOf<String?>(null) }
     LaunchedEffect(file.id) {
-        val path = file.localUri?.takeIf { java.io.File(it).isFile } ?: file.remoteUrl
-        body = if (path.isBlank()) context.getString(R.string.library_file_not_downloaded) else viewModel.text(path)
+        body = viewModel.text(file)
     }
     val text = body
     if (text == null) {
-        LoadingState(stringResource(R.string.library_file_loading))
+        LoadingState(stringResource(R.string.library_file_loading), Modifier.fillMaxSize())
     } else {
-        Text(
-            text,
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-        )
+        SelectionContainer {
+            Text(
+                text,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(16.dp),
+            )
+        }
     }
+}
+
+/** Coil 可直接接收 File 或 content:/file: 字符串/URI；这些都算本地图片，失败文案不应指向网络。 */
+private fun Any.isLocalImageModel(): Boolean = when (this) {
+    is File -> true
+    is Uri -> this.scheme == "content" || this.scheme == "file"
+    is String -> this.startsWith("content:", ignoreCase = true) || this.startsWith("file:", ignoreCase = true)
+    else -> false
 }
 
 @Composable
 private fun ZoomImage(
+    model: Any,
     contentDescription: String,
-    image: @Composable () -> Unit,
+    active: Boolean = true,
+    @StringRes errorMessage: Int = if (model.isLocalImageModel()) R.string.library_file_local_image_failed else R.string.library_file_image_failed,
+    onRetry: (() -> Unit)? = null,
 ) {
-    var scale by androidx.compose.runtime.remember { mutableFloatStateOf(1f) }
-    var offset by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(Offset.Zero) }
-    val state = rememberTransformableState { zoomChange, panChange, _ ->
-        scale = (scale * zoomChange).coerceIn(1f, 5f)
-        offset = if (scale <= 1f) Offset.Zero else offset + panChange
+    var containerSize by remember { mutableStateOf(IntSize.Zero) }
+    var imageSize by remember(model) { mutableStateOf(Size.Unspecified) }
+    var scale by remember(model, active, containerSize) { mutableFloatStateOf(1f) }
+    var offset by remember(model, active, containerSize) { mutableStateOf(Offset.Zero) }
+    var retry by remember(model) { mutableStateOf(0) }
+
+    fun clamp(position: Offset, zoom: Float): Offset {
+        if (zoom <= 1f || !imageSize.isSpecified || imageSize.width <= 0f || imageSize.height <= 0f ||
+            containerSize.width == 0 || containerSize.height == 0
+        ) return Offset.Zero
+        val viewport = Size(containerSize.width.toFloat(), containerSize.height.toFloat())
+        val fit = ContentScale.Fit.computeScaleFactor(imageSize, viewport)
+        val maxX = ((imageSize.width * fit.scaleX * zoom - viewport.width) / 2f).coerceAtLeast(0f)
+        val maxY = ((imageSize.height * fit.scaleY * zoom - viewport.height) / 2f).coerceAtLeast(0f)
+        return Offset(position.x.coerceIn(-maxX, maxX), position.y.coerceIn(-maxY, maxY))
     }
-    androidx.compose.foundation.layout.Box(
+
+    fun transform(centroid: Offset, pan: Offset, zoom: Float) {
+        if (!imageSize.isSpecified || !centroid.isSpecified) return
+        val nextScale = (scale * zoom).coerceIn(1f, 5f)
+        val focus = centroid - Offset(containerSize.width / 2f, containerSize.height / 2f)
+        offset = clamp(focus + (offset - focus) * (nextScale / scale) + pan, nextScale)
+        scale = nextScale
+    }
+
+    Box(
         Modifier
             .fillMaxSize()
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-                translationX = offset.x
-                translationY = offset.y
+            .clipToBounds()
+            .onSizeChanged { containerSize = it }
+            .pointerInput(model, active, containerSize) {
+                if (!active) return@pointerInput
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    var drag = Offset.Zero
+                    var transforming = false
+                    do {
+                        val event = awaitPointerEvent()
+                        if (event.changes.any { it.isConsumed && it.position != it.previousPosition }) break
+                        val pinch = event.changes.count { it.pressed } > 1
+                        val pan = event.calculatePan()
+                        drag += pan
+                        // At the base scale, leave single-finger swipes for the pager.
+                        if (pinch || (scale > 1.01f && (transforming || drag.getDistance() > viewConfiguration.touchSlop))) {
+                            transforming = true
+                            transform(event.calculateCentroid(useCurrent = false), pan, event.calculateZoom())
+                            event.changes.forEach { if (it.pressed) it.consume() }
+                        }
+                    } while (event.changes.any { it.pressed })
+                }
             }
-            .transformable(state),
-        contentAlignment = androidx.compose.ui.Alignment.Center,
+            .pointerInput(model, active, containerSize) {
+                if (!active) return@pointerInput
+                detectTapGestures(onDoubleTap = { point ->
+                    val target = if (scale <= 1.01f) 2.5f else 1f
+                    transform(point, Offset.Zero, target / scale)
+                })
+            },
     ) {
-        image()
+        androidx.compose.runtime.key(retry) {
+            SubcomposeAsyncImage(
+                model = model,
+                contentDescription = contentDescription,
+                modifier = Modifier.fillMaxSize().graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                    translationX = offset.x
+                    translationY = offset.y
+                },
+                contentScale = ContentScale.Fit,
+                onSuccess = {
+                    imageSize = it.painter.intrinsicSize
+                    offset = clamp(offset, scale)
+                },
+                loading = { LoadingState(stringResource(R.string.library_file_loading_image), Modifier.fillMaxSize()) },
+                error = {
+                    ImagePreviewError(stringResource(errorMessage), onRetry ?: { retry += 1 })
+                },
+            )
+        }
     }
 }
 
@@ -205,34 +393,102 @@ fun RemotePreviewScreen(
     viewModel: FilePreviewViewModel = viewModel(),
 ) {
     val request = remember { viewModel.request() }
+    if (request != null && !request.authed && request.galleryUrls.isNotEmpty()) {
+        GalleryPreview(request, onBack)
+        return
+    }
     Column(Modifier.fillMaxSize()) {
         AppTopBar(title = request?.name ?: stringResource(R.string.library_preview_title), onBack = onBack)
         when {
             request == null -> Text(stringResource(R.string.library_file_missing), modifier = Modifier.padding(16.dp))
             request.kind == FileKind.OTHER -> ExternalOpenContent(request, null, viewModel)
-            request.kind == FileKind.IMAGE -> {
-                val context = androidx.compose.ui.platform.LocalContext.current
-                ZoomImage(contentDescription = request.name) {
-                    PreviewImage(
-                        model = coil.request.ImageRequest.Builder(context)
-                            .data(request.url.toHttps())
-                            .addHeader("Referer", request.referer.ifBlank { DlsiteClient.STORE_REFERER })
-                            .addHeader("User-Agent", if (request.authed) DlsiteClient.USER_AGENT else AsmrClient.USER_AGENT)
-                            .apply {
-                                if (request.authed) {
-                                    viewModel.cookie()?.let { addHeader("Cookie", it) }
-                                }
-                            }
-                            .build(),
-                        contentDescription = request.name,
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Fit,
-                    )
-                }
-            }
+            request.kind == FileKind.IMAGE -> PreviewZoomImage(request, viewModel)
             else -> RemoteTextPreview(request, viewModel)
         }
     }
+}
+
+@Composable
+private fun GalleryPreview(request: RemotePreview, onBack: () -> Unit) {
+    val urls = request.galleryUrls
+    val initial = request.initialIndex.coerceIn(0, (urls.size - 1).coerceAtLeast(0))
+    val pager = rememberPagerState(initialPage = initial) { urls.size }
+    Column(Modifier.fillMaxSize()) {
+        AppTopBar(title = galleryPageTitle(request, pager.currentPage, urls.size), onBack = onBack)
+        HorizontalPager(state = pager, modifier = Modifier.fillMaxSize()) { page ->
+            RemoteZoomImage(
+                request,
+                urls[page],
+                galleryPageTitle(request, page, urls.size),
+                active = page == pager.currentPage,
+            )
+        }
+    }
+}
+
+@Composable
+private fun galleryPageTitle(request: RemotePreview, page: Int, total: Int): String {
+    val pageTitle = stringResource(R.string.online_gallery_page_title, page + 1, total)
+    val prefix = request.titlePrefix?.takeIf { it.isNotBlank() } ?: request.name
+    return if (prefix.isBlank()) pageTitle else "$prefix · $pageTitle"
+}
+
+@Composable
+private fun PreviewZoomImage(request: RemotePreview, viewModel: FilePreviewViewModel) {
+    if (!request.authed) {
+        RemoteZoomImage(request, request.url, request.name)
+        return
+    }
+
+    val context = LocalContext.current
+    var retryCount by remember(request) { mutableStateOf(0) }
+    var file by remember(request, retryCount) { mutableStateOf<File?>(null) }
+    var error by remember(request, retryCount) { mutableStateOf<String?>(null) }
+    LaunchedEffect(viewModel, request, retryCount) {
+        try {
+            file = viewModel.fetchAuthedImage(request)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            error = context.resolveUserError(failure, R.string.library_file_image_failed)
+        }
+    }
+    val model = file
+    val message = error
+    when {
+        model != null -> ZoomImage(
+            model = model, contentDescription = request.name,
+            errorMessage = R.string.library_file_image_failed, onRetry = { retryCount++ },
+        )
+        message != null -> ImagePreviewError(message) { retryCount++ }
+        else -> LoadingState(stringResource(R.string.library_file_loading_image), Modifier.fillMaxSize())
+    }
+}
+
+@Composable
+private fun ImagePreviewError(message: String, onRetry: () -> Unit) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(message)
+        androidx.compose.material3.TextButton(onClick = onRetry) { Text(stringResource(R.string.common_retry)) }
+    }
+}
+
+@Composable
+private fun RemoteZoomImage(
+    request: RemotePreview,
+    url: String,
+    contentDescription: String,
+    active: Boolean = true,
+) {
+    val context = LocalContext.current
+    val model = remember(context, url, request.referer) {
+        ImageRequest.Builder(context)
+            .data(url.toHttps())
+            .addHeader("Referer", request.referer.ifBlank { DlsiteClient.STORE_REFERER })
+            .addHeader("User-Agent", AsmrClient.USER_AGENT)
+            .build()
+    }
+    ZoomImage(model, contentDescription, active)
 }
 
 @Composable
@@ -243,26 +499,17 @@ private fun RemoteTextPreview(request: RemotePreview, viewModel: FilePreviewView
     }
     val text = body
     if (text == null) {
-        LoadingState(stringResource(R.string.library_file_opening))
+        LoadingState(stringResource(R.string.library_file_opening), Modifier.fillMaxSize())
     } else {
-        Text(
-            text,
-            modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
-        )
+        SelectionContainer {
+            Text(
+                text,
+                modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+            )
+        }
     }
 }
 
-
-private fun java.io.InputStream.takeBytes(limit: Int): ByteArray {
-    val output = java.io.ByteArrayOutputStream()
-    val buffer = ByteArray(8192)
-    while (output.size() < limit) {
-        val count = read(buffer, 0, minOf(buffer.size, limit - output.size()))
-        if (count < 0) break
-        output.write(buffer, 0, count)
-    }
-    return output.toByteArray()
-}
 
 @Composable
 private fun ExternalOpenContent(request: RemotePreview, localUri: String?, viewModel: FilePreviewViewModel) {
@@ -318,22 +565,5 @@ private fun ExternalOpenContent(request: RemotePreview, localUri: String?, viewM
             }, modifier = Modifier.padding(top = 12.dp)) { Text(stringResource(R.string.library_file_open_with_other)) }
         }
         error?.let { Text(it, color = androidx.compose.material3.MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 8.dp)) }
-    }
-}
-
-@Composable
-private fun PreviewImage(model: Any?, contentDescription: String, modifier: Modifier = Modifier,
-    contentScale: ContentScale = ContentScale.Fit) {
-    var retry by remember(model) { mutableStateOf(0) }
-    androidx.compose.runtime.key(retry) {
-        coil.compose.SubcomposeAsyncImage(model = model, contentDescription = contentDescription,
-            modifier = modifier, contentScale = contentScale,
-            loading = { LoadingState(stringResource(R.string.library_file_loading_image)) },
-            error = {
-                Column(horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally) {
-                    Text(stringResource(if (model is java.io.File) R.string.library_file_local_image_failed else R.string.library_file_image_failed))
-                    androidx.compose.material3.TextButton(onClick = { retry++ }) { Text(stringResource(R.string.common_retry)) }
-                }
-            })
     }
 }

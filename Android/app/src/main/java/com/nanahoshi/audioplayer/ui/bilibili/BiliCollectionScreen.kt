@@ -9,12 +9,19 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
+import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Deselect
+import androidx.compose.material.icons.filled.LibraryAdd
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
@@ -24,9 +31,11 @@ import com.nanahoshi.audioplayer.bilibili.BiliCollection
 import com.nanahoshi.audioplayer.ui.CoverImage
 import com.nanahoshi.audioplayer.ui.components.AppTopBar
 import com.nanahoshi.audioplayer.ui.components.EmptyState
+import com.nanahoshi.audioplayer.ui.components.SelectionAction
+import com.nanahoshi.audioplayer.ui.components.SelectionTopBar
 import com.nanahoshi.audioplayer.ui.formatDuration
 
-@OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun BiliCollectionScreen(
     initial: BiliCollection? = null,
@@ -40,8 +49,10 @@ fun BiliCollectionScreen(
         when {
             model.committing -> Unit
             model.preparing -> model.cancelPreparation()
+            model.loading -> { model.stopRefresh(); onBack() }
+            model.busy -> Unit
             model.selected.isNotEmpty() -> model.clearSelection()
-            else -> { model.stopRefresh(); onBack() }
+            else -> onBack()
         }
     }
     BackHandler(onBack = back)
@@ -49,25 +60,74 @@ fun BiliCollectionScreen(
     var removing by remember { mutableStateOf(false) }
     val state = rememberLazyListState()
     val collection = model.collection
+    val selecting = model.selected.isNotEmpty()
     Column(Modifier.fillMaxSize()) {
-        AppTopBar(stringResource(collection?.kind?.labelRes ?: R.string.bilibili_collection_fallback), onBack = back, actions = {
-            IconButton(onClick = { menu = true }, enabled = !model.busy) {
-                Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.bilibili_collection_actions))
-            }
-            DropdownMenu(menu, { menu = false }) {
-                CollectionMenuItems(model.savedId != null,
-                    onAction = { action -> menu = false; model.prepare(action) },
-                    onUnbookmark = { menu = false; removing = true })
-            }
-        })
-        if (model.loading || model.busy) {
+        if (selecting) {
+            val allSelected = model.videos.isNotEmpty() && model.videos.all { it.bvid in model.selected }
+            SelectionTopBar(
+                count = model.selected.size,
+                onClose = model::clearSelection,
+                actions = listOf(
+                    SelectionAction(
+                        stringResource(if (allSelected) R.string.bilibili_deselect_all else R.string.bilibili_select_all_loaded),
+                        if (allSelected) Icons.Default.Deselect else Icons.Default.SelectAll,
+                        model::selectAll,
+                        enabled = !model.busy,
+                    ),
+                    SelectionAction(
+                        stringResource(R.string.bilibili_play_selected),
+                        Icons.Default.PlayArrow,
+                        onClick = { model.prepareSelection(CollectionAction.PLAY) },
+                        enabled = !model.busy,
+                    ),
+                    SelectionAction(
+                        stringResource(R.string.bilibili_add_queue),
+                        Icons.AutoMirrored.Filled.PlaylistAdd,
+                        onClick = { model.prepareSelection(CollectionAction.APPEND) },
+                        enabled = !model.busy,
+                    ),
+                    SelectionAction(
+                        stringResource(R.string.common_add_to_library),
+                        Icons.Default.LibraryAdd,
+                        onClick = { model.prepareSelection(CollectionAction.SAVE) },
+                        enabled = !model.busy,
+                    ),
+                    SelectionAction(
+                        stringResource(R.string.bilibili_copy_playlist),
+                        Icons.AutoMirrored.Filled.QueueMusic,
+                        onClick = { model.prepareSelection(CollectionAction.COPY) },
+                        enabled = !model.busy,
+                    ),
+                ),
+            )
+        } else {
+            AppTopBar(stringResource(collection?.kind?.labelRes ?: R.string.bilibili_collection_fallback), onBack = back, actions = {
+                IconButton(onClick = { menu = true }, enabled = !model.busy) {
+                    Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.bilibili_collection_actions))
+                }
+                DropdownMenu(menu && !model.busy, { menu = false }) {
+                    CollectionMenuItems(model.savedId != null,
+                        onAction = { action -> menu = false; model.prepare(action) },
+                        onUnbookmark = { menu = false; removing = true })
+                }
+            })
+        }
+        if (model.running) {
             LinearProgressIndicator(Modifier.fillMaxWidth())
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(model.progress, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                if (!model.committing) TextButton(onClick = { if (model.preparing) model.cancelPreparation() else model.stopRefresh() }) { Text(stringResource(R.string.common_stop)) }
+                if (!model.committing && (model.preparing || model.loading)) {
+                    TextButton(onClick = { if (model.preparing) model.cancelPreparation() else model.stopRefresh() }) {
+                        Text(stringResource(R.string.common_stop))
+                    }
+                }
             }
         }
-        LazyColumn(state = state, modifier = Modifier.weight(1f)) {
+        LazyColumn(
+            state = state,
+            modifier = Modifier.weight(1f),
+            contentPadding = PaddingValues(bottom = 24.dp),
+        ) {
             item(key = "header") {
                 if (collection != null) {
                     Row(Modifier.padding(16.dp)) {
@@ -90,12 +150,18 @@ fun BiliCollectionScreen(
                         else Text(stringResource(R.string.bilibili_bookmarked), Modifier.padding(vertical = 12.dp), style = MaterialTheme.typography.bodySmall)
                         TextButton(onClick = model::refresh, enabled = !model.busy && !model.loading) { Text(stringResource(R.string.bilibili_refresh_catalogue)) }
                     }
-                    CollectionPlaybackActions(model.selected.isNotEmpty(), !model.busy, onAction = { model.prepare(it) })
+                    CollectionPlaybackActions(selecting, !model.busy, onAction = { model.prepare(it) })
                 }
                 model.error?.let {
                     Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error)
                     TextButton(onClick = model::refresh, enabled = !model.busy && !model.loading) { Text(stringResource(R.string.bilibili_retry_read)) }
                 }
+                if (model.refreshIncomplete) Text(
+                    stringResource(R.string.bilibili_catalogue_refresh_incomplete, model.refreshIncompleteCount),
+                    Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 if (model.complete && model.videos.isEmpty()) Text(
                     stringResource(
                         when (collection?.kind) {
@@ -109,36 +175,28 @@ fun BiliCollectionScreen(
             }
             item(key = "selection") {
                 Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            if (model.selected.isEmpty()) stringResource(R.string.bilibili_videos)
-                            else stringResource(R.string.bilibili_selected_count, model.selected.size),
-                            Modifier.weight(1f),
-                        )
-                        val allSelected = model.videos.isNotEmpty() && model.selected.size == model.videos.size
-                        TextButton(onClick = model::selectAll, enabled = !model.busy) {
-                            Text(stringResource(if (allSelected) R.string.bilibili_deselect_all else R.string.bilibili_select_all_loaded))
+                    if (!selecting) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(stringResource(R.string.bilibili_videos), Modifier.weight(1f))
+                            TextButton(onClick = model::selectAll, enabled = !model.busy) {
+                                Text(stringResource(R.string.bilibili_select_all_loaded))
+                            }
                         }
                     }
                     CollectionSortSelector(model.sort, model::updateSort, enabled = !model.busy)
-                    if (model.selected.isNotEmpty()) FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = { model.prepareSelection(CollectionAction.PLAY) }, enabled = !model.busy) { Text(stringResource(R.string.bilibili_play_selected)) }
-                        TextButton(onClick = { model.prepareSelection(CollectionAction.APPEND) }, enabled = !model.busy) { Text(stringResource(R.string.bilibili_add_queue)) }
-                        TextButton(onClick = { model.prepareSelection(CollectionAction.SAVE) }, enabled = !model.busy) { Text(stringResource(R.string.common_add_to_library)) }
-                    }
                 }
             }
             items(model.videos, key = { it.bvid }) { video ->
                 var rowMenu by remember { mutableStateOf(false) }
                 ListItem(headlineContent = { Text(video.title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
-                    supportingContent = { Text("${formatDuration(video.durationMs)} · ${video.bvid}") },
+                    supportingContent = { Text("${formatDuration(video.durationMs)} · ${video.bvid}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     leadingContent = {
-                        if (model.selected.isEmpty()) CoverImage(video.coverUrl)
-                        else Checkbox(video.bvid in model.selected, onCheckedChange = { if (!model.busy) model.toggle(video.bvid) })
+                        if (selecting) Checkbox(video.bvid in model.selected, onCheckedChange = { model.toggle(video.bvid) }, enabled = !model.busy)
+                        else CoverImage(video.coverUrl, shape = MaterialTheme.shapes.small)
                     }, trailingContent = {
-                        Box {
+                        if (!selecting) Box {
                             IconButton(onClick = { rowMenu = true }, enabled = !model.busy) { Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.bilibili_video_actions)) }
-                            DropdownMenu(rowMenu, { rowMenu = false }) {
+                            DropdownMenu(rowMenu && !model.busy, { rowMenu = false }) {
                                 DropdownMenuItem(text = { Text(stringResource(R.string.common_add_to_library)) }, onClick = {
                                     rowMenu = false
                                     model.prepare(CollectionAction.SAVE, listOf(video))
@@ -146,7 +204,7 @@ fun BiliCollectionScreen(
                             }
                         }
                     }, modifier = Modifier.combinedClickable(enabled = !model.busy,
-                        onClick = { if (model.selected.isNotEmpty()) model.toggle(video.bvid) else model.prepare(CollectionAction.SINGLE, listOf(video)) },
+                        onClick = { if (selecting) model.toggle(video.bvid) else model.prepare(CollectionAction.SINGLE, listOf(video)) },
                         onLongClick = { model.toggle(video.bvid) }))
             }
         }
@@ -154,24 +212,41 @@ fun BiliCollectionScreen(
     model.pending?.let { prepared ->
         CollectionFailureDialog(prepared, model::continuePending, model::retryPending, model::cancelPreparation)
     }
+    model.incompleteCopy?.let { range ->
+        val count = if (range.total > 0) "${range.count}/${range.total}" else range.count.toString()
+        AlertDialog(
+            onDismissRequest = model::cancelPreparation,
+            title = { Text(stringResource(R.string.bilibili_copy_incomplete_title)) },
+            text = { Text(stringResource(R.string.bilibili_copy_incomplete_message, count)) },
+            confirmButton = {
+                if (range.count > 0) {
+                    TextButton(onClick = model::continueIncompleteCopy) { Text(stringResource(R.string.common_continue)) }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = model::cancelPreparation) { Text(stringResource(R.string.common_cancel)) }
+            },
+        )
+    }
     if (model.singleParts.isNotEmpty()) AlertDialog(onDismissRequest = model::dismissParts, title = { Text(stringResource(R.string.bilibili_select_parts)) },
         text = { LazyColumn { items(model.singleParts, key = { it.cid }) { part -> TextButton(onClick = { model.playPart(part) }) { Text("P${part.page} · ${part.title}") } } } },
         confirmButton = { TextButton(onClick = model::dismissParts) { Text(stringResource(R.string.common_cancel)) } })
     model.copyName?.let { initialName ->
-        var name by remember(initialName) { mutableStateOf(initialName) }
+        var name by rememberSaveable(initialName) { mutableStateOf(initialName) }
         AlertDialog(onDismissRequest = model::dismissCopy, title = { Text(stringResource(R.string.bilibili_copy_playlist)) },
             text = {
                 Column {
                     OutlinedTextField(name, { name = it }, singleLine = true, label = { Text(stringResource(R.string.bilibili_playlist_name)) })
                     Text(stringResource(R.string.bilibili_copy_help), style = MaterialTheme.typography.bodySmall)
+                    model.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 }
             },
-            confirmButton = { TextButton(onClick = { model.confirmCopy(name) }, enabled = name.isNotBlank()) { Text(stringResource(R.string.bilibili_next_choose)) } },
+            confirmButton = { TextButton(onClick = { model.confirmCopyName(name) }, enabled = name.isNotBlank()) { Text(stringResource(R.string.bilibili_next_choose)) } },
             dismissButton = { TextButton(onClick = model::dismissCopy) { Text(stringResource(R.string.common_cancel)) } })
     }
     if (removing) AlertDialog(onDismissRequest = { removing = false }, title = { Text(stringResource(R.string.bilibili_remove_playlist)) },
         text = { Text(stringResource(R.string.bilibili_remove_playlist_message)) },
-        confirmButton = { TextButton(onClick = { removing = false; model.unbookmark() }) { Text(stringResource(R.string.bilibili_remove)) } },
+        confirmButton = { TextButton(onClick = { removing = false; model.unbookmark() }) { Text(stringResource(R.string.bilibili_remove), color = MaterialTheme.colorScheme.error) } },
         dismissButton = { TextButton(onClick = { removing = false }) { Text(stringResource(R.string.common_keep)) } })
 }
 

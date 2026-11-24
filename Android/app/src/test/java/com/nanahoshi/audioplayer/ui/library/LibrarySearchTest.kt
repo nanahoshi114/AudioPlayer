@@ -7,6 +7,7 @@ import com.nanahoshi.audioplayer.data.db.FolderEntity
 import com.nanahoshi.audioplayer.data.db.LibraryFileEntity
 import com.nanahoshi.audioplayer.data.db.TrackEntity
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -155,4 +156,83 @@ class LibrarySearchTest {
         assertEquals(listOf(30L), search("BV1234567890", listOf(group)).folders.map { it.id })
     }
 
+    @Test
+    fun sourceFiltersUseWorkRootsAndDirectResultsAfterSearch() {
+        val dlsite = root.copy(id = 3, name = "DLsite work", asmrSourceId = "RJ01179807")
+        val japaneseAsmr = root.copy(id = 4, name = "Japanese ASMR work", asmrSourceId = "RJ01179808")
+        val local = FolderEntity(id = 5, name = "match local folder", position = 0)
+        val bili = FolderEntity(id = 6, name = "Grouped video", position = 0, biliBvid = "BV1234567890")
+        val localFile = LibraryFileEntity(
+            id = 20,
+            folderId = local.id,
+            name = "match cover.png",
+            kind = FileKind.IMAGE,
+            remoteUrl = "",
+            addedAt = 0,
+            asmrWorkId = 0,
+            fileHash = "local:cover",
+        )
+        val localTrack = track(30, local.id, "match local track", TrackSource.LOCAL)
+        val biliTrack = track(31, null, "match standalone video", TrackSource.BILIBILI)
+        val youtubeTrack = track(32, null, "match YouTube video", TrackSource.YOUTUBE)
+        val found = searchListing(
+            query = "match",
+            sort = LibrarySort.NAME,
+            folders = listOf(root, chapter, dlsite, japaneseAsmr, local, bili),
+            tracks = listOf(
+                localTrack, biliTrack, youtubeTrack,
+                track(33, chapter.id, "match asmr.one track"),
+                track(34, dlsite.id, "match DLsite track", TrackSource.DLSITE),
+                track(35, japaneseAsmr.id, "match Japanese ASMR track", TrackSource.JAPANESE_ASMR),
+                track(36, bili.id, "match part 1", TrackSource.BILIBILI),
+                track(37, bili.id, "match part 2", TrackSource.BILIBILI),
+            ),
+            files = listOf(localFile),
+        )
+
+        assertEquals(
+            LibraryListing(
+                listOf(dlsite, bili, japaneseAsmr, local, root),
+                listOf(LibraryEntry.File(localFile), LibraryEntry.Audio(localTrack),
+                    LibraryEntry.Audio(biliTrack), LibraryEntry.Audio(youtubeTrack)),
+                browsing = false,
+            ),
+            applySearchSourceFilter(found, LibrarySourceFilter.ALL),
+        )
+        assertEquals(
+            LibraryListing(listOf(dlsite, japaneseAsmr, root), emptyList(), browsing = false),
+            applySearchSourceFilter(found, LibrarySourceFilter.ASMR),
+        )
+        assertEquals(
+            LibraryListing(listOf(bili), listOf(LibraryEntry.Audio(biliTrack)), browsing = false),
+            applySearchSourceFilter(found, LibrarySourceFilter.BILIBILI),
+        )
+        assertEquals(
+            LibraryListing(emptyList(), listOf(LibraryEntry.Audio(youtubeTrack)), browsing = false),
+            applySearchSourceFilter(found, LibrarySourceFilter.YOUTUBE),
+        )
+        assertEquals(
+            LibraryListing(listOf(local), listOf(LibraryEntry.File(localFile), LibraryEntry.Audio(localTrack)), browsing = false),
+            applySearchSourceFilter(found, LibrarySourceFilter.LOCAL),
+        )
+    }
+
+    @Test
+    fun folderSearchIgnoresRootFilterAndKeepsItsOwnScrollKey() {
+        val folder = FolderEntity(id = 40, name = "folder", position = 0)
+        val video = track(41, folder.id, "match video", TrackSource.BILIBILI)
+        val key = libraryListKey(folder.id, LibrarySourceFilter.LOCAL, "match")
+        val found = searchListing("match", LibrarySort.NAME, listOf(folder), listOf(video), emptyList(), key.folderId)
+
+        assertEquals(LibrarySourceFilter.ALL, key.filter)
+        assertEquals(listOf(LibraryEntry.Audio(video)), applySearchSourceFilter(found, key.filter).entries)
+        assertEquals(key, libraryListKey(folder.id, LibrarySourceFilter.ASMR, "match"))
+        assertNotEquals(key, libraryListKey(folder.id, LibrarySourceFilter.LOCAL, " "))
+        assertNotEquals(key, libraryListKey(42, LibrarySourceFilter.LOCAL, "match"))
+        assertNotEquals(key, libraryListKey(null, LibrarySourceFilter.LOCAL, "match"))
+        assertNotEquals(
+            libraryListKey(null, LibrarySourceFilter.LOCAL, "match"),
+            libraryListKey(null, LibrarySourceFilter.ASMR, "match"),
+        )
+    }
 }

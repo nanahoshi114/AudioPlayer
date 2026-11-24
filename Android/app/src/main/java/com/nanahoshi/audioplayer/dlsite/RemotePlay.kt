@@ -25,6 +25,9 @@ data class RemotePreview(
     val authed: Boolean,
     val workno: String? = null,
     val fileKey: String? = null,
+    val galleryUrls: List<String> = emptyList(),
+    val initialIndex: Int = 0,
+    val titlePrefix: String? = null,
 )
 
 data class PlayEntry(

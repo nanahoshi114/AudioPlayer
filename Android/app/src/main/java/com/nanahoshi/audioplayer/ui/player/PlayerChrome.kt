@@ -14,6 +14,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
@@ -25,6 +26,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Arrangement
@@ -55,14 +57,17 @@ import androidx.compose.material.icons.filled.CollectionsBookmark
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DragHandle
+import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.OpenInBrowser
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.outlined.Timer
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -88,12 +93,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.key
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -103,25 +109,37 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nanahoshi.audioplayer.playback.PlayerUiState
+import com.nanahoshi.audioplayer.data.TaskKey
+import com.nanahoshi.audioplayer.data.TaskKind
+import com.nanahoshi.audioplayer.data.TaskProgressSnapshot
 import com.nanahoshi.audioplayer.data.TrackSource
+import com.nanahoshi.audioplayer.data.db.QueuedTrack
+import com.nanahoshi.audioplayer.data.db.TrackEntity
+import com.nanahoshi.audioplayer.data.db.TranslateMark
+import com.nanahoshi.audioplayer.data.db.WhisperJobEntity
+import com.nanahoshi.audioplayer.data.fraction
 import com.nanahoshi.audioplayer.japaneseasmr.JapaneseAsmrClient
+import com.nanahoshi.audioplayer.text.PersistedErrors
 import com.nanahoshi.audioplayer.playback.SubtitleCue
 import com.nanahoshi.audioplayer.playback.hasTranslation
 import com.nanahoshi.audioplayer.playback.indexAt
 import com.nanahoshi.audioplayer.playback.line
+import com.nanahoshi.audioplayer.playback.playbackProgress
+import com.nanahoshi.audioplayer.playback.playbackSeekPosition
 import com.nanahoshi.audioplayer.playback.textAt
 import com.nanahoshi.audioplayer.ui.CoverImage
 import com.nanahoshi.audioplayer.ui.components.AppTopBar
 import com.nanahoshi.audioplayer.ui.components.EmptyState
+import com.nanahoshi.audioplayer.ui.components.RoundedProgress
 import com.nanahoshi.audioplayer.ui.components.SourceBadge
 import com.nanahoshi.audioplayer.ui.components.pressScale
 import com.nanahoshi.audioplayer.ui.components.rememberLocalNetworkAccess
@@ -170,10 +188,10 @@ private fun MiniPlayerCard(
     val playInteraction = remember { MutableInteractionSource() }
     val reduce = LocalReduceMotion.current
     val nowPlaying = stringResource(R.string.player_now_playing)
-    val fraction = if (state.durationMs > 0) state.positionMs / state.durationMs.toFloat() else 0f
+    val hasDuration = state.durationMs > 0L
     val progress by animateFloatAsState(
-        targetValue = fraction.coerceIn(0f, 1f),
-        animationSpec = if (reduce) snap() else tween(400),
+        targetValue = playbackProgress(state.positionMs, state.durationMs),
+        animationSpec = if (reduce || !hasDuration) snap() else tween(400, easing = LinearEasing),
         label = "miniProgress",
     )
     Surface(
@@ -197,13 +215,15 @@ private fun MiniPlayerCard(
                         overflow = TextOverflow.Ellipsis,
                         style = MaterialTheme.typography.titleMedium,
                     )
-                    Text(
-                        state.artist,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    if (state.artist.isNotBlank()) {
+                        Text(
+                            state.artist,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
                 IconButton(
                     onClick = viewModel.client::toggle,
@@ -219,11 +239,15 @@ private fun MiniPlayerCard(
                     Icon(Icons.Default.SkipNext, contentDescription = stringResource(R.string.a11y_next))
                 }
             }
-            LinearProgressIndicator(
-                progress = { progress },
-                modifier = Modifier.fillMaxWidth().height(2.dp),
-                trackColor = MaterialTheme.colorScheme.surfaceVariant,
-            )
+            if (hasDuration) {
+                LinearProgressIndicator(
+                    progress = { progress },
+                    modifier = Modifier.fillMaxWidth().height(2.dp),
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                )
+            } else {
+                Spacer(Modifier.height(2.dp))
+            }
         }
     }
 }
@@ -238,6 +262,9 @@ fun NowPlayingScreen(
     onOpenCollection: (com.nanahoshi.audioplayer.bilibili.BiliCollection) -> Unit = {},
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val activeWhisperJob by viewModel.activeWhisperJob.collectAsStateWithLifecycle()
+    val failedWhisperJob by viewModel.failedWhisperJob.collectAsStateWithLifecycle()
+    val taskProgress by viewModel.taskProgress.collectAsStateWithLifecycle()
     val jaFailure by viewModel.client.jaPlaybackFailure.collectAsStateWithLifecycle()
     jaFailure?.takeIf { it.queueId == state.queueItemId }?.let { failure ->
         val verifyPost = failure.postId?.takeIf { failure.reason == com.nanahoshi.audioplayer.japaneseasmr.JaFailure.VERIFY }
@@ -282,6 +309,24 @@ fun NowPlayingScreen(
     val selected = subtitleSelection.queueItemId == state.queueItemId
     val loaded = if (selected) subtitleState.forItem(state.queueItemId) else null
     val current = queue.find { it.queueItemId == state.queueItemId }
+    // 点击时快照曲目身份；字幕弹层和确认框在自动切歌后仍操作原来那一首。
+    var pickerRequest by remember { mutableStateOf<QueuedTrack?>(null) }
+    var pickerTitle by remember { mutableStateOf("") }
+    var pickerResolution by remember { mutableStateOf<SubtitlePickerResolution?>(null) }
+    fun openSubtitlePicker() {
+        val row = current ?: return
+        pickerRequest = row
+        pickerTitle = row.title.ifBlank { state.title }
+        pickerResolution = SubtitlePickerResolution.Loading
+    }
+    LaunchedEffect(pickerRequest) {
+        val row = pickerRequest ?: return@LaunchedEffect
+        pickerResolution = run {
+            val track = viewModel.trackForQueueItem(row)
+            track?.takeIf { it.id > 0L }?.let { SubtitlePickerResolution.Ready(it) }
+                ?: SubtitlePickerResolution.Unlisted
+        }
+    }
     var chapters by remember(current?.queueItemId) {
         mutableStateOf(emptyList<com.nanahoshi.audioplayer.japaneseasmr.JaChapter>())
     }
@@ -301,7 +346,7 @@ fun NowPlayingScreen(
                 Text(stringResource(R.string.player_chapters), Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
                 TextButton(onClick = { chaptersOpen = false }) { Text(stringResource(R.string.common_close)) }
             }
-            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp)) {
+            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp).navigationBarsPadding()) {
                 items(chapters, key = { it.startMs }) { entry ->
                     ListItem(
                         headlineContent = { Text(entry.title) },
@@ -326,7 +371,7 @@ fun NowPlayingScreen(
     val chinese = !selected || subtitleSelection.chinese
     val subtitle = cues.textAt(state.positionMs, chinese)
     var showSubtitles by remember { mutableStateOf(false) }
-    var discardPrompt by remember { mutableStateOf(false) }
+    var discardTarget by remember { mutableStateOf<QueuedTrack?>(null) }
     var fullTitle by remember { mutableStateOf(false) }
     val localNetwork = rememberLocalNetworkAccess { viewModel.reportLocalNetworkDenied() }
     LaunchedEffect(queueExpanded, state.queueItemId) {
@@ -350,19 +395,23 @@ fun NowPlayingScreen(
             confirmButton = { TextButton(onClick = { fullTitle = false }) { Text(stringResource(R.string.common_close)) } },
         )
     }
-    if (discardPrompt) {
+    if (discardTarget != null) {
         AlertDialog(
-            onDismissRequest = { discardPrompt = false },
-            text = { Text(stringResource(R.string.player_delete_subtitle_confirm)) },
+            onDismissRequest = { discardTarget = null },
+            text = { Text(stringResource(R.string.player_delete_generated_subtitle_confirm)) },
             confirmButton = {
                 TextButton(onClick = {
-                    discardPrompt = false
-                    showSubtitles = false
-                    viewModel.discardSubtitles()
-                }) { Text(stringResource(R.string.common_delete)) }
+                    val target = discardTarget
+                    discardTarget = null
+                    if (target == null) return@TextButton
+                    if (target.queueItemId == state.queueItemId && loaded?.hasManualBinding != true) {
+                        showSubtitles = false
+                    }
+                    viewModel.discardGeneratedSubtitles(target)
+                }) { Text(stringResource(R.string.common_delete), color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = {
-                TextButton(onClick = { discardPrompt = false }) { Text(stringResource(R.string.common_cancel)) }
+                TextButton(onClick = { discardTarget = null }) { Text(stringResource(R.string.common_cancel)) }
             },
         )
     }
@@ -382,7 +431,19 @@ fun NowPlayingScreen(
             },
         )
     }
-    Box(Modifier.fillMaxSize()) {
+    val dark = LocalDarkTheme.current
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = if (dark) 0.28f else 0.35f),
+                        Color.Transparent,
+                    ),
+                ),
+            ),
+    ) {
         if (!state.hasMedia) {
             Column(Modifier.fillMaxSize()) {
                 AppTopBar(title = stringResource(R.string.player_now_playing), onBack = onBack)
@@ -424,8 +485,9 @@ fun NowPlayingScreen(
                     ) {
                         CoverImage(
                             state.coverUri,
-                            modifier = coverModifier
+                            modifier = Modifier
                                 .padding(top = 8.dp)
+                                .then(coverModifier)
                                 .size(cover)
                                 .shadow(12.dp, MaterialTheme.shapes.large),
                             size = null,
@@ -438,16 +500,19 @@ fun NowPlayingScreen(
                             overflow = TextOverflow.Ellipsis,
                             textAlign = TextAlign.Center,
                             modifier = Modifier.padding(top = 16.dp)
+                                .clip(MaterialTheme.shapes.small)
                                 .clickable(onClickLabel = stringResource(R.string.player_view_full_title)) { fullTitle = true }
                                 .padding(vertical = 4.dp),
                         )
-                        Text(
-                            state.artist,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            textAlign = TextAlign.Center,
-                        )
+                        if (state.artist.isNotBlank()) {
+                            Text(
+                                state.artist,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                textAlign = TextAlign.Center,
+                            )
+                        }
                         Box(
                             modifier = Modifier
                                 .weight(1f)
@@ -463,49 +528,87 @@ fun NowPlayingScreen(
                                 ),
                             contentAlignment = Alignment.Center,
                         ) {
+                            val activeJob = activeWhisperJob
                             when {
                                 subtitle.isNotEmpty() -> CueLine(subtitle)
-                                cues.isNotEmpty() -> Unit
+                                cues.isNotEmpty() -> Text(
+                                    stringResource(R.string.player_tap_for_subtitles),
+                                    textAlign = TextAlign.Center,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                )
+                                activeJob != null -> WhisperProgress(
+                                    job = activeJob,
+                                    progress = taskProgress[TaskKey(TaskKind.WHISPER, activeJob.id)],
+                                    onStop = { viewModel.cancelWhisper(activeJob.id) },
+                                )
                                 loaded?.generatedEmpty == true -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                     Text(
                                         stringResource(R.string.player_no_voice),
                                         textAlign = TextAlign.Center,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
-                                    TextButton(onClick = { discardPrompt = true }) { Text(stringResource(R.string.player_delete_subtitle)) }
+                                    FlowRow(
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                                    ) {
+                                        TextButton(onClick = { discardTarget = current }) { Text(stringResource(R.string.player_delete_subtitle)) }
+                                        TextButton(onClick = { openSubtitlePicker() }) { Text(stringResource(R.string.player_choose_subtitle)) }
+                                    }
                                 }
                                 loaded != null -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                    loaded.notice?.let { notice ->
-                                        Text(
+                                    val disabled = loaded.disabledByUser
+                                    val notice = loaded.notice
+                                    when {
+                                        disabled -> Text(
+                                            stringResource(R.string.player_subtitle_disabled_notice),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            textAlign = TextAlign.Center,
+                                            modifier = Modifier.padding(bottom = 8.dp),
+                                        )
+                                        notice != null -> Text(
                                             notice,
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                             textAlign = TextAlign.Center,
                                             modifier = Modifier.padding(bottom = 8.dp),
                                         )
+                                        failedWhisperJob?.takeIf { !PersistedErrors.isCancelled(it.error) } != null -> Text(
+                                            stringResource(R.string.player_subtitle_failed_notice),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.error,
+                                            textAlign = TextAlign.Center,
+                                            modifier = Modifier.padding(bottom = 8.dp),
+                                        )
                                     }
                                     FlowRow(
                                         Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
                                         verticalArrangement = Arrangement.spacedBy(4.dp),
                                     ) {
-                                        FilledTonalButton(
-                                            onClick = {
-                                                localNetwork.run(viewModel.generateNeedsLocalNetwork()) {
-                                                    viewModel.requestGenerate(translate = true)
-                                                }
-                                            },
-                                        ) {
-                                            Text(stringResource(R.string.player_generate_subtitle_translate), textAlign = TextAlign.Center)
+                                        // 用户明确关闭字幕时只保留「选择字幕」，避免误触重新生成。
+                                        if (!disabled) {
+                                            FilledTonalButton(
+                                                onClick = {
+                                                    localNetwork.run(viewModel.generateNeedsLocalNetwork()) {
+                                                        viewModel.requestGenerate(translate = true, targetRow = current)
+                                                    }
+                                                },
+                                            ) {
+                                                Text(stringResource(R.string.player_generate_subtitle_translate), textAlign = TextAlign.Center)
+                                            }
+                                            OutlinedButton(
+                                                onClick = {
+                                                    localNetwork.run(viewModel.generateNeedsLocalNetwork()) {
+                                                        viewModel.requestGenerate(translate = false, targetRow = current)
+                                                    }
+                                                },
+                                            ) {
+                                                Text(stringResource(R.string.player_generate_subtitle), textAlign = TextAlign.Center)
+                                            }
                                         }
-                                        OutlinedButton(
-                                            onClick = {
-                                                localNetwork.run(viewModel.generateNeedsLocalNetwork()) {
-                                                    viewModel.requestGenerate(translate = false)
-                                                }
-                                            },
-                                        ) {
-                                            Text(stringResource(R.string.player_generate_subtitle), textAlign = TextAlign.Center)
+                                        OutlinedButton(onClick = { openSubtitlePicker() }) {
+                                            Text(stringResource(R.string.player_choose_subtitle), textAlign = TextAlign.Center)
                                         }
                                     }
                                 }
@@ -515,18 +618,36 @@ fun NowPlayingScreen(
                 }
                 Column(Modifier.padding(horizontal = 12.dp).padding(bottom = 8.dp)) {
                     SeekBar(state, onSeek = viewModel.client::seekTo)
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = viewModel.client::previous, modifier = Modifier.size(56.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        IconButton(onClick = viewModel.client::previous, modifier = Modifier.size(48.dp)) {
                             Icon(Icons.Default.SkipPrevious, contentDescription = stringResource(R.string.a11y_previous), modifier = Modifier.size(32.dp))
                         }
+                        IconButton(
+                            onClick = { viewModel.seekBack() },
+                            enabled = state.canSeekBack,
+                            modifier = Modifier.size(48.dp),
+                        ) {
+                            Icon(Icons.Default.Replay10, contentDescription = stringResource(R.string.a11y_seek_back_10s), modifier = Modifier.size(28.dp))
+                        }
                         PlayButton(playing = state.isPlaying, onClick = viewModel.client::toggle)
-                        IconButton(onClick = viewModel.client::next, modifier = Modifier.size(56.dp)) {
+                        IconButton(
+                            onClick = { viewModel.seekForward() },
+                            enabled = state.canSeekForward,
+                            modifier = Modifier.size(48.dp),
+                        ) {
+                            Icon(Icons.Default.Forward10, contentDescription = stringResource(R.string.a11y_seek_forward_10s), modifier = Modifier.size(28.dp))
+                        }
+                        IconButton(onClick = viewModel.client::next, modifier = Modifier.size(48.dp)) {
                             Icon(Icons.Default.SkipNext, contentDescription = stringResource(R.string.a11y_next), modifier = Modifier.size(32.dp))
                         }
                     }
                     FlowRow(
                         Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 8.dp),
-                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         SecondaryAction(
@@ -573,15 +694,34 @@ fun NowPlayingScreen(
                     chinese = chinese,
                     translating = subtitleTask?.operation == SubtitleTask.TRANSLATE,
                     canDelete = loaded?.generated == true,
-                    onChinese = { viewModel.showChinese(state.queueItemId, true) },
-                    onJapanese = { viewModel.showChinese(state.queueItemId, false) },
-                    onTranslate = viewModel::requestTranslation,
+                    onChinese = { viewModel.showChinese(current?.queueItemId ?: state.queueItemId, true) },
+                    onJapanese = { viewModel.showChinese(current?.queueItemId ?: state.queueItemId, false) },
+                    onTranslate = { viewModel.requestTranslation(current) },
                     canTranslate = loaded?.canTranslate == true,
                     onStop = { subtitleTask?.id?.let(viewModel::cancelSubtitleOperation) },
                     polishing = subtitleTask?.operation == SubtitleTask.POLISH,
-                    onPolish = viewModel::requestPolish,
+                    onPolish = { viewModel.requestPolish(current) },
                     onStopPolish = { subtitleTask?.id?.let(viewModel::cancelSubtitleOperation) },
-                    onDelete = { discardPrompt = true },
+                    whisperJob = activeWhisperJob,
+                    whisperProgress = activeWhisperJob?.let { taskProgress[TaskKey(TaskKind.WHISPER, it.id)] },
+                    onStopWhisper = { activeWhisperJob?.let { viewModel.cancelWhisper(it.id) } },
+                    canSelectSubtitle = current != null,
+                    hasManualBinding = loaded?.hasManualBinding == true,
+                    disabledByUser = loaded?.disabledByUser == true,
+                    canRegenerate = current != null && activeWhisperJob == null && loaded?.disabledByUser != true,
+                    onSelectSubtitle = { openSubtitlePicker() },
+                    onRegenerate = {
+                        localNetwork.run(viewModel.generateNeedsLocalNetwork()) {
+                            viewModel.requestGenerate(
+                                translate = cues.hasTranslation(), forceRegenerate = true, targetRow = current,
+                            )
+                        }
+                    },
+                    // 解除关联同样以点击时的曲目为准。
+                    onClearBinding = {
+                        current?.trackId?.takeIf { it > 0L }?.let(viewModel::clearSubtitleBinding)
+                    },
+                    onDelete = { discardTarget = current },
                     onSeek = viewModel.client::seekTo,
                     onBack = { showSubtitles = false },
                 )
@@ -657,6 +797,20 @@ fun NowPlayingScreen(
             Spacer(Modifier.height(12.dp))
         }
     }
+    pickerRequest?.let { request ->
+        val resolution = pickerResolution ?: SubtitlePickerResolution.Loading
+        com.nanahoshi.audioplayer.ui.components.TrackSubtitlePickerSheet(
+            track = (resolution as? SubtitlePickerResolution.Ready)?.track,
+            trackTitle = pickerTitle.ifBlank { request.title },
+            loading = resolution == SubtitlePickerResolution.Loading,
+            actions = viewModel.subtitlePickerActions,
+            onDismiss = {
+                pickerRequest = null
+                pickerTitle = ""
+                pickerResolution = null
+            },
+        )
+    }
 }
 
 @Composable
@@ -685,16 +839,42 @@ private fun CueLine(text: String) {
 }
 
 @Composable
+private fun WhisperProgress(
+    job: WhisperJobEntity,
+    progress: TaskProgressSnapshot?,
+    onStop: () -> Unit,
+) {
+    val translating = TranslateMark.isActive(job.translateStatus)
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            stringResource(
+                if (translating) R.string.player_translating_subtitles else R.string.player_transcribing_subtitles,
+            ),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+        RoundedProgress(
+            progress = progress?.fraction(),
+            modifier = Modifier.padding(top = 8.dp),
+        )
+        TextButton(onClick = onStop, modifier = Modifier.padding(top = 4.dp)) {
+            Text(stringResource(R.string.common_stop))
+        }
+    }
+}
+
+@Composable
 private fun PlayButton(playing: Boolean, onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     Box(
         Modifier
-            .padding(horizontal = 18.dp)
+            .padding(horizontal = 10.dp)
             .pressScale(interaction)
             .size(72.dp)
             .clip(CircleShape)
             .background(MaterialTheme.colorScheme.primary)
-            .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick),
+            .clickable(interactionSource = interaction, role = Role.Button, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Icon(
@@ -733,10 +913,11 @@ private fun SecondaryAction(
     val interaction = remember { MutableInteractionSource() }
     Column(
         modifier
+            .widthIn(min = 48.dp)
             .pressScale(interaction)
             .clip(MaterialTheme.shapes.medium)
             .heightIn(min = 48.dp)
-            .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick)
+            .clickable(interactionSource = interaction, role = Role.Button, onClick = onClick)
             .padding(horizontal = 8.dp, vertical = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
@@ -766,13 +947,23 @@ internal fun SubtitleReader(
     onSeek: (Long) -> Unit,
     onBack: () -> Unit,
     canTranslate: Boolean,
+    whisperJob: WhisperJobEntity? = null,
+    whisperProgress: TaskProgressSnapshot? = null,
+    onStopWhisper: () -> Unit = {},
+    canSelectSubtitle: Boolean = false,
+    hasManualBinding: Boolean = false,
+    disabledByUser: Boolean = false,
+    canRegenerate: Boolean = false,
+    onSelectSubtitle: () -> Unit = {},
+    onRegenerate: () -> Unit = {},
+    onClearBinding: () -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val listState = key(mediaId) { rememberLazyListState() }
     val follow = remember(mediaId) { SubtitleFollowState() }
     val active = cues.indexAt(positionMs)
     val anchor = follow.anchorIndex(cues, positionMs)
-    val blue = if (LocalDarkTheme.current) Color(0xFF90CAF9) else Color(0xFF1565C0)
+    val autoTranslating = whisperJob?.let { TranslateMark.isActive(it.translateStatus) } == true
     var placed by remember(mediaId) { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
     val reduce = LocalReduceMotion.current
@@ -797,21 +988,53 @@ internal fun SubtitleReader(
                 when {
                     polishing -> TextButton(onClick = onStopPolish) { Text(stringResource(R.string.common_stop)) }
                     translating -> TextButton(onClick = onStop) { Text(stringResource(R.string.common_stop)) }
+                    whisperJob != null || autoTranslating -> TextButton(onClick = onStopWhisper) { Text(stringResource(R.string.common_stop)) }
                     cues.hasTranslation() -> TextButton(onClick = onPolish) { Text(stringResource(R.string.player_polish)) }
                     cues.isNotEmpty() && canTranslate -> TextButton(onClick = onTranslate) { Text(stringResource(R.string.player_translate)) }
                 }
-                if (canDelete) {
+                val regenerateAllowed = canRegenerate && !disabledByUser
+                val hasMenu = canSelectSubtitle || regenerateAllowed || hasManualBinding || canDelete
+                if (hasMenu) {
                     IconButton(onClick = { menu = true }) {
                         Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.a11y_subtitle_actions))
                     }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                        DropdownMenuItem(
-                            text = { Text(stringResource(R.string.common_delete), color = MaterialTheme.colorScheme.error) },
-                            onClick = {
-                                menu = false
-                                onDelete()
-                            },
-                        )
+                        if (canSelectSubtitle) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.player_switch_subtitle)) },
+                                onClick = {
+                                    menu = false
+                                    onSelectSubtitle()
+                                },
+                            )
+                        }
+                        if (regenerateAllowed) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.player_regenerate_subtitle)) },
+                                onClick = {
+                                    menu = false
+                                    onRegenerate()
+                                },
+                            )
+                        }
+                        if (hasManualBinding) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.player_clear_subtitle_binding)) },
+                                onClick = {
+                                    menu = false
+                                    onClearBinding()
+                                },
+                            )
+                        }
+                        if (canDelete) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.player_delete_generated_subtitle), color = MaterialTheme.colorScheme.error) },
+                                onClick = {
+                                    menu = false
+                                    onDelete()
+                                },
+                            )
+                        }
                     }
                 }
             },
@@ -822,19 +1045,34 @@ internal fun SubtitleReader(
                     selected = chinese,
                     onClick = onChinese,
                     shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-                ) { Text(stringResource(R.string.player_chinese)) }
+                ) { Text(stringResource(R.string.player_chinese), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
                 SegmentedButton(
                     selected = !chinese,
                     onClick = onJapanese,
                     shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-                ) { Text(stringResource(R.string.player_japanese)) }
+                ) { Text(stringResource(R.string.player_japanese), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
             }
         }
         if (cues.isEmpty()) {
-            EmptyState(
-                title = stringResource(R.string.player_subtitle_empty_title),
-                message = stringResource(R.string.player_subtitle_empty_message),
-            )
+            if (whisperJob != null) {
+                Box(Modifier.weight(1f).fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
+                    WhisperProgress(
+                        job = whisperJob,
+                        progress = whisperProgress,
+                        onStop = onStopWhisper,
+                    )
+                }
+            } else if (disabledByUser) {
+                EmptyState(
+                    title = stringResource(R.string.player_subtitles),
+                    message = stringResource(R.string.player_subtitle_disabled_notice),
+                )
+            } else {
+                EmptyState(
+                    title = stringResource(R.string.player_subtitle_empty_title),
+                    message = stringResource(R.string.player_subtitle_empty_message),
+                )
+            }
         } else {
             Box(Modifier.weight(1f).fillMaxWidth()) {
             LazyColumn(
@@ -845,7 +1083,7 @@ internal fun SubtitleReader(
                 itemsIndexed(cues, key = { index, cue -> "$index-${cue.startMs}" }) { index, cue ->
                     val current = index == active
                     val color by animateColorAsState(
-                        targetValue = if (current) blue else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+                        targetValue = if (current) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
                         animationSpec = if (reduce) snap() else tween(Motion.medium, easing = Motion.enter),
                         label = "cueColor",
                     )
@@ -880,41 +1118,77 @@ private suspend fun LazyListState.centerOn(index: Int, animated: Boolean) {
     if (animated) animateScrollToItem(index, offset) else scrollToItem(index, offset)
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun SleepTimerDialog(onDismiss: () -> Unit, onStart: (Long) -> Unit) {
     var minutes by remember { mutableStateOf("") }
     var seconds by remember { mutableStateOf("") }
+    val input = validateSleepTimerInput(minutes, seconds)
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.player_sleep_timer)) },
         text = {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    value = minutes,
-                    onValueChange = { minutes = it.filter(Char::isDigit).take(4) },
-                    label = { Text(stringResource(R.string.player_timer_minutes)) },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f),
-                )
-                OutlinedTextField(
-                    value = seconds,
-                    onValueChange = { seconds = it.filter(Char::isDigit).take(2) },
-                    label = { Text(stringResource(R.string.player_timer_seconds)) },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f),
-                )
+            Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
+                FlowRow(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                ) {
+                    sleepTimerPresets.forEach { preset ->
+                        AssistChip(
+                            onClick = {
+                                minutes = preset.toString()
+                                seconds = ""
+                            },
+                            label = { Text(stringResource(R.string.player_timer_preset_minutes, preset)) },
+                        )
+                    }
+                }
+                Row(
+                    Modifier.fillMaxWidth().padding(top = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    OutlinedTextField(
+                        value = minutes,
+                        onValueChange = { minutes = it.filter(Char::isDigit).take(4) },
+                        label = { Text(stringResource(R.string.player_timer_minutes)) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.weight(1f),
+                    )
+                    OutlinedTextField(
+                        value = seconds,
+                        onValueChange = { seconds = it.filter(Char::isDigit).take(2) },
+                        label = { Text(stringResource(R.string.player_timer_seconds)) },
+                        singleLine = true,
+                        isError = input.secondsOutOfRange,
+                        supportingText = if (input.secondsOutOfRange) {
+                            { Text(stringResource(R.string.player_timer_seconds_error)) }
+                        } else {
+                            null
+                        },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.weight(1f),
+                    )
+                }
             }
         },
         confirmButton = {
-            TextButton(onClick = {
-                val minuteValue = (minutes.toLongOrNull() ?: 0L).coerceAtLeast(0L)
-                val secondValue = (seconds.toLongOrNull() ?: 0L).coerceIn(0L, 59L)
-                val totalMs = minuteValue * 60_000L + secondValue * 1000L
-                if (totalMs > 0L) onStart(totalMs)
-            }) { Text(stringResource(R.string.player_start_timer)) }
+            TextButton(
+                enabled = input.valid,
+                onClick = { onStart(input.totalMs) },
+            ) { Text(stringResource(R.string.player_start_timer)) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) } },
     )
+}
+
+private val sleepTimerPresets = listOf(15, 30, 60)
+
+/** 字幕选择弹层的目标曲目解析结果；Loading 期间不闪示「未入库曲目」。 */
+private sealed interface SubtitlePickerResolution {
+    data object Loading : SubtitlePickerResolution
+    data object Unlisted : SubtitlePickerResolution
+    data class Ready(val track: TrackEntity) : SubtitlePickerResolution
 }
 
 @Composable
@@ -959,33 +1233,28 @@ private fun WhisperPromptDialog(viewModel: PlayerViewModel) {
 
 @Composable
 private fun SeekBar(state: PlayerUiState, onSeek: (Long) -> Unit) {
-    var dragging by remember { mutableStateOf(false) }
-    var dragValue by remember { mutableFloatStateOf(0f) }
-    val duration = state.durationMs.coerceAtLeast(1L)
-    val shown = if (dragging) dragValue else state.positionMs / duration.toFloat()
-    LaunchedEffect(state.positionMs, dragging) {
-        if (!dragging) dragValue = state.positionMs / duration.toFloat()
-    }
+    val duration = state.durationMs
+    val canScrub = duration > 0L
+    var dragValue by remember(state.queueItemId, canScrub) { mutableStateOf<Float?>(null) }
+    val previewPosition = dragValue?.let { playbackSeekPosition(it, duration) }
     Column {
         Slider(
-            value = shown.coerceIn(0f, 1f),
-            onValueChange = {
-                dragging = true
-                dragValue = it
-            },
+            value = dragValue ?: playbackProgress(state.positionMs, duration),
+            enabled = canScrub,
+            onValueChange = { dragValue = it },
             onValueChangeFinished = {
-                onSeek((dragValue * duration).toLong())
-                dragging = false
+                dragValue?.let { playbackSeekPosition(it, duration) }?.let(onSeek)
+                dragValue = null
             },
         )
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(
-                formatDuration(if (dragging) (dragValue * duration).toLong() else state.positionMs),
+                formatDuration(previewPosition ?: state.positionMs),
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                formatDuration(state.durationMs),
+                if (canScrub) formatDuration(duration) else stringResource(R.string.player_duration_unknown),
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

@@ -47,6 +47,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -116,7 +117,7 @@ fun PlaylistDetailScreen(
     androidx.compose.runtime.LaunchedEffect(sources, playlistId) {
         if (online == null && sources != null) online = sources!!.any { it.playlistId == playlistId }
     }
-    if (online == null) { com.nanahoshi.audioplayer.ui.components.LoadingState(stringResource(R.string.playlist_loading)); return }
+    if (online == null) { com.nanahoshi.audioplayer.ui.components.LoadingState(stringResource(R.string.playlist_loading), Modifier.fillMaxSize()); return }
     if (online == true) {
         com.nanahoshi.audioplayer.ui.bilibili.BiliCollectionScreen(playlistId = playlistId, onBack = onBack)
         return
@@ -168,7 +169,11 @@ fun PlaylistDetailScreen(
                 modifier = Modifier.fillMaxSize(),
             )
         } else {
-            LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(bottom = 24.dp),
+            ) {
                 itemsIndexed(rows, key = { _, row -> row.itemId }) { index, row ->
                     ReorderableItem(reorderState, key = row.itemId) {
                         PlaylistTrackRow(
@@ -231,14 +236,14 @@ private fun PlaylistSummaryRow(
         if (folders == null) emptyList() else playlistCoverUris(rows, folders)
     }
     ListItem(
-        headlineContent = { Text(playlist.name) },
-        supportingContent = { Text(stringResource(R.string.playlist_track_count, rows.size)) },
+        headlineContent = { Text(playlist.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        supportingContent = { Text(stringResource(R.string.playlist_track_count, rows.size), maxLines = 1, overflow = TextOverflow.Ellipsis) },
         leadingContent = {
             Box(Modifier.size(48.dp)) {
                 covers.forEachIndexed { index, coverUri ->
                     CoverImage(
                         coverUri,
-                        modifier = Modifier.offset(x = (index * 10).dp),
+                        modifier = Modifier.offset(x = (index * 8).dp),
                         size = 32.dp,
                     )
                 }
@@ -256,18 +261,18 @@ private fun PlaylistTrackRow(
     onDelete: () -> Unit,
 ) {
     ListItem(
-        headlineContent = { Text(row.title) },
-        supportingContent = { Text(row.artist?.ifBlank { null } ?: formatDuration(row.durationMs)) },
+        headlineContent = { Text(row.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        supportingContent = { Text(row.artist?.ifBlank { null } ?: formatDuration(row.durationMs), maxLines = 1, overflow = TextOverflow.Ellipsis) },
         modifier = Modifier.clickable(onClick = onClick),
         leadingContent = {
-            Icon(Icons.Default.DragHandle, contentDescription = stringResource(R.string.a11y_drag_sort), modifier = Modifier.size(48.dp).then(handleModifier).padding(12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.DragHandle, contentDescription = stringResource(R.string.a11y_drag_sort), modifier = Modifier.size(48.dp).then(handleModifier).padding(12.dp))
+                CoverImage(row.coverUri, size = 44.dp, shape = MaterialTheme.shapes.small)
+            }
         },
         trailingContent = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                CoverImage(row.coverUri)
-                IconButton(onClick = onDelete) {
-                    Icon(Icons.Default.Delete, contentDescription = stringResource(R.string.a11y_playlist_remove))
-                }
+            IconButton(onClick = onDelete) {
+                Icon(Icons.Default.Delete, contentDescription = stringResource(R.string.a11y_playlist_remove))
             }
         },
     )
@@ -295,7 +300,7 @@ private fun NameDialog(
 
 @Composable
 internal fun OnlinePlaylistSummary(name: String, source: com.nanahoshi.audioplayer.bilibili.BiliCollection, onClick: () -> Unit) {
-    ListItem(headlineContent = { Text(name) },
-        supportingContent = { Text(stringResource(R.string.playlist_online_summary, stringResource(source.kind.labelRes), source.total)) },
+    ListItem(headlineContent = { Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        supportingContent = { Text(stringResource(R.string.playlist_online_summary, stringResource(source.kind.labelRes), source.total), maxLines = 1, overflow = TextOverflow.Ellipsis) },
         leadingContent = { CoverImage(source.coverUrl) }, modifier = Modifier.clickable(onClick = onClick))
 }

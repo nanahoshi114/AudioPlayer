@@ -8,11 +8,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
@@ -26,6 +28,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
@@ -55,11 +58,14 @@ fun CacheScreen(
             stringResource(R.string.cache_usage, formatCacheBytes(viewModel.usedBytes)),
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
         )
-        ListItem(
-            headlineContent = { Text(stringResource(R.string.cache_limit_title)) },
-            supportingContent = { Text(stringResource(R.string.cache_limit_summary, cacheLimitLabel(limit))) },
-            modifier = Modifier.clickable { picking = true },
-        )
+        SettingsGroup(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+            ListItem(
+                headlineContent = { Text(stringResource(R.string.cache_limit_title)) },
+                supportingContent = { Text(stringResource(R.string.cache_limit_summary, cacheLimitLabel(limit))) },
+                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                modifier = Modifier.heightIn(min = 48.dp).clickable { picking = true },
+            )
+        }
         Button(
             onClick = viewModel::clear,
             enabled = !viewModel.clearing,
@@ -89,6 +95,7 @@ fun CacheScreen(
                         Row(
                             Modifier
                                 .fillMaxWidth()
+                                .heightIn(min = 48.dp)
                                 .selectable(
                                     selected = bytes == limit,
                                     onClick = {

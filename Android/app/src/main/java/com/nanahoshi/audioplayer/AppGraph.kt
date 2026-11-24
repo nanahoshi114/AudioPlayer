@@ -30,6 +30,8 @@ import com.nanahoshi.audioplayer.data.LibraryRepository
 import com.nanahoshi.audioplayer.data.OfflineWhisperModel
 import com.nanahoshi.audioplayer.data.OfflineWhisperModelManager
 import com.nanahoshi.audioplayer.data.SUBTITLE_INTERRUPTED
+import com.nanahoshi.audioplayer.data.StoredCatalog
+import com.nanahoshi.audioplayer.data.SubtitleBindingStore
 import com.nanahoshi.audioplayer.data.SubtitleTaskRequests
 import com.nanahoshi.audioplayer.data.SubtitleTaskService
 import com.nanahoshi.audioplayer.data.db.AppDatabase
@@ -101,8 +103,27 @@ class AppGraph(app: Application) {
         { show(R.string.bili_import_choice_pending) },
     )
     val dlsiteDownloadRequests = com.nanahoshi.audioplayer.data.DlsiteDownloadRequests()
-    val subtitles = SubtitleSource(app, db, bilibili, asmr)
-    val downloads = DownloadCenter(app, db, asmr, dlsite, bilibili, youtube, library, subtitles, progress = taskProgress) { messages.value = it }
+    internal val subtitleDisplay = SubtitleDisplayPreferences(app)
+    val subtitles = SubtitleSource(app, db, bilibili, asmr, dlsite) { subtitleDisplay.crossSourceFallback.value }
+    val subtitleBindings = SubtitleBindingStore(app, db, subtitles)
+    init {
+        library.onBindingsDetached = { detached, invalidate ->
+            if (detached.isNotEmpty()) subtitleBindings.cleanupDetached(detached)
+            else if (invalidate) subtitles.invalidate()
+        }
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            try {
+                subtitleBindings.cleanupOrphans()
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                android.util.Log.w("SubtitleBindings", "Could not clean up unused subtitle copies", error)
+            }
+        }
+    }
+    val storedCatalog = StoredCatalog(app, db, subtitles, subtitleBindings)
+    val downloads = DownloadCenter(app, db, asmr, dlsite, bilibili, youtube, library, subtitles,
+        progress = taskProgress, subtitleBindings = subtitleBindings) { messages.value = it }
     internal val subtitleTaskRequests = SubtitleTaskRequests { SubtitleTaskService.start(app, it) }
     private val subtitleRecovery = CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
         // 恢复失败不得使启动崩溃或让 recovery.join() 重抛；两段各自捕获，恢复失败不跳过中断登记。
@@ -136,8 +157,8 @@ class AppGraph(app: Application) {
     }
     val whisper = WhisperCenter(
         app, db, credentials, downloads, translator, subtitles, offlineWhisperModels, subtitleTaskRequests, subtitleRecovery,
+        subtitleBindings = subtitleBindings,
     )
-    internal val subtitleDisplay = SubtitleDisplayPreferences(app)
     internal val currentSubtitles = CurrentSubtitles(
         CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
         library.observeQueue(),
@@ -147,7 +168,11 @@ class AppGraph(app: Application) {
             }.distinctUntilChanged(),
             subtitles.revision,
             translator.updates,
-        ) { _, _, _ -> Unit },
+            subtitleDisplay.crossSourceFallback,
+            db.invalidationTracker.createFlow(
+                "track_subtitles", "library_files", "dlsite_original_entries", "japaneseasmr_download_entries",
+            ),
+        ) { _, _, _, _, _ -> Unit },
         subtitles::load,
     )
     val player = PlayerClient(app, library) { messages.value = it }

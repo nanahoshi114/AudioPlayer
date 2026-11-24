@@ -12,6 +12,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -69,8 +70,9 @@ fun SelectionTopBar(
     onClose: () -> Unit,
     actions: List<SelectionAction>,
     pinnedCount: Int = 3,
+    pinDestructiveWhenFits: Boolean = false,
 ) {
-    val pinned = actions.filter { !it.destructive }.take(pinnedCount)
+    val pinned = actions.filter { !it.destructive || pinDestructiveWhenFits }.take(pinnedCount)
     val overflow = actions.filter { it !in pinned }
     var menu by rememberSaveable { mutableStateOf(false) }
     TopAppBar(
@@ -83,7 +85,15 @@ fun SelectionTopBar(
         actions = {
             pinned.forEach { action ->
                 IconButton(onClick = action.onClick, enabled = action.enabled) {
-                    Icon(action.icon, contentDescription = action.label)
+                    Icon(
+                        action.icon,
+                        contentDescription = action.label,
+                        tint = if (action.destructive && action.enabled) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            LocalContentColor.current
+                        },
+                    )
                 }
             }
             if (overflow.isNotEmpty()) {

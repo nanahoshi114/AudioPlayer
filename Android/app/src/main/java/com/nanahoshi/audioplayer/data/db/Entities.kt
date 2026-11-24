@@ -122,6 +122,44 @@ data class LibraryFileEntity(
     val localUri: String? = null,
 )
 
+object TrackSubtitleKind {
+    const val LIBRARY_FILE = "LIBRARY_FILE"
+    const val EXTERNAL_URI = "EXTERNAL_URI"
+    const val APP_FILE = "APP_FILE"
+    const val GENERATED = "GENERATED"
+    const val NONE = "NONE"
+}
+
+@Entity(
+    tableName = "track_subtitles",
+    foreignKeys = [
+        ForeignKey(
+            entity = TrackEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["trackId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+        ForeignKey(
+            entity = LibraryFileEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["fileId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+    indices = [Index(value = ["trackId"], unique = true), Index("fileId")],
+)
+data class TrackSubtitleBindingEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val trackId: Long,
+    val kind: String,
+    val fileId: Long? = null,
+    val uri: String? = null,
+    val treeUri: String? = null,
+    val displayName: String? = null,
+    val offsetMs: Long? = null,
+    val updatedAt: Long,
+)
+
 @Entity(
     tableName = "downloads",
     indices = [Index("trackId")],
@@ -149,6 +187,7 @@ data class DownloadEntity(
     val jaEntryKey: String? = null,
     val jaReplace: Boolean? = null,
     val jaForce: Boolean? = null,
+    val dismissedAt: Long? = null,
 )
 
 @Entity(tableName = "playlists")
@@ -309,6 +348,9 @@ data class WhisperJobEntity(
     val awaitFileKey: String? = null,
     val remoteSubmittedAt: Long? = null,
     val progressSummary: String? = null,
+    val createdAt: Long? = null,
+    val dismissedAt: Long? = null,
+    val forceRegenerate: Boolean? = null,
 )
 
 @Entity(tableName = "translation_jobs")
@@ -327,6 +369,10 @@ data class TranslationJobEntity(
     val cid: Long? = null,
     val localUri: String? = null,
     val progressSummary: String? = null,
+    val createdAt: Long? = null,
+    val dismissedAt: Long? = null,
+    val targetKind: String? = null,
+    val outputFilename: String? = null,
 )
 
 @Entity(tableName = "subtitle_publications")

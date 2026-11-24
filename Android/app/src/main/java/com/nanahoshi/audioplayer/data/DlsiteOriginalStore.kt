@@ -112,6 +112,12 @@ class DlsiteOriginalStore(
                 ).let { it.copy(id = db.folders().insert(it)) }
                 val workId = root.asmrWorkId ?: code.filter { it.isDigit() }.toLongOrNull() ?: 0L
                 val oldEntries = db.dlsiteOriginals().entries(code).associateBy { it.relativePath }
+                if (db.dlsiteOriginals().work(code)?.generation == generation) {
+                    val scannedPaths = originalLeaves.toSet()
+                    if (oldEntries.values.any { it.kind != DlsiteOriginalKind.FOLDER && it.relativePath !in scannedPaths }) {
+                        throw UserFacingException(TextRef.Res(R.string.dlsite_archive_error_unpacked_missing))
+                    }
+                }
                 val folders = db.folders().all()
                 val byFolderId = folders.associateBy { it.id }
                 val folderIds = originalFolderIds(folders, root.id)
@@ -170,6 +176,9 @@ class DlsiteOriginalStore(
                         directoryIds[item.path] = id
                         entries += item.entry(code, folderId = id)
                         continue
+                    }
+                    if (!item.file.isFile) {
+                        throw UserFacingException(TextRef.Res(R.string.dlsite_archive_error_unpacked_missing))
                     }
                     val remote = playPaths[item.path]?.let { playByPath[it] }?.node
                     if (item.kind == DlsiteOriginalKind.AUDIO) {

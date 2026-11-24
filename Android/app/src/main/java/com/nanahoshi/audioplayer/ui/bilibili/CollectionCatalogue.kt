@@ -31,8 +31,12 @@ internal fun CollectionCatalogue(model: BiliBrowserViewModel, open: (BiliCollect
         }
         if (page.items.isEmpty() && !page.loading && page.error == null) EmptyState(
             title = stringResource(R.string.bilibili_catalogue_empty_title),
-        )
-        LazyColumn(state = state, modifier = Modifier.weight(1f)) {
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+        ) else LazyColumn(
+            state = state,
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            contentPadding = PaddingValues(bottom = 24.dp),
+        ) {
             items(page.items, key = { it.key }) { collection ->
                 ListItem(headlineContent = { Text(collection.title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
                     supportingContent = { Text(stringResource(R.string.bilibili_collection_summary, stringResource(collection.kind.labelRes), collection.total)) },

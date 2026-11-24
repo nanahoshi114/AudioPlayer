@@ -29,24 +29,45 @@ import com.nanahoshi.audioplayer.dlsite.DlsiteClient
 import com.nanahoshi.audioplayer.playback.SubtitleSource
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.Call
+import okhttp3.EventListener
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
+import okhttp3.Request
 import okhttp3.Response
+import okhttp3.ResponseBody
 import okhttp3.ResponseBody.Companion.toResponseBody
+import okio.Buffer
+import okio.ByteString.Companion.toByteString
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import javax.crypto.Cipher
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 @RunWith(AndroidJUnit4::class)
 class JaWorkFilesAndroidTest {
@@ -319,9 +340,345 @@ class JaWorkFilesAndroidTest {
         Unit
     }
 
-    private fun zip(vararg files: Pair<String, ByteArray>): ByteArray {
+    @Test fun megaPublishedVersionsProtectIntactCopiesAndPreserveOnlyFolderArchiveParents() = runBlocking {
+        withMegaWork("55") { work ->
+            val storageCalls = mutableListOf<String>()
+            val firstOffsets = mutableListOf<Int>()
+            val payloads = mutableMapOf<String, ByteArray>()
+            val client = JaWorkClient(OkHttpClient.Builder().addInterceptor { chain ->
+                val request = chain.request()
+                val slot = request.url.pathSegments.first()
+                storageCalls += slot
+                val bytes = payloads.getValue(slot)
+                if (slot == "direct01") {
+                    val offset = request.url.pathSegments.last().substringBefore('-').toInt()
+                    firstOffsets += offset
+                    if (offset == 0) {
+                        val body = object : ResponseBody() {
+                            private val buffer = Buffer().write(bytes, 0, 7)
+                            override fun contentType() = null
+                            override fun contentLength() = bytes.size.toLong()
+                            override fun source() = buffer
+                        }
+                        response(request).newBuilder().body(body).build()
+                    } else response(request, bytes.copyOfRange(offset, bytes.size))
+                } else response(request, bytes)
+            }.build())
+            fun mega(path: String, slot: String, bytes: ByteArray): JaRemoteFile {
+                val payload = megaPayload(bytes)
+                payloads[slot] = payload.encrypted
+                return payload.remote(path, slot)
+            }
+            fun bonus(sample: Int) = zip("01.wav" to wav(sample), "Empty/" to byteArrayOf(), level = 0)
+            val legacy = zip("note.txt" to "legacy".toByteArray())
+            payloads["legacy"] = legacy
+            val start = JaWorkManifest(work.entry, listOf(
+                mega("01.wav", "direct01", wav(1)),
+                mega("特典/音声.zip", "archive1", bonus(2)),
+                JaRemoteFile("Other/extras.zip", legacy.size.toLong(), jaHashBytes(legacy),
+                    JaFileTransfer.Buzz("https://dd.buzzheavier.com/legacy".toHttpUrl(), "fixture")),
+            ), 0)
+            suspend fun file(path: String) = work.db.jaDownloads().entry(work.entry.post.rj, path)!!
+            suspend fun check(manifest: JaWorkManifest) =
+                work.library.jaWorkFiles.check(manifest, jaHash(manifest.entry.address), force = false)
+            suspend fun publish(manifest: JaWorkManifest, replace: Boolean = true) {
+                val job = work.job(manifest.entry).copy(jaReplace = replace)
+                val id = work.db.downloads().insert(job)
+                val tracker = TaskProgressTracker()
+                val report = tracker.begin(TaskKey(TaskKind.DOWNLOAD, id), ProgressPart.DOWNLOAD)
+                work.library.jaWorkFiles.execute(job.copy(id = id), manifest, client, report, {}) {}
+            }
+            work.rootId = work.importWork()
+            publish(start)
+            assertEquals(listOf(0, 7), firstOffsets)
+            val original = file("01.wav")
+            val archive = file("特典/01.wav")
+            assertNotNull(original.trackId)
+            assertNotNull(archive.trackId)
+            assertArrayEquals(wav(2), File(archive.localPath!!).readBytes())
+            assertEquals("FOLDER", file("特典/Empty").kind)
+            assertEquals("legacy", File(file("note.txt").localPath!!).readText())
+            assertNull(work.db.jaDownloads().entry(work.entry.post.rj, "Other/note.txt"))
+            assertTrue(archive.packageRevision!!.startsWith("mega:"))
+            assertEquals(jaHashBytes(wav(2)), archive.sha256)
+            assertFalse(check(start).lengthOnly)
+            storageCalls.clear()
+            assertEquals(0, check(start).pending)
+            publish(start)
+            assertTrue(storageCalls.isEmpty())
+
+            val updatedDirect = mega("01.wav", "direct02", wav(3))
+            val changedEntry = work.entry.copy(address = work.entry.address + "&slot=2")
+            val switched = JaWorkManifest(changedEntry, listOf(updatedDirect), 0)
+            assertTrue(check(switched).needsReplace)
+            publish(switched, replace = false)
+            assertTrue(storageCalls.isEmpty())
+            assertArrayEquals(wav(1), File(file("01.wav").localPath!!).readBytes())
+            val updatedArchive = mega("特典/音声.zip", "archive2", bonus(4))
+            assertEquals(start.files[1].size, updatedArchive.size)
+            val updated = start.copy(files = listOf(updatedDirect, updatedArchive, start.files[2]))
+            assertEquals(2, check(updated).pending)
+            publish(updated)
+            assertEquals(listOf("direct02", "archive2"), storageCalls)
+            assertEquals(original.trackId, file("01.wav").trackId)
+            assertEquals(archive.trackId, file("特典/01.wav").trackId)
+            assertNotEquals(archive.packageRevision, file("特典/01.wav").packageRevision)
+            assertArrayEquals(wav(4), File(file("特典/01.wav").localPath!!).readBytes())
+
+            File(file("01.wav").localPath!!).writeBytes(wav(8))
+            assertFalse(check(switched).needsReplace)
+            publish(switched, replace = false)
+            assertArrayEquals(wav(3), File(file("01.wav").localPath!!).readBytes())
+            val sameFromArchive = JaWorkManifest(work.entry, listOf(mega("特典/01.wav", "detached", wav(4))), 0)
+            assertFalse(check(sameFromArchive).needsReplace)
+            publish(sameFromArchive, replace = false)
+            assertEquals(archive.trackId, file("特典/01.wav").trackId)
+            assertNull(file("特典/01.wav").packageKey)
+        }
+    }
+
+    @Test fun megaQueueReusesOnlyTheCurrentWorkManifestAndRecoversItAfterRestart() = runBlocking {
+        withTimeout(35_000) {
+            withMegaWork("56") { work ->
+                val requests = Channel<Long>(Channel.UNLIMITED)
+                val siteReads = AtomicInteger()
+                val gets = AtomicInteger()
+                val oldGets = AtomicInteger()
+                val payloads = ConcurrentHashMap<String, MegaPayload>()
+                val first = megaPayload(wav(1)).also { payloads["AudioOld"] = it }
+                val second = megaPayload(wav(2)).also { payloads["AudioNew"] = it }
+                val third = megaPayload(wav(3)).also { payloads["AudioTmp"] = it }
+                var currentNode = "AudioNew"
+                var quota = false
+                var busy = false
+                val storageOpened = Channel<Unit>(Channel.CONFLATED)
+                var pausedStorage: CountDownLatch? = null
+                val http = OkHttpClient.Builder().eventListener(object : EventListener() {
+                    override fun canceled(call: Call) {
+                        if (call.request().url.pathSegments.firstOrNull() == "AudioOld") pausedStorage?.countDown()
+                    }
+                }).addInterceptor { chain ->
+                    val request = chain.request()
+                    when (request.url.host) {
+                        "japaneseasmr.com" -> {
+                            siteReads.incrementAndGet()
+                            response(request, code = 302, location = megaFolderUrl())
+                        }
+                        "g.api.mega.co.nz" -> {
+                            val body = Buffer().also { request.body!!.writeTo(it) }.readUtf8()
+                            val command = (Json.parseToJsonElement(body) as JsonArray).single() as JsonObject
+                            if (command.getValue("a").jsonPrimitive.content == "f") {
+                                response(request, megaTree(currentNode, payloads.getValue(currentNode)))
+                            } else {
+                                gets.incrementAndGet()
+                                val id = command.getValue("n").jsonPrimitive.content
+                                if (busy) response(request, """[{"e":-4}]""".toByteArray())
+                                else response(request, """[{"g":"https://store.userstorage.mega.co.nz/$id"}]""".toByteArray())
+                            }
+                        }
+                        else -> {
+                            val path = request.url.pathSegments.first()
+                            if (path == "AudioOld") pausedStorage?.let { cancelled ->
+                                storageOpened.trySend(Unit)
+                                check(cancelled.await(5, TimeUnit.SECONDS)) { "Expected the storage request to be cancelled" }
+                                throw IOException("Cancelled storage fixture")
+                            }
+                            if (path == "old-ticket") {
+                                oldGets.incrementAndGet()
+                                response(request, code = 403)
+                            } else if (quota) response(request, code = 509)
+                            else {
+                                val offset = request.url.pathSegments.last().substringBefore('-').toInt()
+                                val bytes = payloads.getValue(path).encrypted
+                                response(request, bytes.copyOfRange(offset, bytes.size))
+                            }
+                        }
+                    }
+                }.build()
+                var center = work.center(http, requests)
+                suspend fun submit(action: suspend () -> Long?): Long = coroutineScope {
+                    val submitted = async { action() }
+                    checkNotNull(center.requests.take(requests.receive())).launchIn(this).start()
+                    requireNotNull(submitted.await())
+                }
+                fun manifest(file: JaRemoteFile) = JaWorkManifest(work.entry, listOf(file,
+                    megaPayload(byteArrayOf()).remote("z-empty.txt", "Empty___", initial = false)), 0,
+                    sourcePage = JaVisibleDownload(megaFolderUrl(), "fixture"))
+                suspend fun enqueue(manifest: JaWorkManifest) = submit {
+                    center.enqueueJaWork(work.rootId, manifest, replace = true, force = false).id
+                }
+                suspend fun state(id: Long, status: DownloadStatus) = center.observe().first { jobs ->
+                    jobs.any { it.id == id && it.status == status }
+                }.first { it.id == id }
+                suspend fun published() = File(work.db.jaDownloads().entry(work.entry.post.rj, "voice.wav")!!.localPath!!).readBytes()
+                try {
+                    center.awaitStartup()
+                    work.rootId = work.importWork()
+                    quota = true
+                    val old = enqueue(manifest(first.remote("voice.wav", "AudioOld", "old-ticket")).let {
+                        it.copy(resolvedAtMs = it.resolvedAtMs - 120_001)
+                    })
+                    center.drainQueue {}
+                    assertEquals(work.context.getString(R.string.ja_error_mega_quota), state(old, DownloadStatus.FAILED).error)
+                    assertEquals(0, siteReads.get())
+                    assertEquals(0, oldGets.get())
+                    assertEquals(1, gets.get())
+
+                    quota = false
+                    busy = true
+                    val newer = enqueue(manifest(second.remote("voice.wav", "AudioNew", "old-ticket")))
+                    center.drainQueue {}
+                    assertEquals(work.context.getString(R.string.ja_error_mega_busy), state(newer, DownloadStatus.FAILED).error)
+                    assertEquals(1, oldGets.get())
+                    assertEquals(4, gets.get())
+                    busy = false
+                    submit { center.retry(newer) }
+                    center.drainQueue {}
+                    state(newer, DownloadStatus.DONE)
+                    assertEquals(0, siteReads.get())
+                    assertEquals(5, gets.get())
+                    assertArrayEquals(wav(2), published())
+                    assertEquals(0L, File(work.db.jaDownloads().entry(work.entry.post.rj, "z-empty.txt")!!.localPath!!).length())
+                    submit { center.retry(old) }
+                    center.drainQueue {}
+                    state(old, DownloadStatus.DONE)
+                    assertEquals(1, siteReads.get())
+                    assertEquals(5, gets.get())
+                    assertArrayEquals(wav(2), published())
+
+                    currentNode = "AudioTmp"
+                    val queued = enqueue(manifest(third.remote("voice.wav", "AudioTmp")))
+                    center.close()
+                    center = work.center(http, requests)
+                    center.awaitStartup()
+                    quota = true
+                    center.drainQueue {}
+                    state(queued, DownloadStatus.FAILED)
+                    assertEquals(2, siteReads.get())
+                    quota = false
+                    submit { center.retry(queued) }
+                    center.drainQueue {}
+                    state(queued, DownloadStatus.DONE)
+                    assertEquals(2, siteReads.get())
+                    assertArrayEquals(wav(3), published())
+
+                    val cancelled = enqueue(manifest(first.remote("voice.wav", "AudioOld")))
+                    pausedStorage = CountDownLatch(1)
+                    val draining = async { center.drainQueue {} }
+                    storageOpened.receive()
+                    center.cancel(cancelled)
+                    state(cancelled, DownloadStatus.FAILED)
+                    draining.await()
+                    pausedStorage = null
+                    quota = true
+                    submit { center.retry(cancelled) }
+                    center.drainQueue {}
+                    state(cancelled, DownloadStatus.FAILED)
+                    assertEquals(2, siteReads.get())
+                    work.library.deleteItems(emptyList(), listOf(work.rootId))
+                    work.rootId = work.importWork()
+                    quota = false
+                    submit { center.retry(cancelled) }
+                    center.drainQueue {}
+                    state(cancelled, DownloadStatus.DONE)
+                    assertEquals(3, siteReads.get())
+                    assertArrayEquals(wav(3), published())
+                } finally {
+                    center.close()
+                }
+            }
+        }
+    }
+
+    private class MegaWork(
+        val context: Context,
+        val db: AppDatabase,
+        val entry: JaWorkEntry,
+        val app: Context,
+    ) {
+        private val credentials = CredentialStore(context)
+        private val bili = BilibiliClient(credentials)
+        private val asmr = AsmrClient()
+        private val dlsite = DlsiteClient(credentials)
+        private val subtitles = SubtitleSource(context, db, bili, asmr)
+        val library = LibraryRepository(context, db, bili, asmr, dlsite, JapaneseAsmrClient(
+            pageClient = OkHttpClient.Builder().addInterceptor { chain ->
+                response(chain.request(), code = 403)
+            }.build(),
+        ))
+        var rootId = 0L
+
+        suspend fun importWork(): Long = library.importJapaneseAsmrPost(JaArticle(entry.post, emptyList(), listOf(
+            JaMediaRef("p:fixture", "fixture", listOf(JaCandidate("https://audio.invalid/track.wav", null)), emptyList()),
+        ))).rootId
+
+        fun job(entry: JaWorkEntry) = DownloadEntity(trackId = 0, title = entry.post.rj, bytesDone = 0, bytesTotal = 0,
+            status = DownloadStatus.RUNNING, error = null, source = TrackSource.JAPANESE_ASMR.name,
+            workKey = entry.post.rj, fileKey = entry.post.postId, kind = JA_WORK_DOWNLOAD, workFolderId = rootId,
+            jaEntryKey = jaHash(entry.address))
+
+        fun center(http: OkHttpClient, requests: Channel<Long>): DownloadCenter {
+            val youtube = (app.applicationContext as com.nanahoshi.audioplayer.AudioPlayerApplication).graph.youtube
+            return DownloadCenter(context, db, asmr, dlsite, bili, youtube, library, subtitles,
+                startService = { _, id -> requests.trySend(id).isSuccess }, jaWorkHttp = http)
+        }
+    }
+
+    private suspend fun withMegaWork(postId: String, block: suspend (MegaWork) -> Unit) {
+        val storage = File(app.cacheDir, "ja-mega-${UUID.randomUUID()}").apply { mkdirs() }
+        val context = object : ContextWrapper(app) {
+            override fun getFilesDir() = storage
+            override fun getApplicationContext(): Context = this
+        }
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        val post = JaPostRef(postId, "RJ01752865", "fixture", null, JapaneseAsmrClient.postUrl(postId), null)
+        try {
+            block(MegaWork(context, db, jaDownloadEntry(post, null).single(), app))
+        } finally {
+            db.close()
+            storage.deleteRecursively()
+        }
+    }
+
+    private data class MegaPayload(val encrypted: ByteArray, val key: ByteArray) {
+        fun remote(path: String, id: String, ticket: String = id, initial: Boolean = true) =
+            JaRemoteFile(path, encrypted.size.toLong(), null,
+                JaFileTransfer.Mega(JaMegaFileSource.FolderFile("Public__", id), JaMegaCrypto(key),
+                    if (initial) "https://store.userstorage.mega.co.nz/$ticket".toHttpUrl() else null))
+    }
+
+    private fun megaPayload(bytes: ByteArray): MegaPayload {
+        require(bytes.size < 128 * 1024)
+        val aes = ByteArray(16) { (it + 17).toByte() }
+        val nonce = ByteArray(8) { (it + 10).toByte() }
+        val chunkMac = if (bytes.isEmpty()) ByteArray(16) else encrypt("CBC", aes, nonce + nonce,
+            bytes.copyOf((bytes.size + 15) and 15.inv())).takeLast(16).toByteArray()
+        val mac = if (bytes.isEmpty()) chunkMac else encrypt("ECB", aes, null, chunkMac)
+        val suffix = nonce + ByteArray(8) { index ->
+            val offset = if (index < 4) index else index + 4
+            (mac[offset].toInt() xor mac[offset + 4].toInt()).toByte()
+        }
+        val key = ByteArray(16) { (aes[it].toInt() xor suffix[it].toInt()).toByte() } + suffix
+        return MegaPayload(encrypt("CTR", aes, nonce + ByteArray(8), bytes), key)
+    }
+
+    private fun megaTree(id: String, payload: MegaPayload): ByteArray {
+        fun node(handle: String, name: String, type: Int, key: ByteArray, size: Int): String {
+            val aes = if (type == 1) key else ByteArray(16) { (key[it].toInt() xor key[it + 16].toInt()).toByte() }
+            val raw = """MEGA{"n":${JsonPrimitive(name)}}""".toByteArray()
+            val attributes = encrypt("CBC", aes, ByteArray(16), raw.copyOf((raw.size + 15) and 15.inv()))
+            val wrapped = encrypt("ECB", folderKey, null, key)
+            return """{"h":"$handle","p":"Root____","t":$type,"k":"Root____:${encode(wrapped)}","a":"${encode(attributes)}","s":$size}"""
+        }
+        val root = node("Root____", "Shared", 1, ByteArray(16) { it.toByte() }, 0)
+        val file = node(id, "voice.wav", 0, payload.key, payload.encrypted.size)
+        return """[{"f":[$root,$file]}]""".toByteArray()
+    }
+
+    private fun zip(vararg files: Pair<String, ByteArray>, level: Int = -1): ByteArray {
         val output = ByteArrayOutputStream()
         ZipOutputStream(output).use { zip ->
+            zip.setLevel(level)
             for ((path, contents) in files) {
                 zip.putNextEntry(ZipEntry(path))
                 zip.write(contents)
@@ -339,5 +696,24 @@ class JaWorkFilesAndroidTest {
             .put("data".toByteArray()).putInt(bytes).apply {
                 repeat(bytes / 2) { putShort(sample.toShort()) }
             }.array()
+    }
+
+    private companion object {
+        val folderKey = ByteArray(16) { (it + 7).toByte() }
+        fun encode(bytes: ByteArray) = bytes.toByteString().base64Url().trimEnd('=')
+        fun megaFolderUrl() = "https://mega.nz/folder/Public__#${encode(folderKey)}"
+        fun jaHashBytes(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).toByteString().hex()
+        fun encrypt(mode: String, key: ByteArray, iv: ByteArray?, bytes: ByteArray): ByteArray {
+            val cipher = Cipher.getInstance("AES/$mode/NoPadding")
+            val spec = SecretKeySpec(key, "AES")
+            if (iv == null) cipher.init(Cipher.ENCRYPT_MODE, spec)
+            else cipher.init(Cipher.ENCRYPT_MODE, spec, IvParameterSpec(iv))
+            return cipher.doFinal(bytes)
+        }
+        fun response(request: Request, body: ByteArray = byteArrayOf(), code: Int = 200, location: String? = null): Response =
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(code).message("fixture").apply {
+                if (location != null) header("Location", location)
+                if (code == 403 && request.url.host == "japaneseasmr.com") header("cf-mitigated", "challenge")
+            }.body(body.toResponseBody()).build()
     }
 }
