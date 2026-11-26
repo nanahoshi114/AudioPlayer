@@ -107,6 +107,8 @@ Referer: https://www.dlsite.com/{站点}/
 
 判断某部作品是否已购买时，用 `canonicalWorkno` 对照这张表。作品详情里的「已购买内容」和「DLSite Play」文件区都靠它。
 
+补充安全与下载约束：WebView 登录后通过 `mergeDlsiteCookies` 过滤 `cf_`、`__cf`、`_cfuvid` 等条目保存，退出时清理 WebView Cookie。试听虽使用 `DLSITE` 来源但 `fileKey` 为空，请求不得携带 DLsite 登录凭证。部分下载及听写前置下载先选择完整原始包、Play 部分文件或取消（试听除外）；原始包使用独立桌面浏览器标识、登录会话和受限重定向以避免进入手机文件列表，严禁将 Play 媒体凭证发往任意下载主机，临时地址不得落库或写入日志（原始文件音质以作者上传为准，不承诺无损）。
+
 ### Play 文件
 
 打开已购作品的文件树：

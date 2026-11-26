@@ -17,7 +17,7 @@
 
 `qwen-audio-3.1-asr` 上传后的轮询每 2 秒一次，总上限 30 分钟。听写任务串行执行，服务端长期不给结果时不能让一个任务永久占住队列：超时先取消正在查询任务状态的网络请求，再把任务记为失败「听写超时，请重试」，可以手动重试。超时只针对轮询，用户点「中止」仍然是取消，任务显示「已中止」，两者不混淆。
 
-地址是局域网、本机或 `.local` 时（只可能是 `Qwen3-ASR`），Android 17 要在请求前申请 `ACCESS_LOCAL_NETWORK`。公网地址不申请。
+地址是局域网、本机或 `.local` 时（只可能是 `Qwen3-ASR`），Android 17 要在请求前申请 `ACCESS_LOCAL_NETWORK`。公网地址不申请。判定使用 `isLocalNetworkAddress`，仅解析字面 IP、不额外发起 DNS 查询。已移除模型的偏好迁移至 `qwen-audio-3.1-asr`（不生成虚假密钥，旧模型待执行任务明确失败）。`filesDir/whisper-src/` 暂存文件保持无后缀，上传按文件头设置格式，任务结束/取消/重试后仅清理无任务引用暂存（重试优先复用原文件，其次从曲目本地文件复制）；本机模型直接读取本地文件，且 JNI 解码与 `release` 不得并发。
 
 ## 字幕后台任务
 
@@ -58,6 +58,8 @@ Parakeet 由 NVIDIA 创建，sherpa-onnx 将其 CTC 分支导出为 ONNX 并量�
 
 ## 日文字幕校对与翻译
 
+翻译平台限定千问 AI 平台和 DeepSeek，地址固定、密钥与模型名按平台独立保存；平台地址、默认模型及思考参数集中于 `data/TranslatePlatforms.kt`（修改时保留平台字段差异），思考内容 `reasoning_content` 不写入字幕。
+
 生成字幕后的自动翻译和对现有字幕发起的翻译共用处理流程。「设置 → 听写和翻译 → 翻译行为选项」提供独立的「日文校对」和「语义合并」开关（默认均关闭，仅对日文字幕生效）：
 
 - **两者均关闭（默认）**或明确为其他语言：使用逐条行协议，每批最多 40 条，不校对原文、不合并条目。
@@ -88,3 +90,9 @@ Parakeet 由 NVIDIA 创建，sherpa-onnx 将其 CTC 分支导出为 ONNX 并量�
 数据库 20 在三张任务表增加可空 `progressSummary`，以 kotlinx.serialization 保存分段 JSON。数据库 22→23 为 `downloads`、`whisper_jobs` 和 `translation_jobs` 增加可空 `dismissedAt`，并为听写和独立翻译任务增加可空 `createdAt`；迁移不设置 SQL `DEFAULT`。数据库 23→24 新增 `track_subtitles` 曲目字幕绑定表（`trackId` 唯一外键级联删除，`fileId` 可空外键级联删除，包含 `kind`、`fileId`、`uri`、`treeUri`、`displayName`、`offsetMs`、`updatedAt`），为 `translation_jobs` 增加可空 `targetKind`、`outputFilename`，为 `whisper_jobs` 增加可空 `forceRegenerate`；三个新增可空列同样不设置 SQL `DEFAULT`，新装与升级结构一致。听写段和自动翻译段合并保存，B 站字幕为下载任务独立子段；重试听写会清空整个摘要，重试自动翻译只清除 `TRANSLATION` 分段并保留听写段的进度、耗时和结果。检查点仅在阶段和终态写入，历史 NULL 不补算耗时。启动时先恢复字幕发布，再登记中断翻译的结果；已恢复发布的摘要与最终成功或保存失败一致。摘要不保存凭证、临时媒体地址和每秒时间线。
 
 非生成字幕的翻译及手动润色覆盖写入 `filesDir/subtitles/` 下的 `extra-*.json`，文件名按曲目身份确定（`track:`、`url:`、`path:`、`queue:` 或 B 站 `bili:`），不同来源与曲目互不覆盖。覆盖文件保存原字幕文字和时间轴的 `sourceFingerprint`，仅当当前字幕与记录一致时应用；生成字幕文件则保留 `origin` 与 `revisedCues`。
+
+## 字幕加载与交互约束
+
+- 字幕加载优先按已入库曲目的 `track_subtitles` 手动绑定读取（支持作品文件、外部持久授权 URI、应用内导入副本、强制生成字幕或明确关闭），无绑定时自动匹配生成字幕、作品跨目录同源字幕及受「作品跨来源借用字幕」（`crossSourceFallback`，默认开启）控制的其他来源字幕，并支持毫秒级时间轴微调（`offsetMs`）与强制重新生成（`forceRegenerate`）；未入库曲目不支持手动关联。
+- 字幕按钮仅在字幕就绪、无当前句子且结果不是「没有听出人声」时显示；句间空隙不触发按钮显示。
+- 字幕全文列表点击句子后跳转至句子起始时间并保留列表页；播放页当前句用于打开全文列表；顶栏菜单支持切换/选择字幕、重新生成、解除手动关联及仅删除生成字幕。
