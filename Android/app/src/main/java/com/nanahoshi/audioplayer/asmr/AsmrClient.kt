@@ -1,19 +1,38 @@
 package com.nanahoshi.audioplayer.asmr
 
 import com.nanahoshi.audioplayer.R
+import com.nanahoshi.audioplayer.data.MAX_SUBTITLE_TEXT_BYTES
 import com.nanahoshi.audioplayer.data.RemoteTextPreview
+import com.nanahoshi.audioplayer.data.jsonArray
+import com.nanahoshi.audioplayer.data.jsonBool
+import com.nanahoshi.audioplayer.data.jsonDouble
+import com.nanahoshi.audioplayer.data.jsonInt
+import com.nanahoshi.audioplayer.data.jsonLong
+import com.nanahoshi.audioplayer.data.jsonNames
+import com.nanahoshi.audioplayer.data.jsonObject
+import com.nanahoshi.audioplayer.data.jsonObjects
+import com.nanahoshi.audioplayer.data.jsonString
+import com.nanahoshi.audioplayer.data.jsonStringOrEmpty
+import com.nanahoshi.audioplayer.data.jsonStrings
+import com.nanahoshi.audioplayer.data.parseJsonArrayOrNull
+import com.nanahoshi.audioplayer.data.parseJsonObjectOrNull
+import com.nanahoshi.audioplayer.data.readFullText
 import com.nanahoshi.audioplayer.data.readRemoteTextPreview
 import com.nanahoshi.audioplayer.data.withResponse
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
-import org.json.JSONObject
 import java.net.URLEncoder
 import com.nanahoshi.audioplayer.text.TextRef
 import com.nanahoshi.audioplayer.text.UserFacingError
@@ -26,9 +45,7 @@ class AsmrException(
     override val userText: TextRef,
     val kind: AsmrErrorKind = AsmrErrorKind.OTHER,
     cause: Throwable? = null,
-) : Exception(userText.debugString(), cause), UserFacingError {
-    constructor(message: String) : this(TextRef.Raw(message))
-}
+) : Exception(userText.debugString(), cause), UserFacingError
 
 sealed class CatalogLookup {
     data class Found(val item: AsmrCatalogItem) : CatalogLookup()
@@ -82,33 +99,28 @@ data class WorkFacts(
     val sourceId: String,
     val asmrAvailable: Boolean = false,
 ) {
-    fun toJson(): String = JSONObject()
-        .put("title", title)
-        .put("circle", circle)
-        .put("vas", JSONArray(vas))
-        .put("tags", JSONArray(tags))
-        .put("release", release)
-        .put("sourceId", sourceId)
-        .apply { if (asmrAvailable) put("asmrAvailable", true) }
-        .toString()
+    fun toJson(): String = buildJsonObject {
+        put("title", title)
+        put("circle", circle)
+        putJsonArray("vas") { vas.forEach { add(JsonPrimitive(it)) } }
+        putJsonArray("tags") { tags.forEach { add(JsonPrimitive(it)) } }
+        put("release", release)
+        put("sourceId", sourceId)
+        if (asmrAvailable) put("asmrAvailable", true)
+    }.toString()
 
     companion object {
         fun fromJson(raw: String?): WorkFacts? {
-            if (raw.isNullOrBlank()) return null
-            return try {
-                val obj = JSONObject(raw)
-                WorkFacts(
-                    title = obj.optString("title"),
-                    circle = obj.optString("circle"),
-                    vas = obj.optJSONArray("vas").toStrings(),
-                    tags = obj.optJSONArray("tags").toStrings(),
-                    release = obj.optString("release"),
-                    sourceId = obj.optString("sourceId"),
-                    asmrAvailable = obj.optBoolean("asmrAvailable"),
-                )
-            } catch (_: Exception) {
-                null
-            }
+            val obj = parseJsonObjectOrNull(raw) ?: return null
+            return WorkFacts(
+                title = obj.jsonStringOrEmpty("title"),
+                circle = obj.jsonStringOrEmpty("circle"),
+                vas = obj.jsonArray("vas").jsonStrings(),
+                tags = obj.jsonArray("tags").jsonStrings(),
+                release = obj.jsonStringOrEmpty("release"),
+                sourceId = obj.jsonStringOrEmpty("sourceId"),
+                asmrAvailable = obj.jsonBool("asmrAvailable") ?: false,
+            )
         }
     }
 }
@@ -122,8 +134,8 @@ data class AsmrNode(
     val hash: String,
 )
 
-class AsmrClient {
-    private val client = OkHttpClient.Builder()
+class AsmrClient(root: OkHttpClient = com.nanahoshi.audioplayer.data.HttpRoots.shared) {
+    private val client = root.newBuilder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .followRedirects(true)
@@ -142,7 +154,7 @@ class AsmrClient {
 
     suspend fun loadWork(input: String): AsmrWork = withContext(Dispatchers.IO) {
         val info = workInfo(input)
-        val nodes = parseNodes(JSONArray(get("/api/tracks/${info.id}?v=2")))
+        val nodes = parseNodes(trackArray("/api/tracks/${info.id}?v=2"))
         info.toWork(nodes)
     }
 
@@ -151,13 +163,14 @@ class AsmrClient {
     }
 
     suspend fun popular(page: Int, subtitleOnly: Boolean): AsmrPage = withContext(Dispatchers.IO) {
-        val body = JSONObject()
-            .put("keyword", " ")
-            .put("page", page)
-            .put("pageSize", PAGE_SIZE)
-            .put("subtitle", if (subtitleOnly) 1 else 0)
-            .put("localSubtitledWorks", JSONArray())
-            .put("withPlaylistStatus", JSONArray())
+        val body = buildJsonObject {
+            put("keyword", " ")
+            put("page", page)
+            put("pageSize", PAGE_SIZE)
+            put("subtitle", if (subtitleOnly) 1 else 0)
+            putJsonArray("localSubtitledWorks") { }
+            putJsonArray("withPlaylistStatus") { }
+        }
         parsePage(post("/api/recommender/popular", body.toString()))
     }
 
@@ -192,23 +205,24 @@ class AsmrClient {
 
     private suspend fun workInfo(input: String): WorkInfo {
         val code = extractCode(input)
-        val info = JSONObject(get("/api/workInfo/$code"))
-        val id = info.optLong("id")
+        val info = parseJsonObjectOrNull(get("/api/workInfo/$code"))
+            ?: throw AsmrException(TextRef.Res(R.string.asmr_error_connection))
+        val id = info.jsonLong("id") ?: 0L
         if (id <= 0L) throw AsmrException(TextRef.Res(R.string.asmr_error_work_id_missing))
-        val sourceId = info.optString("source_id").ifBlank { code }.uppercase()
-        val circle = info.optJSONObject("circle")?.optString("name").orEmpty()
-            .ifBlank { info.optString("name") }
-        val release = info.optString("release").substringBefore('T').substringBefore(' ')
+        val sourceId = info.jsonStringOrEmpty("source_id").ifBlank { code }.uppercase()
+        val circle = info.jsonObject("circle")?.jsonString("name").orEmpty()
+            .ifBlank { info.jsonStringOrEmpty("name") }
+        val release = info.jsonStringOrEmpty("release").substringBefore('T').substringBefore(' ')
         return WorkInfo(
             id = id,
             sourceId = sourceId,
-            title = info.optString("title").ifBlank { sourceId },
+            title = info.jsonStringOrEmpty("title").ifBlank { sourceId },
             circle = circle,
-            vas = info.names("vas"),
-            tags = info.names("tags"),
+            vas = info.jsonNames("vas"),
+            tags = info.jsonNames("tags"),
             release = release,
-            coverUrl = info.optString("mainCoverUrl").ifBlank { null },
-            thumbUrl = info.optString("thumbnailCoverUrl").ifBlank { null },
+            coverUrl = info.jsonStringOrEmpty("mainCoverUrl").ifBlank { null },
+            thumbUrl = info.jsonStringOrEmpty("thumbnailCoverUrl").ifBlank { null },
         )
     }
 
@@ -248,8 +262,11 @@ class AsmrClient {
     }
 
     suspend fun trackTree(workId: Long): List<AsmrNode> = withContext(Dispatchers.IO) {
-        parseNodes(JSONArray(get("/api/tracks/$workId?v=2")))
+        parseNodes(trackArray("/api/tracks/$workId?v=2"))
     }
+
+    private suspend fun trackArray(path: String): JsonArray =
+        parseJsonArrayOrNull(get(path)) ?: throw AsmrException(TextRef.Res(R.string.asmr_error_connection))
 
     internal suspend fun readText(url: String, limit: Int = TEXT_LIMIT): RemoteTextPreview = withContext(Dispatchers.IO) {
         val request = Request.Builder()
@@ -261,6 +278,22 @@ class AsmrClient {
         client.newCall(request).withResponse { response ->
             if (!response.isSuccessful) throw AsmrException(TextRef.Res(R.string.dlsite_error_file_open))
             response.body?.byteStream()?.readRemoteTextPreview(limit) ?: RemoteTextPreview("")
+        }
+    }
+
+    internal suspend fun readFullText(
+        url: String,
+        maxBytes: Int = MAX_SUBTITLE_TEXT_BYTES,
+    ): String = withContext(Dispatchers.IO) {
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", USER_AGENT)
+            .header("Referer", REFERER)
+            .header("Origin", ORIGIN)
+            .build()
+        client.newCall(request).withResponse { response ->
+            if (!response.isSuccessful) throw AsmrException(TextRef.Res(R.string.dlsite_error_file_open))
+            response.body?.byteStream()?.readFullText(maxBytes).orEmpty()
         }
     }
 
@@ -288,7 +321,7 @@ class AsmrClient {
                 val result = client.newCall(request).withResponse { response ->
                     val body = response.body?.string().orEmpty()
                     if (!response.isSuccessful) {
-                        val server = runCatching { JSONObject(body).optString("error") }.getOrNull().orEmpty()
+                        val server = parseJsonObjectOrNull(body)?.jsonString("error").orEmpty()
                         val fallback = TextRef.Res(R.string.asmr_error_connection)
                         val serverError = server.takeIf(String::isNotBlank)?.let(TextRef::Raw) ?: fallback
                         when {
@@ -318,12 +351,12 @@ class AsmrClient {
     }
 
     private fun parsePage(body: String): AsmrPage {
-        val root = JSONObject(body)
-        val pagination = root.optJSONObject("pagination")
+        val root = parseJsonObjectOrNull(body) ?: throw AsmrException(TextRef.Res(R.string.asmr_error_connection))
+        val pagination = root.jsonObject("pagination")
         return AsmrPage(
-            works = root.optJSONArray("works").toCatalog(),
-            page = pagination?.optInt("currentPage") ?: 1,
-            total = pagination?.optInt("totalCount") ?: 0,
+            works = root.jsonArray("works").toCatalog(),
+            page = pagination?.jsonInt("currentPage") ?: 1,
+            total = pagination?.jsonInt("totalCount") ?: 0,
         )
     }
 
@@ -341,15 +374,10 @@ class AsmrClient {
             "https://api.asmr-100.com",
             "https://api.asmr-300.com",
         )
-        private val CODE = Regex("(?i)(?:RJ|VJ)\\d+")
 
-        fun extractCode(input: String): String {
-            val match = CODE.find(input)
-            if (match != null) return match.value.uppercase()
-            val digits = input.filter { it.isDigit() }
-            if (digits.isNotEmpty()) return "RJ$digits"
-            throw AsmrException(TextRef.Res(R.string.asmr_error_enter_rj))
-        }
+        fun extractCode(input: String): String =
+            com.nanahoshi.audioplayer.data.WorkIds.fromInput(input)
+                ?: throw AsmrException(TextRef.Res(R.string.asmr_error_enter_rj))
 
         fun findStream(nodes: List<AsmrNode>, hash: String?, title: String): String? {
             val raw = com.nanahoshi.audioplayer.data.rawFileKey(hash)
@@ -374,68 +402,38 @@ class AsmrClient {
     }
 }
 
-private fun parseNodes(array: JSONArray): List<AsmrNode> = buildList {
-    for (index in 0 until array.length()) {
-        add(parseNode(array.optJSONObject(index) ?: continue))
-    }
-}
+private fun parseNodes(array: JsonArray): List<AsmrNode> = array.jsonObjects().map(::parseNode)
 
-private fun parseNode(obj: JSONObject): AsmrNode {
-    val children = obj.optJSONArray("children")?.let(::parseNodes).orEmpty()
-    val stream = obj.optString("mediaStreamUrl").ifBlank { obj.optString("mediaDownloadUrl") }.ifBlank { null }
+private fun parseNode(obj: JsonObject): AsmrNode {
+    val children = obj.jsonArray("children")?.let(::parseNodes).orEmpty()
+    val stream = obj.jsonStringOrEmpty("mediaStreamUrl").ifBlank { obj.jsonStringOrEmpty("mediaDownloadUrl") }.ifBlank { null }
     return AsmrNode(
-        title = obj.optString("title").ifBlank { "未命名" },
-        type = obj.optString("type"),
+        title = obj.jsonStringOrEmpty("title").ifBlank { "未命名" },
+        type = obj.jsonStringOrEmpty("type"),
         children = children,
         streamUrl = stream,
-        durationMs = (obj.optDouble("duration", 0.0) * 1000).toLong().coerceAtLeast(0),
-        hash = obj.optString("hash"),
+        durationMs = ((obj.jsonDouble("duration") ?: 0.0) * 1000).toLong().coerceAtLeast(0),
+        hash = obj.jsonStringOrEmpty("hash"),
     )
 }
 
-private fun JSONObject.names(key: String): List<String> {
-    val array = optJSONArray(key) ?: return emptyList()
-    return buildList {
-        for (index in 0 until array.length()) {
-            val name = array.optJSONObject(index)?.optString("name").orEmpty()
-            if (name.isNotBlank()) add(name)
-        }
-    }
-}
-
-private fun JSONArray?.toCatalog(): List<AsmrCatalogItem> {
-    if (this == null) return emptyList()
-    return buildList {
-        for (index in 0 until length()) {
-            val item = optJSONObject(index) ?: continue
-            val id = item.optLong("id")
-            if (id <= 0L) continue
-            val sourceId = item.optString("source_id").uppercase()
-            val circle = item.optJSONObject("circle")?.optString("name").orEmpty()
-                .ifBlank { item.optString("name") }
-            val cover = item.optString("thumbnailCoverUrl").ifBlank { item.optString("mainCoverUrl") }.ifBlank { null }
-            add(
-                AsmrCatalogItem(
-                    id = id,
-                    sourceId = sourceId,
-                    title = item.optString("title").ifBlank { sourceId },
-                    circle = circle,
-                    vas = item.names("vas"),
-                    tags = item.names("tags"),
-                    release = item.optString("release").substringBefore('T').substringBefore(' '),
-                    coverUrl = cover,
-                ),
-            )
-        }
-    }
-}
-
-private fun JSONArray?.toStrings(): List<String> {
-    if (this == null) return emptyList()
-    return buildList {
-        for (index in 0 until length()) {
-            val value = optString(index)
-            if (value.isNotBlank()) add(value)
-        }
-    }
+private fun JsonArray?.toCatalog(): List<AsmrCatalogItem> = jsonObjects().mapNotNull { item ->
+    val id = item.jsonLong("id") ?: 0L
+    if (id <= 0L) return@mapNotNull null
+    val sourceId = item.jsonStringOrEmpty("source_id").uppercase()
+    val circle = item.jsonObject("circle")?.jsonString("name").orEmpty()
+        .ifBlank { item.jsonStringOrEmpty("name") }
+    val cover = item.jsonStringOrEmpty("thumbnailCoverUrl")
+        .ifBlank { item.jsonStringOrEmpty("mainCoverUrl") }
+        .ifBlank { null }
+    AsmrCatalogItem(
+        id = id,
+        sourceId = sourceId,
+        title = item.jsonStringOrEmpty("title").ifBlank { sourceId },
+        circle = circle,
+        vas = item.jsonNames("vas"),
+        tags = item.jsonNames("tags"),
+        release = item.jsonStringOrEmpty("release").substringBefore('T').substringBefore(' '),
+        coverUrl = cover,
+    )
 }

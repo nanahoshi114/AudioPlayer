@@ -5,6 +5,11 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.documentfile.provider.DocumentFile
+import com.nanahoshi.audioplayer.playback.SubtitleCandidateEntry
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import java.io.File
 
 object LocalAudio {
@@ -73,10 +78,85 @@ object LocalAudio {
         return AudioNode(file.name?.ifBlank { null } ?: "文件夹", files, children)
     }
 
+    /**
+     * 递归遍历 SAF 目录树，对每个文件调用 [visit]（文件、相对根目录的路径前缀）。
+     * 遍历期间响应协程取消；无名称的条目被跳过。
+     */
+    private suspend fun walkFiles(root: DocumentFile, visit: (file: DocumentFile, name: String, prefix: String) -> Unit) {
+        val cancellation = currentCoroutineContext()
+        fun walk(dir: DocumentFile, prefix: String) {
+            for (child in dir.listFiles()) {
+                cancellation.ensureActive()
+                val name = child.name ?: continue
+                if (child.isDirectory) walk(child, "$prefix$name/")
+                else if (child.isFile) visit(child, name, prefix)
+            }
+        }
+        walk(root, "")
+    }
+
+    /**
+     * 在 IO 线程递归扫描用户选择的外部文件夹，返回（文件夹名，按相对路径排序的字幕文件）。
+     * 无法打开该目录时返回空名称与空列表。
+     */
+    suspend fun scanSubtitleTree(context: Context, treeUri: Uri): Pair<String, List<SubtitleCandidateEntry>> =
+        withContext(Dispatchers.IO) {
+            val root = DocumentFile.fromTreeUri(context, treeUri) ?: return@withContext "" to emptyList()
+            val result = mutableListOf<SubtitleCandidateEntry>()
+            walkFiles(root) { file, name, prefix ->
+                if (isSubtitleFile(name)) {
+                    result += SubtitleCandidateEntry(
+                        name = name,
+                        uri = file.uri.toString(),
+                        relativePath = "$prefix$name",
+                    )
+                }
+            }
+            root.name.orEmpty() to result.sortedBy { it.relativePath.lowercase() }
+        }
+
     fun hasStoredCopy(uri: String?): Boolean {
         if (uri.isNullOrBlank()) return false
-        if (uri.startsWith("content:", ignoreCase = true) || uri.startsWith("file:", ignoreCase = true)) return true
-        return uri.startsWith("/") && File(uri).isFile
+        if (uri.startsWith("content:", ignoreCase = true)) return true
+        if (uri.startsWith("file:", ignoreCase = true)) {
+            val file = Uri.parse(uri).path?.let(::File) ?: return false
+            return file.isFile && file.length() > 0L
+        }
+        return uri.startsWith("/") && File(uri).let { it.isFile && it.length() > 0L }
+    }
+
+    fun hasStoredCopy(context: Context, uri: String?): Boolean {
+        if (uri.isNullOrBlank()) return false
+        if (uri.startsWith("content:", ignoreCase = true)) {
+            return contentUriReadable(context, Uri.parse(uri))
+        }
+        return hasStoredCopy(uri)
+    }
+
+    fun readDurationMs(path: String): Long? = probeAudio(path)?.durationMs
+
+    fun readDurationMs(context: Context, uri: Uri): Long? = probe {
+        it.setDataSource(context, uri)
+    }?.durationMs
+
+    /** 一次探测同时读取是否有音轨与时长；失败返回 null。 */
+    fun probeAudio(path: String): AudioProbe? = probe { it.setDataSource(path) }
+
+    private inline fun probe(setUp: (MediaMetadataRetriever) -> Unit): AudioProbe? {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            setUp(retriever)
+            AudioProbe(
+                hasAudio = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO) == "yes",
+                durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                    ?.toLongOrNull()
+                    ?.takeIf { it >= 0L },
+            )
+        } catch (_: RuntimeException) {
+            null
+        } finally {
+            runCatching { retriever.release() }
+        }
     }
 
     fun isAudio(name: String?): Boolean {
@@ -84,6 +164,8 @@ object LocalAudio {
         return extensions.any { lower.endsWith(".$it") }
     }
 }
+
+data class AudioProbe(val hasAudio: Boolean, val durationMs: Long?)
 
 data class AudioNode(
     val name: String,

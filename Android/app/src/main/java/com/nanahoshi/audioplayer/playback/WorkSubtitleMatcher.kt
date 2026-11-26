@@ -163,28 +163,13 @@ object WorkSubtitleMatcher {
         .thenByDescending { it.pathOverlap }
 }
 
-internal fun nearestSubtitleWorkRoot(folderId: Long?, folders: Map<Long, FolderEntity>): FolderEntity? {
-    val visited = mutableSetOf<Long>()
-    var id = folderId
-    while (id != null && visited.add(id)) {
-        val folder = folders[id] ?: return null
-        if (!folder.asmrSourceId.isNullOrBlank() || folder.biliBvid != null) return folder
-        id = folder.parentId
+internal fun nearestSubtitleWorkRoot(folderId: Long?, folders: Map<Long, FolderEntity>): FolderEntity? =
+    com.nanahoshi.audioplayer.data.FolderTree.nearestRoot(folderId, folders) {
+        !it.asmrSourceId.isNullOrBlank() || it.biliBvid != null
     }
-    return null
-}
 
-private fun relativeFolderPath(id: Long?, rootId: Long?, folders: Map<Long, FolderEntity>): List<String> {
-    val path = mutableListOf<String>()
-    val visited = mutableSetOf<Long>()
-    var current = id
-    while (current != null && current != rootId && visited.add(current)) {
-        val folder = folders[current] ?: break
-        path += folder.name
-        current = folder.parentId
-    }
-    return path.asReversed()
-}
+private fun relativeFolderPath(id: Long?, rootId: Long?, folders: Map<Long, FolderEntity>): List<String> =
+    com.nanahoshi.audioplayer.data.FolderTree.relativePath(id, rootId, folders)
 
 private fun pathOverlap(track: List<String>, subtitle: List<String>): Int {
     val trackParts = track.map(::normalizedSeparators)

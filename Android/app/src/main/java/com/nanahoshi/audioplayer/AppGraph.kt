@@ -69,25 +69,45 @@ class AppGraph(app: Application) {
         messages.value = appContext.resolveUserError(error, fallback)
     }
 
+    internal fun launchGuarded(
+        scope: CoroutineScope,
+        @StringRes fallback: Int,
+        onFinally: () -> Unit = {},
+        block: suspend () -> Unit,
+    ) = scope.launch {
+        try {
+            block()
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            showError(error, fallback)
+        } finally {
+            onFinally()
+        }
+    }
+
     /** 迁移期保留原字符串，不改变现有行为。 */
     fun showRaw(text: String?) {
         messages.value = text
     }
     val remotePreview = MutableStateFlow<RemotePreview?>(null)
+    /** 进程级共享 HTTP 根客户端；JA 使用独立连接池，见 [HttpRoots]。 */
+    val httpRoot: OkHttpClient = com.nanahoshi.audioplayer.data.HttpRoots.shared
     val db = AppDatabase.create(app)
     val taskProgress = com.nanahoshi.audioplayer.data.TaskProgressCenter(db)
     val credentials = CredentialStore(app)
-    val bilibili = BilibiliClient(credentials)
+    val bilibili = BilibiliClient(credentials, httpRoot)
     val youtube = YouTubeClient(
         { credentials.youtubeCookie() }, WebViewYouTubeSolver(app),
+        mediaHttp = httpRoot,
         diagnostics = { event ->
             android.util.Log.w("YouTubeTransfer", "stage=${event.stage} error=${event.errorTypes} http=${event.responseCode} bytes=${event.bytesRead}/${event.bytesTotal} elapsedMs=${event.elapsedMs}")
         },
     )
-    val asmr = AsmrClient()
+    val asmr = AsmrClient(httpRoot)
     internal val jaRefreshRequests = com.nanahoshi.audioplayer.japaneseasmr.JaRefreshRequests()
     val japaneseAsmr = com.nanahoshi.audioplayer.japaneseasmr.JapaneseAsmrClient()
-    val dlsite = DlsiteClient(credentials)
+    val dlsite = DlsiteClient(credentials, httpRoot)
     val librarySort = LibraryPreferences(app)
     val appearance = AppearancePreferences(app)
     val cache = CacheStore(app) { app.imageLoader }
@@ -123,7 +143,7 @@ class AppGraph(app: Application) {
     }
     val storedCatalog = StoredCatalog(app, db, subtitles, subtitleBindings)
     val downloads = DownloadCenter(app, db, asmr, dlsite, bilibili, youtube, library, subtitles,
-        progress = taskProgress, subtitleBindings = subtitleBindings) { messages.value = it }
+        progress = taskProgress, subtitleBindings = subtitleBindings, http = httpRoot) { messages.value = it }
     internal val subtitleTaskRequests = SubtitleTaskRequests { SubtitleTaskService.start(app, it) }
     private val subtitleRecovery = CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
         // 恢复失败不得使启动崩溃或让 recovery.join() 重抛；两段各自捕获，恢复失败不跳过中断登记。
@@ -151,13 +171,13 @@ class AppGraph(app: Application) {
             android.util.Log.w("SubtitleRecovery", "fail interrupted failed", error)
         }
     }
-    val translator = TranslateCenter(app, db, credentials, subtitles, subtitleTaskRequests, subtitleRecovery, progress = taskProgress) { messages.value = it }
+    val translator = TranslateCenter(app, db, credentials, subtitles, subtitleTaskRequests, subtitleRecovery, progress = taskProgress, http = httpRoot) { messages.value = it }
     internal val offlineWhisperModels = OfflineWhisperModel.entries.associateWith {
-        OfflineWhisperModelManager(app.filesDir, it)
+        OfflineWhisperModelManager(app.filesDir, it, httpRoot)
     }
     val whisper = WhisperCenter(
         app, db, credentials, downloads, translator, subtitles, offlineWhisperModels, subtitleTaskRequests, subtitleRecovery,
-        subtitleBindings = subtitleBindings,
+        subtitleBindings = subtitleBindings, http = httpRoot,
     )
     internal val currentSubtitles = CurrentSubtitles(
         CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
@@ -190,7 +210,8 @@ class AudioPlayerApplication : Application(), ImageLoaderFactory {
 
     override fun newImageLoader(): ImageLoader {
         val limit = if (::graph.isInitialized) graph.cache.limitBytes.value else DEFAULT_CACHE_LIMIT_BYTES
-        val client = OkHttpClient.Builder().addInterceptor { chain ->
+        val root = if (::graph.isInitialized) graph.httpRoot else com.nanahoshi.audioplayer.data.HttpRoots.shared
+        val client = root.newBuilder().addInterceptor { chain ->
             val request = chain.request()
             val host = request.url.host
             val updated = when {

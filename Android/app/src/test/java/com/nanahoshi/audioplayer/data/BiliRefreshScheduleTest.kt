@@ -23,4 +23,30 @@ class BiliRefreshScheduleTest {
         assertFalse(biliRefreshDueAt(checked, now - 9 * minute, now))
         assertTrue(biliRefreshDueAt(checked, now - 11 * minute, now))
     }
+
+    private val ticketNow = 1_700_000_000L
+
+    @Test fun expiredTicketIsNotFresh() {
+        assertFalse(ticketIsFresh(ticketNow - 1, ticketNow))
+    }
+
+    @Test fun zeroExpiryIsNotFresh() {
+        assertFalse(ticketIsFresh(0, ticketNow))
+    }
+
+    @Test fun exactlySixtySecondsIsNotFresh() {
+        assertFalse(ticketIsFresh(ticketNow + 60, ticketNow))
+    }
+
+    @Test fun sixtyOneSecondsIsFresh() {
+        assertTrue(ticketIsFresh(ticketNow + 61, ticketNow))
+    }
+
+    @Test fun negativeExpiryIsNotFresh() {
+        assertFalse(ticketIsFresh(-100, ticketNow))
+    }
+
+    @Test fun farFutureExpiryIsFresh() {
+        assertTrue(ticketIsFresh(ticketNow + 3600, ticketNow))
+    }
 }

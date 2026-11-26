@@ -53,28 +53,12 @@ class TaskProgressAndroidTest {
         val asr = original.whisper().insert(whisper())
         val translation = original.translations().insert(translation())
         original.close()
-        // 从当前完整 schema 删除本次新增列，构造真实的 v19 三表结构。
+        // 从当前完整 schema 逐级重建为真实的 v19 三表结构与旧表集合。
         SQLiteDatabase.openDatabase(app.getDatabasePath(name).path, null, SQLiteDatabase.OPEN_READWRITE).use { old ->
-            old.removeV24SchemaChanges()
-            for (table in listOf("downloads", "whisper_jobs", "translation_jobs")) old.execSQL("ALTER TABLE $table DROP COLUMN progressSummary")
-            old.execSQL("ALTER TABLE downloads DROP COLUMN jaEntryKey")
-            old.execSQL("ALTER TABLE downloads DROP COLUMN jaReplace")
-            old.execSQL("ALTER TABLE downloads DROP COLUMN jaForce")
-            old.execSQL("ALTER TABLE queue_items DROP COLUMN mediaPathHash")
-            old.execSQL("DROP TABLE japaneseasmr_download_entries")
-            old.execSQL("DROP TABLE japaneseasmr_download_packages")
-            old.execSQL("DROP TABLE japaneseasmr_download_works")
-            old.execSQL("ALTER TABLE queue_items DROP COLUMN mediaKind")
-            old.execSQL("DROP TABLE japaneseasmr_media")
-            old.execSQL("DROP TABLE japaneseasmr_posts")
-            old.execSQL("ALTER TABLE downloads DROP COLUMN dismissedAt")
-            old.execSQL("ALTER TABLE whisper_jobs DROP COLUMN createdAt")
-            old.execSQL("ALTER TABLE whisper_jobs DROP COLUMN dismissedAt")
-            old.execSQL("ALTER TABLE translation_jobs DROP COLUMN createdAt")
-            old.execSQL("ALTER TABLE translation_jobs DROP COLUMN dismissedAt")
+            old.downgradeTo19()
             old.version = 19
         }
-        val upgraded = Room.databaseBuilder(app, AppDatabase::class.java, name).addMigrations(AppDatabase.MIGRATION_19_20, AppDatabase.MIGRATION_20_21, AppDatabase.MIGRATION_21_22, AppDatabase.MIGRATION_22_23, AppDatabase.MIGRATION_23_24).build()
+        val upgraded = Room.databaseBuilder(app, AppDatabase::class.java, name).addMigrations(*AppDatabase.ALL_MIGRATIONS).build()
         val fresh = Room.inMemoryDatabaseBuilder(app, AppDatabase::class.java).build()
         try {
             assertNull(upgraded.downloads().get(audio)!!.progressSummary)

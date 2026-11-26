@@ -1,6 +1,5 @@
 package com.nanahoshi.audioplayer.ui.library
 
-import android.content.Context
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.clickable
@@ -23,14 +22,12 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
@@ -38,12 +35,12 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
+import com.nanahoshi.audioplayer.ui.components.ConfirmActionDialog
+import com.nanahoshi.audioplayer.ui.components.ModalSheetHeader
+import com.nanahoshi.audioplayer.ui.components.SegmentedTabBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -60,13 +57,12 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.documentfile.provider.DocumentFile
 import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.data.BatchExternalPair
 import com.nanahoshi.audioplayer.data.BindExternalResult
+import com.nanahoshi.audioplayer.data.LocalAudio
 import com.nanahoshi.audioplayer.data.TrackSource
 import com.nanahoshi.audioplayer.data.db.TrackEntity
-import com.nanahoshi.audioplayer.data.isSubtitleFile
 import com.nanahoshi.audioplayer.playback.BatchPairMode
 import com.nanahoshi.audioplayer.playback.SubtitleCandidateEntry
 import com.nanahoshi.audioplayer.playback.WorkSubtitleMatcher
@@ -75,8 +71,6 @@ import com.nanahoshi.audioplayer.ui.components.SectionHeader
 import com.nanahoshi.audioplayer.ui.components.SourceBadge
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -198,7 +192,7 @@ internal fun BatchSubtitleMatchSheet(
         busy = true
         scope.launch {
             try {
-                val (folderName, found) = withContext(Dispatchers.IO) { scanExternalSubtitleFolder(context, uri) }
+                val (folderName, found) = LocalAudio.scanSubtitleTree(context, uri)
                 if (found.isEmpty()) {
                     viewModel.showMessage(R.string.subtitle_batch_external_folder_empty)
                 } else {
@@ -225,41 +219,15 @@ internal fun BatchSubtitleMatchSheet(
                 .fillMaxWidth()
                 .navigationBarsPadding(),
         ) {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(start = 16.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        stringResource(R.string.subtitle_batch_title),
-                        style = MaterialTheme.typography.titleMedium,
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        stringResource(
-                            if (stepPreview) R.string.subtitle_batch_step_preview
-                            else R.string.subtitle_batch_step_sources,
-                        ),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                IconButton(
-                    onClick = onDismiss,
-                    enabled = !busy,
-                    modifier = Modifier.size(48.dp),
-                ) {
-                    Icon(Icons.Default.Close, contentDescription = stringResource(R.string.a11y_close))
-                }
-            }
-            HorizontalDivider()
+            ModalSheetHeader(
+                title = stringResource(R.string.subtitle_batch_title),
+                subtitle = stringResource(
+                    if (stepPreview) R.string.subtitle_batch_step_preview
+                    else R.string.subtitle_batch_step_sources,
+                ),
+                closeEnabled = !busy,
+                onDismiss = onDismiss,
+            )
 
             when {
                 currentSetup == null -> LoadingState(
@@ -456,40 +424,18 @@ internal fun BatchSubtitleMatchSheet(
                     val tracks = audioFolder?.tracks.orEmpty()
                     val matchedCount = tracks.count { assignedByTrack[it.id] != null }
                     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-                        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                            SegmentedButton(
-                                selected = pairMode == BatchPairMode.BY_NAME,
-                                enabled = !busy,
-                                onClick = {
-                                    pairMode = BatchPairMode.BY_NAME
-                                    applySuggestedPairs(BatchPairMode.BY_NAME)
-                                },
-                                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-                            ) {
-                                Text(
-                                    stringResource(R.string.subtitle_batch_mode_by_name),
-                                    maxLines = 1,
-                                    softWrap = false,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                            SegmentedButton(
-                                selected = pairMode == BatchPairMode.BY_ORDER,
-                                enabled = !busy,
-                                onClick = {
-                                    pairMode = BatchPairMode.BY_ORDER
-                                    applySuggestedPairs(BatchPairMode.BY_ORDER)
-                                },
-                                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-                            ) {
-                                Text(
-                                    stringResource(R.string.subtitle_batch_mode_by_order),
-                                    maxLines = 1,
-                                    softWrap = false,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                        }
+                        val byNameLabel = stringResource(R.string.subtitle_batch_mode_by_name)
+                        val byOrderLabel = stringResource(R.string.subtitle_batch_mode_by_order)
+                        SegmentedTabBar(
+                            options = listOf(BatchPairMode.BY_NAME, BatchPairMode.BY_ORDER),
+                            selected = pairMode,
+                            label = { mode -> if (mode == BatchPairMode.BY_NAME) byNameLabel else byOrderLabel },
+                            enabled = !busy,
+                            onSelect = { mode ->
+                                pairMode = mode
+                                applySuggestedPairs(mode)
+                            },
+                        )
                         Spacer(Modifier.height(6.dp))
                         Text(
                             stringResource(R.string.subtitle_batch_match_summary, matchedCount, tracks.size),
@@ -710,61 +656,30 @@ internal fun BatchSubtitleMatchSheet(
     }
 
     pendingExternalCopies?.let { pairs ->
-        AlertDialog(
-            onDismissRequest = { if (!busy) pendingExternalCopies = null },
-            title = { Text(stringResource(R.string.subtitle_batch_needs_copy_title)) },
-            text = { Text(stringResource(R.string.subtitle_batch_needs_copy_message, pairs.size)) },
-            confirmButton = {
-                TextButton(
-                    enabled = !busy,
-                    onClick = {
-                        pendingExternalCopies = null
-                        busy = true
-                        scope.launch {
-                            try {
-                                // 全部失败时保留配对结果，让用户可以重试。
-                                if (viewModel.commitBatchExternalCopies(pairs) > 0) onDismiss()
-                            } catch (cancelled: CancellationException) {
-                                throw cancelled
-                            } catch (_: Exception) {
-                                viewModel.showMessage(R.string.library_operation_failed)
-                            } finally {
-                                busy = false
-                            }
-                        }
-                    },
-                ) { Text(stringResource(R.string.subtitle_batch_import_and_bind)) }
+        ConfirmActionDialog(
+            title = stringResource(R.string.subtitle_batch_needs_copy_title),
+            message = stringResource(R.string.subtitle_batch_needs_copy_message, pairs.size),
+            confirmLabel = stringResource(R.string.subtitle_batch_import_and_bind),
+            destructive = false,
+            enabled = !busy,
+            onConfirm = {
+                pendingExternalCopies = null
+                busy = true
+                scope.launch {
+                    try {
+                        // 全部失败时保留配对结果，让用户可以重试。
+                        if (viewModel.commitBatchExternalCopies(pairs) > 0) onDismiss()
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        viewModel.showMessage(R.string.library_operation_failed)
+                    } finally {
+                        busy = false
+                    }
+                }
             },
-            dismissButton = {
-                TextButton(
-                    enabled = !busy,
-                    onClick = { pendingExternalCopies = null },
-                ) { Text(stringResource(R.string.common_cancel)) }
-            },
+            onDismiss = { pendingExternalCopies = null },
         )
     }
 }
 
-private suspend fun scanExternalSubtitleFolder(context: Context, treeUri: Uri): Pair<String, List<SubtitleCandidateEntry>> {
-    val root = DocumentFile.fromTreeUri(context, treeUri) ?: return "" to emptyList()
-    val folderName = root.name.orEmpty()
-    val result = mutableListOf<SubtitleCandidateEntry>()
-    val cancellation = currentCoroutineContext()
-    suspend fun walk(dir: DocumentFile, prefix: String) {
-        for (child in dir.listFiles()) {
-            cancellation.ensureActive()
-            val name = child.name ?: continue
-            if (child.isDirectory) {
-                walk(child, "$prefix$name/")
-            } else if (child.isFile && isSubtitleFile(name)) {
-                result += SubtitleCandidateEntry(
-                    name = name,
-                    uri = child.uri.toString(),
-                    relativePath = "$prefix$name",
-                )
-            }
-        }
-    }
-    walk(root, "")
-    return folderName to result.sortedBy { it.relativePath.lowercase() }
-}

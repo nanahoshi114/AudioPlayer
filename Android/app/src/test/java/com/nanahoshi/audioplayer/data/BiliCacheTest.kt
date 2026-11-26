@@ -23,7 +23,7 @@ class BiliCacheTest {
             assertFalse(com.nanahoshi.audioplayer.playback.LoadedSubtitles(
                 cues, false, false, language = biliSubtitleLanguage(cached),
             ).canTranslate)
-            deleteBiliSubtitleBeside(File(dir, "bilibili/$bvid/12.m4s"))
+            deleteBiliSubtitleBeside(dir, File(dir, "bilibili/$bvid/12.m4s"))
             assertNull(readBiliSubtitle(dir, bvid, 12))
             assertTrue(writeBiliSubtitle(dir, bvid, 12, document))
             assertEquals(document, readBiliSubtitle(dir, bvid, 12))
@@ -67,9 +67,32 @@ class BiliCacheTest {
             audio.writeText("audio")
             val subtitle = File(audio.parentFile, "12.json")
             subtitle.writeText("{}")
-            deleteBiliSubtitleBeside(audio)
+            deleteBiliSubtitleBeside(dir, audio)
             assertFalse(subtitle.exists())
             assertTrue(audio.exists())
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun deletingDlsiteOriginalFileUnderBilibiliDirectoryDoesNotDeleteSiblingJson() {
+        val dir = Files.createTempDirectory("bili-cache-scope").toFile()
+        try {
+            val discAudio = File(dir, "dlsite/RJ001/original/bilibili/disc/voice.wav").apply {
+                parentFile?.mkdirs()
+                writeText("audio")
+            }
+            val discJson = File(discAudio.parentFile, "voice.json").apply { writeText("{}") }
+            val spoofedAudio = File(dir, "dlsite/RJ001/original/bilibili/$bvid/12.m4s").apply {
+                parentFile?.mkdirs()
+                writeText("audio")
+            }
+            val spoofedJson = File(spoofedAudio.parentFile, "12.json").apply { writeText("{}") }
+            deleteBiliSubtitleBeside(dir, discAudio)
+            deleteBiliSubtitleBeside(dir, spoofedAudio)
+            assertTrue(discJson.exists())
+            assertTrue(spoofedJson.exists())
         } finally {
             dir.deleteRecursively()
         }

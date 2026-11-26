@@ -3,6 +3,7 @@ package com.nanahoshi.audioplayer.japaneseasmr
 import androidx.annotation.StringRes
 import com.nanahoshi.audioplayer.text.PersistedErrors
 import com.nanahoshi.audioplayer.R
+import com.nanahoshi.audioplayer.data.toHex
 import com.nanahoshi.audioplayer.data.withResponse
 import com.nanahoshi.audioplayer.japaneseasmr.JapaneseAsmrClient.Companion.isChallenge
 import com.nanahoshi.audioplayer.text.TextRef
@@ -34,12 +35,8 @@ internal const val JA_WORK_FILE_MISSING = PersistedErrors.JA_WORK_FILE_MISSING
 internal open class JaWorkException(
     override val userText: TextRef,
     val persistedError: String? = null,
-) : IOException(persistedError ?: userText.debugString()), UserFacingError {
-    constructor(message: String) : this(TextRef.Raw(message))
-}
-internal class JaWorkAddressExpired(text: TextRef, val sessionRequired: Boolean = false) : JaWorkException(text) {
-    constructor(message: String, sessionRequired: Boolean = false) : this(TextRef.Raw(message), sessionRequired)
-}
+) : IOException(persistedError ?: userText.debugString()), UserFacingError
+internal class JaWorkAddressExpired(text: TextRef, val sessionRequired: Boolean = false) : JaWorkException(text)
 internal class JaDownloadVerification(val entry: String) : IOException(PersistedErrors.JA_VERIFY), UserFacingError {
     override val userText = TextRef.Res(R.string.download_status_waiting_verification)
 }
@@ -133,6 +130,10 @@ private val redirectCodes = setOf(301, 302, 303, 307, 308)
 private val hashPattern = Regex("(?i)\\b[a-f0-9]{64}\\b")
 private val buzzDownloadPath = Regex("/(?:[A-Za-z0-9_-]+/download|d/[A-Za-z0-9_-]+)")
 private val reservedNames = Regex("(?i)(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\\..*)?")
+private val quotedDownloadUrl = Regex("""["'](https://(?:[a-zA-Z0-9.-]+\.)?(?:buzzheavier\.com|mega\.nz|mega\.co\.nz)/[^"'\s<>]+)["']""")
+private val downloadTokenPath = Regex("""/[A-Za-z0-9_-]+/download\?t=[^"'\s<>]+""")
+private val sha256Label = Regex("(?i)SHA[- ]?256\\s*:?\\s*([a-f0-9]{64})")
+private val quotedRelativeDownload = Regex("""["'](/[A-Za-z0-9_-]+/download\?t=[^"']+)["']""")
 
 internal fun isJaDownloadRedirect(address: String): Boolean =
     address.toHttpUrlOrNull()?.let { it.publicHttps() && (it.host in buzzHosts || it.host in megaHosts) } == true
@@ -204,7 +205,7 @@ private fun jaDownloadLinks(address: HttpUrl, html: String): List<Pair<String, S
             ?.trim()?.trim('"', '\'') ?: return@mapNotNull null
         address.resolve(target)?.toString()?.let { link -> link to "" }
     }
-    val quoted = Regex("""["'](https://(?:[a-zA-Z0-9.-]+\.)?(?:buzzheavier\.com|mega\.nz|mega\.co\.nz)/[^"'\s<>]+)["']""")
+    val quoted = quotedDownloadUrl
         .findAll(html).map { it.groupValues[1].replace("&amp;", "&") to "" }.toList()
     return (anchors + refresh + quoted).filter { isJaDownloadRedirect(it.first) }.distinctBy { it.first }
 }
@@ -227,7 +228,7 @@ private fun parseBuzzFilePage(url: HttpUrl, html: String, label: String, require
         listOf("href", "data-clipboard-text").mapNotNull { attribute ->
             element.attr(attribute).takeIf(String::isNotBlank)?.let(url::resolve)
         }
-    } + Regex("""/[A-Za-z0-9_-]+/download\?t=[^"'\s<>]+""").findAll(html)
+    } + downloadTokenPath.findAll(html)
         .mapNotNull { url.resolve(it.value.replace("&amp;", "&")) }.toList()
     val download = button ?: candidates.filter(::isDownload)
         .maxByOrNull { if (it.queryParameter("t") != null) 1 else 0 } ?: if (requireDownload) return null else url
@@ -241,7 +242,7 @@ private fun parseBuzzFilePage(url: HttpUrl, html: String, label: String, require
             it.text().isNotBlank() && !it.text().equals("Buzzheavier", ignoreCase = true)
         }?.text()
         ?: return null
-    val hash = Regex("(?i)SHA[- ]?256\\s*:?\\s*([a-f0-9]{64})").find(page.text())?.groupValues?.get(1)?.lowercase()
+    val hash = sha256Label.find(page.text())?.groupValues?.get(1)?.lowercase()
         ?: page.select("code").mapNotNull { hashPattern.matchEntire(it.text().trim())?.value }.singleOrNull()?.lowercase()
     return BuzzFilePage(title, download, hash, page.selectFirst("[data-size]")?.attr("data-size")?.toLongOrNull(),
         buttonPage = url.takeIf { button != null })
@@ -267,7 +268,7 @@ internal fun buzzCopyDownloadLink(url: String, html: String): String? {
     }
     val anchors = page.select("a[href]").filter { it.text().contains("copy", ignoreCase = true) }
         .mapNotNull { value(it.attr("href")) }
-    val quoted = Regex("""["'](/[A-Za-z0-9_-]+/download\?t=[^"']+)["']""")
+    val quoted = quotedRelativeDownload
         .find(html)?.groupValues?.get(1)?.let(::value)
     return (clipboard + anchors + listOfNotNull(quoted)).sortedByDescending { it.queryParameter("t") != null }
         .firstOrNull()?.toString()
@@ -465,7 +466,7 @@ internal class JaWorkClient(
             is JaFileTransfer.Mega -> transfer.crypto.checksum
         }
         val reuseToken = version?.let { "${file.size}:$it" }
-        val token = File(destination.parentFile, destination.name + ".version")
+        val token = File(destination.parentFile, ".version")
         if (reuseToken == null || !token.isFile || token.readText() != reuseToken) destination.delete()
         if (reuseToken != null) token.writeText(reuseToken)
         if (transfer is JaFileTransfer.Mega) {
@@ -480,17 +481,22 @@ internal class JaWorkClient(
             destination.delete()
             throw JaWorkException(TextRef.Res(R.string.ja_error_file_integrity))
         }
+        var verified = false
         try {
             for (attempt in 0..2) {
                 context.ensureActive()
                 if (destination.isFile && destination.length() == file.size && verify(file, destination)) {
+                    verified = true
                     report(destination.length())
                     return
                 }
                 if (reuseToken == null || file.size == null || destination.length() >= file.size) destination.delete()
                 try {
                     transferBuzz(file, transfer as JaFileTransfer.Buzz, destination, report)
-                    if (verify(file, destination)) return
+                    if (verify(file, destination)) {
+                        verified = true
+                        return
+                    }
                     destination.delete()
                     throw JaWorkException(TextRef.Res(R.string.ja_error_file_integrity))
                 } catch (cancelled: CancellationException) {
@@ -507,7 +513,7 @@ internal class JaWorkClient(
                 }
             }
         } finally {
-            if (reuseToken == null && file.size != destination.length()) destination.delete()
+            if (!verified && reuseToken == null && file.size != destination.length()) destination.delete()
         }
     }
 
@@ -738,9 +744,9 @@ internal class JaWorkClient(
     }
 
     private fun contentRange(response: Response): Triple<Long, Long, Long>? {
-        val match = Regex("bytes (\\d+)-(\\d+)/(\\d+)").matchEntire(response.header("Content-Range").orEmpty()) ?: return null
-        val (start, end, total) = match.destructured
-        return Triple(start.toLongOrNull() ?: return null, end.toLongOrNull() ?: return null, total.toLongOrNull() ?: return null)
+        val range = com.nanahoshi.audioplayer.data.HttpByteRange.parse(response.header("Content-Range"))
+            ?: return null
+        return Triple(range.start, range.end, range.total)
     }
 
     private fun unavailable(): Nothing = throw JaWorkException(TextRef.Res(R.string.ja_error_download_unavailable))
@@ -758,5 +764,5 @@ internal suspend fun jaFileSha256(file: File): String {
             digest.update(buffer, 0, count)
         }
     }
-    return digest.digest().joinToString("") { "%02x".format(it) }
+    return digest.digest().toHex()
 }

@@ -49,7 +49,9 @@ class SubtitleTaskSortTest {
         }
         assertFalse(isClearableCompletedWhisper(done, setOf(3)))
         assertFalse(isClearableCompletedWhisper(done.copy(dismissedAt = 10), emptySet()))
-        assertFalse(isClearableCompletedWhisper(done.copy(status = DownloadStatus.FAILED), emptySet()))
+        for (status in listOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.FAILED)) {
+            assertFalse(status.name, isClearableCompletedWhisper(done.copy(status = status), emptySet()))
+        }
     }
 
     @Test fun clearsOnlySuccessfulTranslationRowsWithoutPublication() {

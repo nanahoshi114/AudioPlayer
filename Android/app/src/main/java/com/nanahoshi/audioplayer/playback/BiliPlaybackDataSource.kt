@@ -22,8 +22,10 @@ import com.nanahoshi.audioplayer.japaneseasmr.rewriteJaPlaylist
 import android.content.Context
 import android.net.Uri
 import androidx.media3.common.C
+import androidx.media3.common.PlaybackException
 import androidx.media3.datasource.BaseDataSource
 import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSourceException
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.HttpDataSource
@@ -280,6 +282,7 @@ class BiliPlaybackDataSource(
             current = fallback
             opened
         } catch (error: Exception) {
+            runCatching { fallback.close() }
             if (local.startsWith("/")) throw error
             null
         }
@@ -422,9 +425,10 @@ class BiliPlaybackDataSource(
         private val db: AppDatabase,
         private val youtube: YouTubeClient,
         private val japaneseAsmr: JapaneseAsmrClient = JapaneseAsmrClient(),
+        httpRoot: OkHttpClient = com.nanahoshi.audioplayer.data.HttpRoots.shared,
     ) : DataSource.Factory {
         private val appContext = context.applicationContext
-        private val client = OkHttpClient.Builder()
+        private val client = httpRoot.newBuilder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .followRedirects(true)
@@ -506,6 +510,23 @@ private class BrowserHttpDataSource(
         }
         val call = client.newCall(builder.build()).execute()
         response = call
+        if (call.code == 416) {
+            val totalSize = parseUnsatisfiedContentRangeTotal(call.header("Content-Range"))
+            if (totalSize != null && position == totalSize) {
+                call.close()
+                response = null
+                stream = ByteArray(0).inputStream()
+                bytesRemaining = 0L
+                openedUri = Uri.parse(url)
+                transferStarted(dataSpec)
+                return 0L
+            }
+            if (totalSize != null && position > totalSize) {
+                call.close()
+                response = null
+                throw DataSourceException(PlaybackException.ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE)
+            }
+        }
         if (call.code != 200 && call.code != 206) {
             val body = call.peekBody(4096).bytes()
             if (preserveUrl && call.isChallenge(body.toString(Charsets.UTF_8))) {
@@ -591,3 +612,6 @@ private class BrowserHttpDataSource(
         }
     }
 }
+
+internal fun parseUnsatisfiedContentRangeTotal(header: String?): Long? =
+    com.nanahoshi.audioplayer.data.HttpByteRange.unsatisfiedTotal(header)

@@ -71,7 +71,7 @@ internal enum class OfflineWhisperModel(
         ModelDownloadSource.HuggingFace -> installedBytes
     }
 
-    private fun toMiB(bytes: Long) = (bytes + 512 * 1024) / (1024 * 1024)
+    private fun toMiB(bytes: Long) = ByteSizeFormatter.wholeMiB(bytes)
 
     companion object {
         fun fromId(id: String?) = entries.firstOrNull { it.id == id }
@@ -88,7 +88,7 @@ internal sealed interface OfflineWhisperModelState {
 internal class OfflineWhisperModelManager(
     filesDir: File,
     val model: OfflineWhisperModel,
-    private val http: OkHttpClient = OkHttpClient.Builder()
+    private val http: OkHttpClient = HttpRoots.shared.newBuilder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .followSslRedirects(false)
@@ -306,8 +306,7 @@ internal class OfflineWhisperModelManager(
 
     private fun invalidFiles(): Nothing = throw WhisperException(TextRef.Res(R.string.settings_model_error_invalid))
 
-    private fun MessageDigest.matches(expected: String) =
-        digest().joinToString("") { "%02x".format(it) } == expected
+    private fun MessageDigest.matches(expected: String) = digest().toHex() == expected
 
     private class CountingInputStream(
         private val source: InputStream,

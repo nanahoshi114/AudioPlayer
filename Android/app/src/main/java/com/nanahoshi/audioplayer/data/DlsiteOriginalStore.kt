@@ -4,7 +4,6 @@ import com.nanahoshi.audioplayer.text.TextRef
 import com.nanahoshi.audioplayer.text.UserFacingException
 import com.nanahoshi.audioplayer.R
 import android.content.Context
-import android.media.MediaMetadataRetriever
 import androidx.room.withTransaction
 import com.nanahoshi.audioplayer.asmr.WorkFacts
 import com.nanahoshi.audioplayer.data.db.AppDatabase
@@ -33,6 +32,13 @@ object DlsiteOriginalKind {
     const val OTHER = "OTHER"
 }
 
+internal fun isOriginalWorkIntact(entries: List<DlsiteOriginalEntryEntity>): Boolean =
+    entries.isNotEmpty() && entries.all { entry ->
+        val path = File(entry.localPath)
+        if (entry.kind == DlsiteOriginalKind.FOLDER) path.isDirectory
+        else path.isFile && (entry.size < 0L || path.length() == entry.size)
+    }
+
 data class DlsiteOriginalImportResult(
     val workno: String,
     val rootFolderId: Long,
@@ -56,6 +62,7 @@ class DlsiteOriginalStore(
         workno: String,
         directory: File,
         generation: String,
+        expectedRootId: Long? = null,
         beforeCommit: suspend () -> Unit = {},
         onPublish: suspend () -> Unit = {},
         onCommitted: () -> Unit = {},
@@ -72,6 +79,9 @@ class DlsiteOriginalStore(
         }
         val originalLeaves = disk.filter { it.kind != DlsiteOriginalKind.FOLDER }.map { it.path }
         val previousRoot = library.folderBySource(code)
+        if (expectedRootId != null && (previousRoot?.id != expectedRootId || db.dlsiteOriginals().work(code)?.generation != generation)) {
+            return@withContext DlsiteOriginalImportResult(code, expectedRootId, 0, 0)
+        }
         val shown = if (previousRoot == null) optional { dlsite.showcase(code) } else null
         val facts = WorkFacts.fromJson(previousRoot?.workMeta) ?: shown?.facts() ?: WorkFacts(
             title = previousRoot?.name ?: code,
@@ -97,10 +107,14 @@ class DlsiteOriginalStore(
             }
         originalContext.ensureActive()
         withContext(NonCancellable) {
-            db.withTransaction {
+            val result = db.withTransaction {
                 beforeCommit()
                 val now = System.currentTimeMillis()
-                val root = library.folderBySource(code) ?: FolderEntity(
+                val existingRoot = library.folderBySource(code)
+                if (expectedRootId != null && (existingRoot?.id != expectedRootId || db.dlsiteOriginals().work(code)?.generation != generation)) {
+                    return@withTransaction null
+                }
+                val root = existingRoot ?: FolderEntity(
                     parentId = null,
                     name = sanitizeEntryName("$code ${facts.title}"),
                     position = db.folders().maxPosition(null) + 1,
@@ -121,9 +135,10 @@ class DlsiteOriginalStore(
                 val folders = db.folders().all()
                 val byFolderId = folders.associateBy { it.id }
                 val folderIds = originalFolderIds(folders, root.id)
-                val oldTracks = db.tracks().inFolders(folderIds.toList()).filter { it.source == TrackSource.DLSITE }
-                val oldFiles = folderIds.flatMap { id -> db.files().listIn(id) }
-                    .filter { libraryFileSource(it.fileHash) == TrackSource.DLSITE }
+                val jaFileIds = db.jaDownloads().fileIds().toSet()
+                val oldTracks = folderIds.chunked(500).flatMap { db.tracks().inFolders(it) }.filter { it.source == TrackSource.DLSITE }
+                val oldFiles = folderIds.chunked(500).flatMap { db.files().inFolders(it) }
+                    .filter { resolveLibraryFileSource(it, jaFileIds) == TrackSource.DLSITE }
                 val trackPaths = oldTracks.mapNotNull { track ->
                     relativeLibraryPath(track.folderId, track.title, root.id, byFolderId)?.let { it to track }
                 }
@@ -182,9 +197,17 @@ class DlsiteOriginalStore(
                     }
                     val remote = playPaths[item.path]?.let { playByPath[it] }?.node
                     if (item.kind == DlsiteOriginalKind.AUDIO) {
-                        val previousTrack = previous?.trackId?.let { db.tracks().getById(it) }
-                            ?.takeIf { it.source == TrackSource.DLSITE && it.id !in usedTrackIds }
                         val playKey = remote?.audio?.fileKey?.takeIf { it.isNotBlank() }
+                        val expectedPlayKey = playKey ?: previous?.playFileKey
+                        val previousTrack = previous?.trackId?.let { db.tracks().getById(it) }
+                            ?.takeIf {
+                                it.source == TrackSource.DLSITE &&
+                                    it.id !in usedTrackIds &&
+                                    it.folderId == parentId &&
+                                    it.title == name &&
+                                    (rawFileKey(it.fileHash) == expectedPlayKey ||
+                                        (it.fileHash == null && previous.playFileKey == null))
+                            }
                         val byKey = playKey?.let { tracksByPlay[it]?.singleOrNull() }?.takeIf { it.id !in usedTrackIds }
                         val byPath = matchedPaths[item.path]?.let { tracksByPath[it]?.singleOrNull() }
                             ?.takeIf { it.id !in usedTrackIds }
@@ -221,7 +244,7 @@ class DlsiteOriginalStore(
                             ?: rawFileKey(track.fileHash) ?: previous?.playFileKey)
                     } else {
                         val previousFile = previous?.fileId?.let { db.files().get(it) }
-                            ?.takeIf { libraryFileSource(it.fileHash) == TrackSource.DLSITE && it.id !in usedFileIds }
+                            ?.takeIf { resolveLibraryFileSource(it, jaFileIds) == TrackSource.DLSITE && it.id !in usedFileIds }
                         val byPath = matchedPaths[item.path]?.let { filesByPath[it]?.singleOrNull() }
                             ?.takeIf { it.id !in usedFileIds }
                         val old = previousFile ?: byPath
@@ -248,7 +271,13 @@ class DlsiteOriginalStore(
                 beforeCommit()
                 onPublish()
                 DlsiteOriginalImportResult(code, root.id, usedTrackIds.size, linked, skipped)
-            }.also { onCommitted() }
+            }
+            if (result != null) {
+                onCommitted()
+                result
+            } else {
+                DlsiteOriginalImportResult(code, expectedRootId ?: 0L, 0, 0)
+            }
         }
     }
 
@@ -289,31 +318,13 @@ private fun scanOriginalDirectory(root: File): List<OriginalDiskEntry> = root.wa
 }.sortedWith(compareBy<OriginalDiskEntry> { it.path.count { char -> char == '/' } }
     .thenBy { if (it.kind == DlsiteOriginalKind.FOLDER) 0 else 1 }.thenBy { it.path }).toList()
 
-private fun audioDuration(file: File): Long {
-    val retriever = MediaMetadataRetriever()
-    return try {
-        retriever.setDataSource(file.absolutePath)
-        retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()?.coerceAtLeast(0) ?: 0
-    } catch (_: Exception) {
-        0
-    } finally {
-        runCatching { retriever.release() }
-    }
-}
+private fun audioDuration(file: File): Long =
+    LocalAudio.readDurationMs(file.absolutePath)?.coerceAtLeast(0L) ?: 0L
 
 private data class OriginalPlayPath(val path: String, val node: PlayEntry)
 
-private fun originalFolderIds(folders: List<FolderEntity>, rootId: Long): Set<Long> {
-    val children = folders.groupBy { it.parentId }
-    val found = mutableSetOf<Long>()
-    val pending = ArrayDeque<Long>()
-    pending.add(rootId)
-    while (pending.isNotEmpty()) {
-        val id = pending.removeFirst()
-        if (found.add(id)) children[id].orEmpty().forEach { pending.add(it.id) }
-    }
-    return found
-}
+private fun originalFolderIds(folders: List<FolderEntity>, rootId: Long): Set<Long> =
+    FolderTree.descendantIds(rootId, folders)
 
 private fun flattenOriginalPlay(nodes: List<PlayEntry>): List<OriginalPlayPath> = buildList {
     fun addNodes(level: List<PlayEntry>, prefix: String) {

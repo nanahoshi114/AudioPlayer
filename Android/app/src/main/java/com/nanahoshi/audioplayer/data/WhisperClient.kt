@@ -9,8 +9,8 @@ import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.Response
-import org.json.JSONObject
 import kotlinx.coroutines.CancellationException
+import kotlinx.serialization.json.JsonObject
 import java.io.File
 import java.io.IOException
 import com.nanahoshi.audioplayer.R
@@ -30,8 +30,9 @@ data class WhisperCue(val startMs: Long, val endMs: Long, val text: String)
 class WhisperClient(
     private val credentials: CredentialStore,
     private val calls: InflightCalls,
+    root: OkHttpClient = HttpRoots.shared,
 ) {
-    private val http = OkHttpClient.Builder()
+    private val http = root.newBuilder()
         .eventListenerFactory(ProgressNetworkEvents.factory)
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(2, TimeUnit.MINUTES)
@@ -62,6 +63,7 @@ class WhisperClient(
             Request.Builder().url(endpoint(base, credentialModel, "audio", "transcriptions")).post(body),
             ticket,
             credentialModel,
+            base,
         ) { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) throw WhisperException(readError(text, TextRef.Res(R.string.whisper_error_failed)))
@@ -75,10 +77,17 @@ class WhisperClient(
         builder: Request.Builder,
         ticket: InflightCalls.Ticket,
         credentialModel: String? = null,
+        expectedBase: String? = null,
         read: (Response) -> T,
     ): T {
-        val token = credentials.whisperToken(credentialModel)
-            ?: throw WhisperException(TextRef.Res(R.string.whisper_error_missing_key))
+        val (configuredBase, token) = credentials.whisperCredentials(credentialModel)
+        val requestedBase = expectedBase?.let { canonicalWhisperEndpoint(it, credentialModel) }
+        if (requestedBase != null && requestedBase != configuredBase) {
+            throw WhisperException(TextRef.Res(R.string.whisper_error_endpoint_changed))
+        }
+        if (token.isNullOrBlank()) {
+            throw WhisperException(TextRef.Res(R.string.whisper_error_missing_key))
+        }
         val request = builder.header("Authorization", "Bearer $token").taskProgress(ticket.progress, false).build()
         val call = client.newCall(request)
         if (!calls.begin(ticket, call)) throw CancellationException()
@@ -109,85 +118,64 @@ class WhisperClient(
         ticket: InflightCalls.Ticket,
         credentialModel: String?,
     ): List<String> = try {
-        execute(onlineHttp, Request.Builder().url(endpoint(base, credentialModel, "models")).get(), ticket, credentialModel) { response ->
+        execute(onlineHttp, Request.Builder().url(endpoint(base, credentialModel, "models")).get(), ticket, credentialModel, base) { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) return@execute emptyList()
-            val array = try {
-                JSONObject(text).optJSONArray("data")
-            } catch (_: Exception) {
-                null
-            } ?: return@execute emptyList()
-            buildList {
-                for (index in 0 until array.length()) {
-                    val id = array.optJSONObject(index)?.optString("id").orEmpty()
-                    if (id.isNotBlank()) add(id)
-                }
-            }
+            val array = parseJsonObjectOrNull(text)?.jsonArray("data") ?: return@execute emptyList()
+            array.jsonObjects().mapNotNull { it.jsonString("id")?.takeIf(String::isNotBlank) }
         }
     } catch (error: WhisperException) {
         when (error.userText) {
             TextRef.Res(R.string.whisper_error_connection),
             TextRef.Res(R.string.whisper_error_missing_key),
             TextRef.Res(R.string.whisper_error_invalid_base),
-            TextRef.Res(R.string.whisper_error_missing_base) -> throw error
+            TextRef.Res(R.string.whisper_error_missing_base),
+            TextRef.Res(R.string.whisper_error_endpoint_changed) -> throw error
             else -> emptyList()
         }
     }
 
-    private fun cuesFromQwen3(json: JSONObject, durationMs: Long): List<WhisperCue> {
+    private fun cuesFromQwen3(json: JsonObject, durationMs: Long): List<WhisperCue> {
         val segments = parseOnlineSegments(json)
         if (segments.isNotEmpty()) return segments
         val words = parseWordPieces(json)
         if (words.isNotEmpty()) return groupTimedPieces(words)
-        return cueFromWholeTranscript(json.optString("text"), durationMs)
+        return cueFromWholeTranscript(json.jsonStringOrEmpty("text"), durationMs)
     }
 
-    private fun parseWordPieces(json: JSONObject): List<WhisperCue> {
-        val array = json.optJSONArray("words") ?: return emptyList()
-        return buildList {
-            for (index in 0 until array.length()) {
-                val item = array.optJSONObject(index) ?: continue
-                val line = item.optString("word").ifBlank { item.optString("text") }
-                if (line.isEmpty()) continue
-                val start = (item.optDouble("start", -1.0) * 1000).toLong()
-                var end = (item.optDouble("end", -1.0) * 1000).toLong()
-                if (start < 0L || end < 0L) continue
-                if (end <= start) end = start + 1
-                add(WhisperCue(start, end, line))
-            }
+    private fun parseWordPieces(json: JsonObject): List<WhisperCue> {
+        return json.jsonArray("words").jsonObjects().mapNotNull { item ->
+            val line = item.jsonStringOrEmpty("word").ifBlank { item.jsonStringOrEmpty("text") }
+            if (line.isEmpty()) return@mapNotNull null
+            val start = ((item.jsonDouble("start") ?: -1.0) * 1000).toLong()
+            var end = ((item.jsonDouble("end") ?: -1.0) * 1000).toLong()
+            if (start < 0L || end < 0L) return@mapNotNull null
+            if (end <= start) end = start + 1
+            WhisperCue(start, end, line)
         }
     }
 
-    private fun parseOnlineSegments(json: JSONObject): List<WhisperCue> {
-        val array = json.optJSONArray("segments") ?: return emptyList()
-        return buildList {
-            for (index in 0 until array.length()) {
-                val item = array.optJSONObject(index) ?: continue
-                val line = item.optString("text").trim()
-                if (line.isEmpty()) continue
-                val start = (item.optDouble("start", -1.0) * 1000).toLong()
-                var end = (item.optDouble("end", -1.0) * 1000).toLong()
-                if (start < 0L || end < 0L) continue
-                if (end <= start) end = start + 1
-                add(WhisperCue(start, end, line))
-            }
+    private fun parseOnlineSegments(json: JsonObject): List<WhisperCue> {
+        return json.jsonArray("segments").jsonObjects().mapNotNull { item ->
+            val line = item.jsonStringOrEmpty("text").trim()
+            if (line.isEmpty()) return@mapNotNull null
+            val start = ((item.jsonDouble("start") ?: -1.0) * 1000).toLong()
+            var end = ((item.jsonDouble("end") ?: -1.0) * 1000).toLong()
+            if (start < 0L || end < 0L) return@mapNotNull null
+            if (end <= start) end = start + 1
+            WhisperCue(start, end, line)
         }.sortedBy { it.startMs }
     }
 
-    private fun parseObject(text: String): JSONObject = try {
-        JSONObject(text)
-    } catch (_: Exception) {
-        throw WhisperException(TextRef.Res(R.string.whisper_error_failed))
-    }
+    private fun parseObject(text: String): JsonObject =
+        parseJsonObjectOrNull(text) ?: throw WhisperException(TextRef.Res(R.string.whisper_error_failed))
 
-    private fun readError(text: String, fallback: TextRef): TextRef = try {
-        when (val error = JSONObject(text).opt("error")) {
-            is String -> error.takeIf { it.isNotBlank() }?.let(TextRef::Raw) ?: fallback
-            is JSONObject -> error.optString("message").takeIf { it.isNotBlank() }?.let(TextRef::Raw) ?: fallback
-            else -> fallback
+    private fun readError(text: String, fallback: TextRef): TextRef {
+        val root = parseJsonObjectOrNull(text) ?: return fallback
+        return when (val error = root["error"]) {
+            is JsonObject -> error.jsonString("message")?.takeIf { it.isNotBlank() }?.let(TextRef::Raw) ?: fallback
+            else -> error.jsonTextOrNull()?.takeIf { it.isNotBlank() }?.let(TextRef::Raw) ?: fallback
         }
-    } catch (_: Exception) {
-        fallback
     }
 
     private fun uploadName(file: File): String {
@@ -204,14 +192,8 @@ class WhisperClient(
     }
 }
 
-internal fun audioContainerFormat(fileName: String, header: ByteArray): String {
-    val named = audioUploadName(fileName, header)
-    val ext = named.substringAfterLast('.', "").lowercase()
-    return if (ext in AUDIO_EXTENSIONS) ext else "mp3"
-}
-
 internal fun audioUploadName(fileName: String, header: ByteArray): String {
-    val cleaned = fileName.replace(Regex("""[\r\n"]"""), "_").ifBlank { "audio" }
+    val cleaned = fileName.replace(UNSAFE_UPLOAD_NAME_CHARS, "_").ifBlank { "audio" }
     val current = cleaned.substringAfterLast('.', "").lowercase()
     if ('.' in cleaned && current in AUDIO_EXTENSIONS) {
         val base = cleaned.substringBeforeLast('.')
@@ -243,4 +225,5 @@ private fun startsWith(header: ByteArray, text: String): Boolean {
 }
 
 private val AUDIO_EXTENSIONS = setOf("mp3", "m4a", "aac", "wav", "ogg", "flac")
+private val UNSAFE_UPLOAD_NAME_CHARS = Regex("""[\r\n"]""")
 

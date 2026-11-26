@@ -5,7 +5,6 @@ import com.nanahoshi.audioplayer.text.TextRef
 import com.nanahoshi.audioplayer.text.UserFacingError
 import kotlinx.serialization.json.*
 import java.net.URLDecoder
-import java.security.MessageDigest
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.io.File
 
@@ -43,6 +42,10 @@ data class YouTubeResults(val videos: List<YouTubeVideo>, val partial: Boolean =
 internal enum class InputKind { VIDEO, PLAYLIST, SEARCH }
 internal data class YouTubeInput(val kind: InputKind, val value: String)
 internal val videoIdPattern = Regex("^[A-Za-z0-9_-]{11}$")
+private val SEARCH_QUERY_PATTERN = Regex("[?&]search_query=([^&]+)", RegexOption.IGNORE_CASE)
+private val VIDEO_IN_URL_PATTERN = Regex("(?:v=|/shorts/|/embed/|/live/|/v/|youtu\\.be/)([A-Za-z0-9_-]{11})")
+private val LIST_IN_URL_PATTERN = Regex("[?&]list=([A-Za-z0-9_-]{2,80})")
+private val PLAYLIST_ID_PATTERN = Regex("PL[A-Za-z0-9_-]{11,78}")
 internal fun decode(value: String): String = URLDecoder.decode(value, "UTF-8")
 internal fun form(value: String): Map<String, String> = value.split('&').filter { it.isNotEmpty() }.associate {
     decode(it.substringBefore('=')) to decode(it.substringAfter('=', ""))
@@ -50,14 +53,14 @@ internal fun form(value: String): Map<String, String> = value.split('&').filter 
 internal fun inputOf(raw: String): YouTubeInput {
     val text = raw.trim()
     if (text.isEmpty()) throw YouTubeException(TextRef.Res(R.string.youtube_error_blank_search))
-    Regex("[?&]search_query=([^&]+)", RegexOption.IGNORE_CASE).find(text)?.let {
+    SEARCH_QUERY_PATTERN.find(text)?.let {
         val query = decode(it.groupValues[1]).trim()
         if (query.isNotEmpty()) return YouTubeInput(InputKind.SEARCH, query)
     }
-    val video = Regex("(?:v=|/shorts/|/embed/|/live/|/v/|youtu\\.be/)([A-Za-z0-9_-]{11})").find(text)?.groupValues?.get(1)
+    val video = VIDEO_IN_URL_PATTERN.find(text)?.groupValues?.get(1)
         ?: text.takeIf { videoIdPattern.matches(it) }
-    val list = Regex("[?&]list=([A-Za-z0-9_-]{2,80})").find(text)?.groupValues?.get(1)
-        ?: text.takeIf { it == "LL" || it == "WL" || Regex("PL[A-Za-z0-9_-]{11,78}").matches(it) }
+    val list = LIST_IN_URL_PATTERN.find(text)?.groupValues?.get(1)
+        ?: text.takeIf { it == "LL" || it == "WL" || PLAYLIST_ID_PATTERN.matches(it) }
     if (video != null && (list == null || listOf("watch", "youtu.be", "shorts").any { text.contains(it, true) })) {
         return YouTubeInput(InputKind.VIDEO, video)
     }
@@ -68,18 +71,18 @@ internal fun inputOf(raw: String): YouTubeInput {
     }
 }
 
-fun normalizeYouTubeCookie(raw: String): String = raw.replace("\r", "").replace("\n", "").trim().trim(';').trim()
+fun normalizeYouTubeCookie(raw: String): String =
+    com.nanahoshi.audioplayer.data.CookieHeaders.sanitize(raw).trim().trim(';').trim()
 internal fun authHeaders(cookie: String, seconds: Long): Map<String, String> {
     val value = normalizeYouTubeCookie(cookie)
     if (value.isEmpty()) return emptyMap()
-    val fields = value.split(';').associate { it.trim().substringBefore('=').trim() to it.trim().substringAfter('=', "") }
+    val fields = com.nanahoshi.audioplayer.data.CookieHeaders.parse(value)
     val sapisid = fields["SAPISID"]?.takeIf { it.isNotEmpty() } ?: fields["__Secure-3PAPISID"]?.takeIf { it.isNotEmpty() }
     return buildMap {
         put("Cookie", value)
         put("X-Goog-AuthUser", "0")
         if (sapisid != null) {
-            val hash = MessageDigest.getInstance("SHA-1").digest("$seconds $sapisid https://www.youtube.com".toByteArray())
-                .joinToString("") { "%02x".format(it) }
+            val hash = com.nanahoshi.audioplayer.data.sha1Hex("$seconds $sapisid https://www.youtube.com")
             put("Authorization", "SAPISIDHASH ${seconds}_$hash")
         }
     }
@@ -162,9 +165,6 @@ fun readyYouTubeAudio(filesDir: File, videoId: String?): File? = videoId?.let { 
 
 internal data class MediaByteRange(val start: Long, val end: Long, val total: Long)
 internal fun parseMediaRange(header: String?): MediaByteRange? {
-    val match = Regex("bytes (\\d+)-(\\d+)/(\\d+)", RegexOption.IGNORE_CASE).matchEntire(header?.trim().orEmpty()) ?: return null
-    val values = match.groupValues.drop(1).map { it.toLongOrNull() ?: return null }
-    val (start, end, total) = values
-    if (start < 0 || end < start || total <= end) return null
-    return MediaByteRange(start, end, total)
+    val range = com.nanahoshi.audioplayer.data.HttpByteRange.parse(header) ?: return null
+    return MediaByteRange(range.start, range.end, range.total)
 }

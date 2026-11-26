@@ -1,4 +1,7 @@
-// Vendored from https://github.com/k2-fsa/sherpa-onnx tag v2.0.1 (sherpa-onnx/kotlin-api/Vad.kt), Apache-2.0. 只随 sherpa-onnx 版本更新，不做本地修改。
+// Vendored from https://github.com/k2-fsa/sherpa-onnx tag v2.0.1 (sherpa-onnx/kotlin-api/Vad.kt), Apache-2.0.
+// 上游 demo 的纯 Kotlin 模型工厂（getVadModelConfig）已移除，其余只随 sherpa-onnx 版本更新。
+// JNI 兼容性：VadModelConfig / SileroVadModelConfig / TenVadModelConfig 的类名与字段名、字段类型，
+// 以及本文件中的 external native 方法签名都由 libsherpa-onnx-jni.so 直接读取，禁止重命名、增删或调整。
 // Copyright (c)  2023  Xiaomi Corporation
 package com.k2fsa.sherpa.onnx
 
@@ -71,12 +74,6 @@ class Vad(
         return front(ptr)
     }
 
-    fun clear() = clear(ptr)
-
-    fun isSpeechDetected(): Boolean = isSpeechDetected(ptr)
-
-    fun reset() = reset(ptr)
-
     fun flush() = flush(ptr)
 
     private external fun delete(ptr: Long)
@@ -106,48 +103,4 @@ class Vad(
             System.loadLibrary("sherpa-onnx-jni")
         }
     }
-}
-
-// Please visit
-// https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx
-// to download silero_vad.onnx
-// and put it inside the assets/
-// directory
-//
-// For ten-vad, please use
-// https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/ten-vad.onnx
-//
-fun getVadModelConfig(type: Int): VadModelConfig? {
-    when (type) {
-        0 -> {
-            return VadModelConfig(
-                sileroVadModelConfig = SileroVadModelConfig(
-                    model = "silero_vad.onnx",
-                    threshold = 0.5F,
-                    minSilenceDuration = 0.25F,
-                    minSpeechDuration = 0.25F,
-                    windowSize = 512,
-                ),
-                sampleRate = 16000,
-                numThreads = 1,
-                provider = "cpu",
-            )
-        }
-
-        1 -> {
-            return VadModelConfig(
-                tenVadModelConfig = TenVadModelConfig(
-                    model = "ten-vad.onnx",
-                    threshold = 0.5F,
-                    minSilenceDuration = 0.25F,
-                    minSpeechDuration = 0.25F,
-                    windowSize = 256,
-                ),
-                sampleRate = 16000,
-                numThreads = 1,
-                provider = "cpu",
-            )
-        }
-    }
-    return null
 }

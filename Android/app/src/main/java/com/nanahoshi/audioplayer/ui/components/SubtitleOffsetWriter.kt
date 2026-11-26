@@ -44,6 +44,9 @@ internal class SubtitleOffsetWriter(
         /** 本写入器落盘过的值，用于识别 Room 的中间态回流。 */
         val writtenTargets = mutableSetOf<Long>()
 
+        /** 已发出但尚未返回结果的持久化目标（version -> target），避免 Room 提前回流误判。 */
+        val inFlightTargets = mutableMapOf<Long, Long>()
+
         /** 曲目换绑/解除关联时递增，使更早发起的写入收尾不再回填旧状态。 */
         var epoch: Long = 0L
 
@@ -79,6 +82,7 @@ internal class SubtitleOffsetWriter(
             state.awaiting = null
             state.lastSettled = 0L
             state.writtenTargets.clear()
+            state.inFlightTargets.clear()
             state.starting = false
             state.worker.also { state.worker = null }
         }
@@ -141,7 +145,10 @@ internal class SubtitleOffsetWriter(
             state.lastSettled = settled
             return
         }
-        if (settled != state.lastSettled && settled !in state.writtenTargets) {
+        if (settled != state.lastSettled &&
+            settled !in state.writtenTargets &&
+            settled !in state.inFlightTargets.values
+        ) {
             // 曲目重新绑定或外部重置：放弃旧覆盖，让新值生效；若仍有写入在途，
             // 递增版本使其完成后补写新的已落盘值，避免旧目标覆盖新选择。
             state.pending = null
@@ -176,12 +183,16 @@ internal class SubtitleOffsetWriter(
             state.worker = null
             return@synchronized null
         }
-        Triple(state.desired, state.version, state.epoch)
+        val target = state.desired
+        val version = state.version
+        state.inFlightTargets[version] = target
+        Triple(target, version, state.epoch)
     }
 
     /** 记录失败；返回 (是否属于当前 epoch, 是否还有更新版本需要继续尝试)。 */
     private fun recordFailure(trackId: Long, version: Long, epoch: Long): Pair<Boolean, Boolean> = synchronized(lock) {
         val state = tracks[trackId] ?: return@synchronized false to false
+        state.inFlightTargets.remove(version)
         if (state.epoch != epoch) return@synchronized false to false
         state.writtenVersion = version
         val retryNewer = state.version > version
@@ -191,6 +202,7 @@ internal class SubtitleOffsetWriter(
             state.pending = null
             state.awaiting = null
             state.writtenTargets.clear()
+            state.inFlightTargets.clear()
             state.worker = null
         }
         true to retryNewer
@@ -202,6 +214,9 @@ internal class SubtitleOffsetWriter(
             try {
                 persist(trackId, target.takeIf { it != 0L })
             } catch (cancelled: CancellationException) {
+                synchronized(lock) {
+                    tracks[trackId]?.takeIf { it.epoch == epoch }?.inFlightTargets?.remove(version)
+                }
                 throw cancelled
             } catch (error: Exception) {
                 val (currentEpoch, retryNewer) = recordFailure(trackId, version, epoch)
@@ -213,11 +228,20 @@ internal class SubtitleOffsetWriter(
             }
             val stale = synchronized(lock) {
                 val state = tracks[trackId] ?: return
+                state.inFlightTargets.remove(version)
                 if (state.epoch != epoch) return@synchronized true
                 state.writtenVersion = version
                 state.writtenTargets += target
                 // 只有在界面仍显示本次写入的值时才等待 Room 确认，避免覆盖外部重置。
-                if (state.version == version && state.pending != null) state.awaiting = target
+                if (state.version == version && state.pending != null) {
+                    if (state.lastSettled == target) {
+                        state.pending = null
+                        state.awaiting = null
+                        state.writtenTargets.clear()
+                    } else {
+                        state.awaiting = target
+                    }
+                }
                 false
             }
             if (stale) return

@@ -276,4 +276,80 @@ class TranslationReplyTest {
             ),
         )
     }
+
+    @Test
+    fun joinMergedOriginalPreservesJapaneseAndSeparatesAsciiWords() {
+        val mixed = listOf(
+            SubtitleCue(0, 500, "  Hello  "),
+            SubtitleCue(500, 1000, "world "),
+            SubtitleCue(1000, 1500, "今日は"),
+            SubtitleCue(1500, 2000, "いい天気"),
+        )
+        assertEquals("Hello world今日はいい天気", joinMergedOriginal(mixed))
+    }
+
+    @Test
+    fun proofreadOnlyModeRejectsMergeAndOmitGroupingFromInput() {
+        val options = JapaneseTranslateOptions(proofread = true, merge = false)
+        assertTrue(options.usesStructuredProtocol)
+        val source = listOf(SubtitleCue(0, 800, "今日は"), SubtitleCue(900, 1600, "晴れ"))
+
+        val merged = parseRevisedTranslation(
+            """{"captions":[{"source":[1,2],"japanese":"今日は晴れ。","chinese":"今天晴天。"}]}""",
+            source,
+            options = options,
+        )
+        assertNull(merged.cues)
+        assertEquals(TextRef.Res(R.string.translate_detail_unexpected_merge), merged.structuralError)
+
+        val single = parseRevisedTranslation(
+            """{"captions":[{"source":[1],"japanese":"今日は。","chinese":"今天。"},
+                {"source":[2],"japanese":"晴れ。","chinese":"晴天。"}]}""",
+            source,
+            options = options,
+        )
+        assertEquals(listOf(
+            SubtitleCue(0, 800, "今日は。", "今天。"),
+            SubtitleCue(900, 1600, "晴れ。", "晴天。"),
+        ), single.cues)
+        assertTrue(single.violations.isEmpty())
+
+        val input = Json.parseToJsonElement(
+            japaneseCorrectionInput(source, emptyList(), includeGrouping = false),
+        ).jsonArray
+        assertFalse("group" in input[0].jsonObject)
+        assertFalse("lock" in input[0].jsonObject)
+        assertTrue(japaneseCorrectionRules(options = options).contains("禁止合并"))
+    }
+
+    @Test
+    fun mergeOnlyModeKeepsOriginalTextAndCollectsSoftViolations() {
+        val options = JapaneseTranslateOptions(proofread = false, merge = true)
+        assertTrue(options.usesStructuredProtocol)
+        val source = listOf(
+            SubtitleCue(0, 1000, "今日は"),
+            SubtitleCue(1200, 2000, "いい天気"),
+            SubtitleCue(3000, 4000, "ですね"),
+        )
+        val parsed = parseRevisedTranslation(
+            """{"captions":[{"source":[1,2],"japanese":"MODEL_REWRITE_IGNORED","chinese":"今天天气不错"},
+                {"source":[3],"chinese":"是呢"}]}""",
+            source,
+            options = options,
+        )
+        assertEquals(listOf(
+            SubtitleCue(0, 2000, "今日はいい天気", "今天天气不错", sourceCount = 2),
+            SubtitleCue(3000, 4000, "ですね", "是呢"),
+        ), parsed.cues)
+        assertTrue(parsed.violations.isEmpty())
+
+        val tooLong = parseRevisedTranslation(
+            """{"captions":[{"source":[1,2],"chinese":"${"好".repeat(81)}"}]}""",
+            source.take(2),
+            options = options,
+        )
+        assertEquals(1, tooLong.cues?.size)
+        assertTrue(tooLong.violations.any { it.contains("中文") })
+        assertTrue(japaneseCorrectionRules(options = options).contains("不要改写日文原文"))
+    }
 }

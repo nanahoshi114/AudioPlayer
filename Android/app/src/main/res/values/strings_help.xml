@@ -9,5 +9,6 @@
     <!-- 翻译帮助 -->
     <string name="settings_translate_help_intro">选一个平台，填入 API Key 后点「保存」。模型名可以留空：千问 AI 平台默认 qwen3.8-flash，DeepSeek 默认 deepseek-flash。</string>
     <string name="settings_translate_help_thinking">深度思考一般不用打开；想要更细的译文时再打开，并选择思考强度。</string>
+    <string name="settings_translate_help_japanese">日文校对和语义合并默认关闭，均仅对日文字幕生效。关闭时按逐条方式快速翻译；按需开启后可修正日文错字或合并相邻短句。</string>
     <string name="settings_translate_help_usage">用法：在字幕全文里点「生成翻译」，已有译文时可以点「润色」。打开「翻译后自动润色」后，每次翻译完成会自动润色一遍。润色失败会保留原来的译文。</string>
 </resources>

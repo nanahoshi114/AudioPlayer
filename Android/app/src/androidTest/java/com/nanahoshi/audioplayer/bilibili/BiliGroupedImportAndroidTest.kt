@@ -1,20 +1,17 @@
 package com.nanahoshi.audioplayer.bilibili
 
 import android.content.Context
-import android.content.ContextWrapper
-import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import androidx.test.platform.app.InstrumentationRegistry
 import com.nanahoshi.audioplayer.asmr.AsmrClient
 import com.nanahoshi.audioplayer.data.*
 import com.nanahoshi.audioplayer.data.db.*
 import com.nanahoshi.audioplayer.dlsite.DlsiteClient
+import com.nanahoshi.audioplayer.withIsolatedApp
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
-import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
 class BiliGroupedImportAndroidTest {
@@ -24,18 +21,16 @@ class BiliGroupedImportAndroidTest {
         BiliImportRequest(video, chosen, mode, confirmed)
 
     private suspend fun fixture(test: suspend (Context, AppDatabase, LibraryRepository) -> Unit) {
-        val app = InstrumentationRegistry.getInstrumentation().targetContext
-        val root = File(app.cacheDir, "bili-group-test-${UUID.randomUUID()}").apply { mkdirs() }
-        val context = object : ContextWrapper(app) {
-            override fun getFilesDir(): File = root
-            override fun getApplicationContext(): Context = this
+        withIsolatedApp { app ->
+            val db = app.inMemoryDatabase()
+            try {
+                val credentials = CredentialStore(app)
+                val library = LibraryRepository(app, db, BilibiliClient(credentials), AsmrClient(), DlsiteClient(credentials))
+                test(app, db, library)
+            } finally {
+                db.close()
+            }
         }
-        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
-        try {
-            val credentials = CredentialStore(context)
-            val library = LibraryRepository(context, db, BilibiliClient(credentials), AsmrClient(), DlsiteClient(credentials))
-            test(context, db, library)
-        } finally { db.close(); root.deleteRecursively() }
     }
 
     private fun cached(context: Context, part: BiliPart): File = biliAudioFile(context.filesDir, part.bvid, part.cid)!!

@@ -78,6 +78,78 @@ class DlsitePageParseTest {
     }
 
     @Test
+    fun searchCardsDecodeEntitiesAndUseNestedTypeClassesAndImageAlt() {
+        val html = """
+            <ul id="search_result_img_box">
+              <li data-product_id="RJ01111111">
+                <div class="work_category type_SOU">
+                  <div class="work_thumb_inner"><img src="//img.dlsite.jp/a.jpg" alt="封面 &amp; 说明"></div>
+                  <dl>
+                    <dt class="work_name"><a title="A &amp; B &#39;C&#39;">A &amp; B &#39;C&#39;</a></dt>
+                    <dd class="maker_name"><a>社团 &lt;One&gt;</a></dd>
+                    <dd class="author"><a>声优 &amp; 一</a><a>声优 &amp; 二</a></dd>
+                  </dl>
+                </div>
+              </li>
+              <li data-product_id="RJ02222222">
+                <div class="work_category type_RPG"><dt class="work_name"><a>游戏</a></dt></div>
+              </li>
+              <li data-product_id="RJ03333333">
+                <div class="work_thumb_inner"><img src="//img.dlsite.jp/b.jpg" alt="仅封面标题"></div>
+              </li>
+            </ul>
+        """.trimIndent()
+        val cards = DlsiteClient.parseSearchCards(html)
+        assertEquals(listOf("RJ01111111", "RJ03333333"), cards.map { it.workno })
+        assertEquals("A & B 'C'", cards[0].title)
+        assertEquals("社团 <One>", cards[0].circle)
+        assertEquals(listOf("声优 & 一", "声优 & 二"), cards[0].vas)
+        assertEquals("https://img.dlsite.jp/a.jpg", cards[0].coverUrl)
+        assertEquals("仅封面标题", cards[1].title)
+        assertEquals("https://img.dlsite.jp/b.jpg", cards[1].coverUrl)
+    }
+
+    @Test
+    fun workPageFieldsAndGalleryComeFromParsedElements() {
+        val html = """
+            <html>
+              <head><title>RJ01111111</title></head>
+              <body>
+                <h1 id="work_name">标题 &amp; 副标题</h1>
+                <div id="work_maker"><table><tr><td class="maker_name"><a href="/circle">社团 &lt;One&gt;</a></td></tr></table></div>
+                <div class="product-slider-data">
+                  <div data-src="//img.dlsite.jp/one.jpg"></div>
+                  <div data-src="https://img.dlsite.jp/two.jpg"></div>
+                </div>
+                <div class="work_slider"><div data-src="//img.dlsite.jp/unrelated.jpg"></div></div>
+              </body>
+            </html>
+        """.trimIndent()
+        assertEquals("标题 & 副标题", DlsiteClient.titleOf(html))
+        assertEquals("社团 <One>", DlsiteClient.circleOf(html))
+        assertEquals(
+            listOf("https://img.dlsite.jp/one.jpg", "https://img.dlsite.jp/two.jpg"),
+            DlsiteClient.galleryOf(html),
+        )
+        assertEquals(emptyList<String>(), DlsiteClient.galleryOf("<html><body><p>no gallery</p></body></html>"))
+    }
+
+    @Test
+    fun chobitTracksDecodeEntitiesAndIgnoreUnsupportedExtensions() {
+        val html = """
+            <ol>
+              <li data-title="A &amp; B" data-src="//file.chobit.cc/contents/a.m4a" data-playtime="1:00"></li>
+              <li data-title="image" data-src="//file.chobit.cc/contents/a.jpg"></li>
+              <li data-src="//file.chobit.cc/contents/b.MP3"></li>
+            </ol>
+        """.trimIndent()
+        val tracks = DlsiteClient.parseChobit(html, "https://chobit.cc/embed/1/2", null)
+        assertEquals(listOf("A & B", "试听"), tracks.map { it.title })
+        assertEquals(60_000L, tracks[0].durationMs)
+        assertEquals(0L, tracks[1].durationMs)
+    }
+
+    @Test
     fun keepsPlayAccessCookiesWithTheLoginCookie() {
         val header = DlsiteClient.playAccessCookie(
             "dl_session=abc",

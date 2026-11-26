@@ -102,6 +102,7 @@ fun TrackEntity.toPlayableItem(queueItemId: Long, cached: Uri?): MediaItem {
         }
         .setMediaMetadata(metadata)
         .build()
+        .let { if (source == TrackSource.BILIBILI && cached != null) it.withBiliLocalCopy() else it }
 }
 
 suspend fun TrackEntity.toPlayableItem(queueItemId: Long, context: Context): MediaItem =
@@ -109,14 +110,16 @@ suspend fun TrackEntity.toPlayableItem(queueItemId: Long, context: Context): Med
 
 const val EXTRA_TRACK_ID = "trackId"
 internal const val EXTRA_JA_LOCAL_COPY = "jaLocalCopy"
+internal const val EXTRA_BILI_LOCAL_COPY = "biliLocalCopy"
 
-private fun MediaItem.withJaLocalCopy(): MediaItem {
-    val extras = Bundle(mediaMetadata.extras ?: Bundle()).apply { putBoolean(EXTRA_JA_LOCAL_COPY, true) }
+private fun MediaItem.withJaLocalCopy(): MediaItem = withExtraFlag(EXTRA_JA_LOCAL_COPY)
+
+private fun MediaItem.withBiliLocalCopy(): MediaItem = withExtraFlag(EXTRA_BILI_LOCAL_COPY)
+
+private fun MediaItem.withExtraFlag(key: String): MediaItem {
+    val extras = Bundle(mediaMetadata.extras ?: Bundle()).apply { putBoolean(key, true) }
     return buildUpon().setMediaMetadata(mediaMetadata.buildUpon().setExtras(extras).build()).build()
 }
-
-suspend fun QueuedTrack.biliLocalCache(context: Context): Uri? =
-    if (trackId != null && remoteUrl.isNullOrBlank()) toTrack().biliLocalCache(context) else null
 
 internal fun QueuedTrack.toMediaItem(target: PlaybackTarget): MediaItem {
     if (trackId != null && (remoteUrl.isNullOrBlank() || remoteUrl.startsWith("japaneseasmr://file?"))) {

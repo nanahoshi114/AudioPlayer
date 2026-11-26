@@ -14,9 +14,10 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.window.DialogProperties
 import com.nanahoshi.audioplayer.data.ClipboardImportState
-import com.nanahoshi.audioplayer.ui.CoverImage
+import com.nanahoshi.audioplayer.ui.components.CoverImage
 import com.nanahoshi.audioplayer.ui.components.JAPANESE_ASMR_VERIFY_ACTION
 import com.nanahoshi.audioplayer.ui.components.JAPANESE_ASMR_VERIFY_HINT
+import com.nanahoshi.audioplayer.ui.components.RoundedProgress
 
 @Composable
 internal fun ClipboardImportDialog(
@@ -57,7 +58,7 @@ internal fun ClipboardImportDialog(
                 Modifier.padding(top = 12.dp),
             )
             if (state.busy) {
-                LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 12.dp))
+                RoundedProgress(progress = null, modifier = Modifier.padding(top = 12.dp))
                 Text(stringResource(R.string.import_importing), Modifier.padding(top = 8.dp))
             }
             state.error?.let { Text(it.asString(), Modifier.padding(top = 12.dp), color = MaterialTheme.colorScheme.error) }

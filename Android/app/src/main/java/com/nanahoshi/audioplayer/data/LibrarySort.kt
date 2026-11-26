@@ -3,7 +3,6 @@ package com.nanahoshi.audioplayer.data
 import android.content.Context
 import com.nanahoshi.audioplayer.data.db.FolderEntity
 import com.nanahoshi.audioplayer.data.db.TrackEntity
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
 enum class LibrarySort {
@@ -12,23 +11,23 @@ enum class LibrarySort {
 }
 
 class LibraryPreferences(context: Context) {
-    private val prefs = context.getSharedPreferences("library", Context.MODE_PRIVATE)
-    private val sortState = MutableStateFlow(read())
-    val sort: StateFlow<LibrarySort> = sortState
-    private val subtitleFilesState = MutableStateFlow(prefs.getBoolean(SHOW_SUBTITLE_FILES, false))
-    val showSubtitleFiles: StateFlow<Boolean> = subtitleFilesState
+    private val prefs = appPreferences(context, "library")
+    private val sortFlow = PreferenceFlow(read())
+    val sort: StateFlow<LibrarySort> = sortFlow.state
+    private val subtitleFilesFlow = PreferenceFlow(prefs.getBoolean(SHOW_SUBTITLE_FILES, false))
+    val showSubtitleFiles: StateFlow<Boolean> = subtitleFilesFlow.state
 
     fun setShowSubtitleFiles(enabled: Boolean) {
         prefs.edit().putBoolean(SHOW_SUBTITLE_FILES, enabled).apply()
-        subtitleFilesState.value = enabled
+        subtitleFilesFlow.set(enabled)
     }
 
-    fun toggleSubtitleFiles() = setShowSubtitleFiles(!subtitleFilesState.value)
+    fun toggleSubtitleFiles() = setShowSubtitleFiles(!subtitleFilesFlow.value)
 
     fun toggle() {
-        val next = if (sortState.value == LibrarySort.NAME) LibrarySort.ADDED else LibrarySort.NAME
+        val next = if (sortFlow.value == LibrarySort.NAME) LibrarySort.ADDED else LibrarySort.NAME
         prefs.edit().putString(KEY, next.name).apply()
-        sortState.value = next
+        sortFlow.set(next)
     }
 
     private fun read(): LibrarySort =

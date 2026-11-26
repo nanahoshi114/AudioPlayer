@@ -92,4 +92,14 @@ class TextDecodingTest {
             }
         }
     }
+
+    @Test
+    fun readFullTextReadsBeyondPreviewLimitAndFailsExplicitlyPastSafetyCap() {
+        val large = "あ".repeat(250_000) // ~750 KB UTF-8, > 512 KiB preview limit
+        val decoded = large.toByteArray(Charsets.UTF_8).inputStream().readFullText()
+        assertEquals(large, decoded)
+
+        val failure = runCatching { "abcdef".toByteArray(Charsets.UTF_8).inputStream().readFullText(maxBytes = 5) }.exceptionOrNull()
+        assertTrue(failure is java.io.IOException)
+    }
 }

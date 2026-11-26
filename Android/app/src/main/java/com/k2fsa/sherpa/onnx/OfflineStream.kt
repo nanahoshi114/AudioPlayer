@@ -1,4 +1,6 @@
-// Vendored from https://github.com/k2-fsa/sherpa-onnx tag v2.0.1 (sherpa-onnx/kotlin-api/OfflineStream.kt), Apache-2.0. 只随 sherpa-onnx 版本更新，不做本地修改。
+// Vendored from https://github.com/k2-fsa/sherpa-onnx tag v2.0.1 (sherpa-onnx/kotlin-api/OfflineStream.kt), Apache-2.0.
+// JNI 兼容性：ptr 字段及本文件中的 external native 方法签名由 libsherpa-onnx-jni.so 直接读取，
+// 禁止重命名、增删或调整；仅移除了上游 demo 中未使用的 setOption/getOption/use 封装。
 package com.k2fsa.sherpa.onnx
 
 class OfflineStream(var ptr: Long) {
@@ -9,10 +11,6 @@ class OfflineStream(var ptr: Long) {
     fun acceptWaveform(samples: FloatArray, sampleRate: Int) =
         acceptWaveform(ptr, samples, sampleRate)
 
-    fun setOption(key: String, value: String) = setOption(ptr, key, value)
-
-    fun getOption(key: String): String = getOption(ptr, key)
-
     protected fun finalize() {
         if (ptr != 0L) {
             delete(ptr)
@@ -21,14 +19,6 @@ class OfflineStream(var ptr: Long) {
     }
 
     fun release() = finalize()
-
-    fun use(block: (OfflineStream) -> Unit) {
-        try {
-            block(this)
-        } finally {
-            release()
-        }
-    }
 
     private external fun acceptWaveform(ptr: Long, samples: FloatArray, sampleRate: Int)
     private external fun setOption(ptr: Long, key: String, value: String)

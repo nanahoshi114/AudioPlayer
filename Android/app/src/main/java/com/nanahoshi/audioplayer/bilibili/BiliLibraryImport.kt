@@ -16,7 +16,7 @@ data class BiliImportRequest(
 internal val biliLibraryJson = Json { ignoreUnknownKeys = true }
 
 internal fun BiliImportRequest.checked(): BiliImportRequest {
-    require(Regex("BV[0-9A-Za-z]{10}").matches(video.bvid) && parts.isNotEmpty()) { "没有可导入的分 P" }
+    require(BV_PATTERN.matches(video.bvid) && parts.isNotEmpty()) { "没有可导入的分 P" }
     require(parts.all { it.bvid == video.bvid && it.cid > 0 && it.page > 0 && it.durationMs >= 0 }) { "分 P 信息无效" }
     return copy(parts = parts.distinctBy { it.cid }.sortedBy { it.page })
 }

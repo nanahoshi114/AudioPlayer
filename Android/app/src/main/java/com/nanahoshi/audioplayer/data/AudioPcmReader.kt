@@ -2,11 +2,13 @@ package com.nanahoshi.audioplayer.data
 
 import com.nanahoshi.audioplayer.text.TextRef
 import com.nanahoshi.audioplayer.R
+import android.media.AudioFormat
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import java.io.Closeable
 import java.io.File
+import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /** 多声道样本混成单声道：交错存放时逐帧平均，单声道时原样返回。 */
@@ -49,15 +51,33 @@ internal fun resampleLinear(
     return out.copyOf(count) to (position - (samples.size - 1)).coerceAtLeast(0f)
 }
 
+/** 按指定 PCM 编码把小端字节缓冲区解码为 [-1, 1] 交错 float 样本。 */
+internal fun decodePcmSamples(buffer: ByteBuffer, byteCount: Int, encoding: Int): FloatArray {
+    buffer.order(ByteOrder.LITTLE_ENDIAN)
+    return when (encoding) {
+        AudioFormat.ENCODING_PCM_16BIT -> {
+            val count = byteCount / 2
+            FloatArray(count) { buffer.short / 32768f }
+        }
+        AudioFormat.ENCODING_PCM_FLOAT -> {
+            val count = byteCount / 4
+            FloatArray(count) { buffer.float }
+        }
+        else -> throw WhisperException(TextRef.Res(R.string.whisper_error_audio_decode))
+    }
+}
+
 /**
  * 把音频文件流式解码成 16kHz PCM float（[-1, 1]）。默认混成单声道，可保留恰好两个声道。
  */
 class AudioPcmReader(file: File, private val keepStereo: Boolean = false) : Closeable {
     private val extractor = MediaExtractor()
     private val codec: MediaCodec
-    private val channels: Int
-    private val sourceRate: Int
-    val isStereo: Boolean get() = keepStereo && channels == 2
+    private var channels: Int
+    private var sourceRate: Int
+    private var pcmEncoding: Int
+    private val outputStereo: Boolean
+    val isStereo: Boolean get() = outputStereo
     private val resampleCarry = FloatArray(2)
     private val resampleAnchor = arrayOfNulls<Float>(2)
     private var pending = emptyArray<FloatArray>()
@@ -86,9 +106,11 @@ class AudioPcmReader(file: File, private val keepStereo: Boolean = false) : Clos
             val mime = format.getString(MediaFormat.KEY_MIME)!!
             channels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT).coerceAtLeast(1)
             sourceRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE).coerceAtLeast(1)
+            outputStereo = keepStereo && channels == 2
             decoder = MediaCodec.createDecoderByType(mime)
             decoder.configure(format, null, null, 0)
             decoder.start()
+            pcmEncoding = readPcmEncoding(decoder.outputFormat)
             codec = decoder
         } catch (error: Exception) {
             runCatching { decoder?.stop() }
@@ -145,19 +167,26 @@ class AudioPcmReader(file: File, private val keepStereo: Boolean = false) : Clos
         while (true) {
             val index = codec.dequeueOutputBuffer(info, TIMEOUT_US)
             if (index == MediaCodec.INFO_TRY_AGAIN_LATER) return
+            if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                applyOutputFormat(codec.outputFormat)
+                continue
+            }
             if (index >= 0) {
                 val buffer = codec.getOutputBuffer(index)!!
                 if (info.size > 0) {
-                    val shorts = ShortArray(info.size / 2)
+                    buffer.limit(info.offset + info.size)
                     buffer.position(info.offset)
-                    buffer.order(ByteOrder.LITTLE_ENDIAN)
-                    for (i in shorts.indices) {
-                        shorts[i] = buffer.short
-                    }
-                    val decoded = if (isStereo) {
-                        Array(2) { channel -> FloatArray(shorts.size / 2) { shorts[it * 2 + channel] / 32768f } }
+                    val interleaved = decodePcmSamples(buffer, info.size, pcmEncoding)
+                    val decoded = if (outputStereo) {
+                        if (channels == 2) {
+                            val frames = interleaved.size / 2
+                            Array(2) { channel -> FloatArray(frames) { interleaved[it * 2 + channel] } }
+                        } else {
+                            val mono = toMono(interleaved, channels)
+                            arrayOf(mono, mono.copyOf())
+                        }
                     } else {
-                        arrayOf(toMono(FloatArray(shorts.size) { shorts[it] / 32768f }, channels))
+                        arrayOf(toMono(interleaved, channels))
                     }
                     pending = Array(decoded.size) { resampleChannel(decoded[it], it) }
                     if (pending[0].isEmpty()) pending = emptyArray()
@@ -172,8 +201,34 @@ class AudioPcmReader(file: File, private val keepStereo: Boolean = false) : Clos
                     return
                 }
             }
-            // INFO_OUTPUT_FORMAT_CHANGED 等负值继续循环
         }
+    }
+
+    private fun applyOutputFormat(outputFormat: MediaFormat) {
+        if (outputFormat.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
+            channels = outputFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT).coerceAtLeast(1)
+        }
+        if (outputFormat.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
+            val nextRate = outputFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE).coerceAtLeast(1)
+            if (nextRate != sourceRate) {
+                sourceRate = nextRate
+                resampleCarry.fill(0f)
+                resampleAnchor.fill(null)
+            }
+        }
+        pcmEncoding = readPcmEncoding(outputFormat)
+    }
+
+    private fun readPcmEncoding(format: MediaFormat): Int {
+        val encoding = if (format.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
+            format.getInteger(MediaFormat.KEY_PCM_ENCODING)
+        } else {
+            AudioFormat.ENCODING_PCM_16BIT
+        }
+        if (encoding != AudioFormat.ENCODING_PCM_16BIT && encoding != AudioFormat.ENCODING_PCM_FLOAT) {
+            throw WhisperException(TextRef.Res(R.string.whisper_error_audio_decode))
+        }
+        return encoding
     }
 
     private fun resampleChannel(samples: FloatArray, channel: Int): FloatArray {

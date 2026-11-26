@@ -12,15 +12,12 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.ArrowDropDown
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Deselect
 import androidx.compose.material.icons.filled.LibraryAdd
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
@@ -28,27 +25,37 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nanahoshi.audioplayer.bilibili.*
-import com.nanahoshi.audioplayer.data.TrackSource
-import com.nanahoshi.audioplayer.data.db.DownloadStatus
-import com.nanahoshi.audioplayer.ui.CoverImage
-import com.nanahoshi.audioplayer.ui.components.ResetOnNewSearch
-import com.nanahoshi.audioplayer.ui.components.SearchField
+import com.nanahoshi.audioplayer.ui.asmr.PendingOnlineSearch
+import com.nanahoshi.audioplayer.ui.components.CoverImage
+import com.nanahoshi.audioplayer.ui.components.DropdownFilterButton
 import com.nanahoshi.audioplayer.ui.components.EmptyState
+import com.nanahoshi.audioplayer.ui.components.ErrorState
+import com.nanahoshi.audioplayer.ui.components.LoadMoreOnScrollEnd
+import com.nanahoshi.audioplayer.ui.components.ResetOnNewSearch
+import com.nanahoshi.audioplayer.ui.components.RoundedProgress
+import com.nanahoshi.audioplayer.ui.components.SearchField
+import com.nanahoshi.audioplayer.ui.components.SelectableLeading
 import com.nanahoshi.audioplayer.ui.components.SelectionAction
 import com.nanahoshi.audioplayer.ui.components.SelectionTopBar
 import com.nanahoshi.audioplayer.ui.components.TopBarOverride
-import com.nanahoshi.audioplayer.ui.formatDuration
-import java.io.File
+import com.nanahoshi.audioplayer.ui.components.formatDuration
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun BiliBrowser(
+internal fun BiliBrowser(
     topBarOwnerKey: String,
     onOpenCollection: (BiliCollection) -> Unit = {},
+    pendingUploaderSearch: PendingOnlineSearch.BiliUploader? = null,
+    onConsumeSearch: (Long) -> Unit = {},
     viewModel: BiliBrowserViewModel = viewModel(),
 ) {
-    val tracks by viewModel.tracks.collectAsStateWithLifecycle(emptyList())
-    val jobs by viewModel.downloads.collectAsStateWithLifecycle(emptyList())
+    LaunchedEffect(pendingUploaderSearch?.id) {
+        pendingUploaderSearch?.let { request ->
+            viewModel.searchUploader(request.name)
+            onConsumeSearch(request.id)
+        }
+    }
+    val videoStats by viewModel.videoStats.collectAsStateWithLifecycle()
     val videoState = rememberLazyListState()
     val userState = rememberLazyListState()
     val collectionState = key(viewModel.uploader?.mid) { rememberLazyListState() }
@@ -70,10 +77,14 @@ fun BiliBrowser(
     ResetOnNewSearch(videoState, viewModel.videos.revision)
     ResetOnNewSearch(userState, viewModel.uploaders.revision)
     ResetOnNewSearch(uploadState, viewModel.uploads.revision)
-    LaunchedEffect(state, count, hasMore, error, loading, paused) {
-        snapshotFlow { state.layoutInfo.visibleItemsInfo.lastOrNull()?.index?.let { it >= count - 3 } == true }
-            .collect { if (it && hasMore && error == null && !loading && !paused) more() }
-    }
+    LoadMoreOnScrollEnd(
+        state = state,
+        itemCount = count,
+        canLoadMore = hasMore && !paused,
+        loading = loading,
+        hasError = error != null,
+        onLoadMore = more,
+    )
     BackHandler(selecting || uploader != null || viewModel.resolving || viewModel.choice != null) {
         when {
             viewModel.resolving || viewModel.choice != null -> viewModel.cancelParts()
@@ -157,7 +168,7 @@ fun BiliBrowser(
             Text(stringResource(R.string.bilibili_reading_parts), Modifier.weight(1f))
             TextButton(onClick = viewModel::cancelParts) { Text(stringResource(R.string.common_stop)) }
         }
-        if (loading || viewModel.resolving || viewModel.working) LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (loading || viewModel.resolving || viewModel.working) RoundedProgress(progress = null)
         if (count == 0 && !loading && error == null) {
             EmptyState(
                 title = stringResource(
@@ -194,26 +205,33 @@ fun BiliBrowser(
                 }
             } else {
                 items(items, key = { it.bvid }) { video ->
-                    val saved = tracks.filter { it.source == TrackSource.BILIBILI && it.bvid == video.bvid }
-                    val videoJobs = jobs.filter { it.source == TrackSource.BILIBILI.name && it.workKey == video.bvid }
-                    val active = videoJobs.count { it.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING) }
-                    val downloaded = (saved.filter { localReady(it.localUri) }.map { it.cid.toString() } +
-                        videoJobs.filter { it.status == DownloadStatus.DONE && localReady(it.localPath) }.map { it.fileKey }).toSet().size
+                    val stats = videoStats[video.bvid]
+                    val savedCount = stats?.savedCount ?: 0
+                    val downloaded = stats?.downloadedCount ?: 0
+                    val active = stats?.activeCount ?: 0
                     var menu by remember { mutableStateOf(false) }
                     val busy = viewModel.resolving || viewModel.working
                     ListItem(headlineContent = { Text(video.title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
                         supportingContent = { Column {
                             Text(listOf(video.author, formatDuration(video.durationMs)).filter { it.isNotBlank() }.joinToString(" · "), maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text(listOfNotNull(
-                                if (saved.isNotEmpty()) stringResource(R.string.bilibili_saved_parts, saved.size) else null,
+                                if (savedCount > 0) stringResource(R.string.bilibili_saved_parts, savedCount) else null,
                                 if (downloaded > 0) stringResource(R.string.bilibili_downloaded_parts, downloaded) else null,
                                 if (active > 0) stringResource(R.string.bilibili_active_parts, active) else null,
                             )
-                                .joinToString(" · ").ifBlank { stringResource(R.string.bilibili_bvid_label, video.bvid) }, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall)
+                                .joinToString(" · ").ifBlank { stringResource(R.string.bilibili_bvid_label, video.bvid) }, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
                         } },
-                        leadingContent = { if (viewModel.selected.isEmpty()) CoverImage(video.coverUrl, shape = MaterialTheme.shapes.small)
-                            else Checkbox(video.bvid in viewModel.selected, { viewModel.toggle(video.bvid) }) },
-                        trailingContent = { if (viewModel.selected.isEmpty()) Box {
+                        leadingContent = {
+                            SelectableLeading(
+                                selecting = selecting,
+                                selected = video.bvid in viewModel.selected,
+                                onToggle = { viewModel.toggle(video.bvid) },
+                                label = "biliVideoLead",
+                            ) {
+                                CoverImage(video.coverUrl, shape = MaterialTheme.shapes.small)
+                            }
+                        },
+                        trailingContent = { if (!selecting) Box {
                             IconButton(onClick = { menu = true }, enabled = !busy) { Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.a11y_video_actions)) }
                             DropdownMenu(menu, { menu = false }) {
                                 DropdownMenuItem(text = { Text(stringResource(BiliAction.SAVE.labelRes)) }, onClick = {
@@ -221,16 +239,16 @@ fun BiliBrowser(
                                 })
                             }
                         } }, modifier = Modifier.combinedClickable(
-                            onClick = { if (viewModel.selected.isNotEmpty()) viewModel.toggle(video.bvid)
+                            onClick = { if (selecting) viewModel.toggle(video.bvid)
                                 else if (!busy) viewModel.prepare(BiliAction.PLAY, listOf(video)) },
                             onLongClick = { viewModel.toggle(video.bvid) }))
                 }
             }
             if (error != null) item(key = "error") {
-                Column(Modifier.padding(16.dp)) {
-                    Text(LocalContext.current.resolveNoUrl(error, R.string.bilibili_error_page_network), color = MaterialTheme.colorScheme.error)
-                    TextButton(onClick = more) { Text(stringResource(R.string.common_retry)) }
-                }
+                ErrorState(
+                    message = LocalContext.current.resolveNoUrl(error, R.string.bilibili_error_page_network),
+                    onRetry = more,
+                )
             } else if (hasMore && !loading) item(key = "more") { TextButton(onClick = more, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.bilibili_load_more)) } }
         }
         }
@@ -276,54 +294,22 @@ internal fun BiliSearchFilters(
     onDuration: (BiliVideoDuration) -> Unit,
     enabled: Boolean = true,
 ) {
-    var orderMenu by remember { mutableStateOf(false) }
-    var durationMenu by remember { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
-        Box(Modifier.weight(1f)) {
-            TextButton(onClick = { orderMenu = true }, enabled = enabled) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(stringResource(order.labelRes))
-                    Icon(Icons.Default.ArrowDropDown, contentDescription = null)
-                }
-            }
-            DropdownMenu(expanded = orderMenu, onDismissRequest = { orderMenu = false }) {
-                BiliVideoOrder.entries.forEach { option ->
-                    DropdownMenuItem(
-                        text = { Text(stringResource(option.labelRes)) },
-                        onClick = {
-                            orderMenu = false
-                            onOrder(option)
-                        },
-                        trailingIcon = {
-                            if (option == order) Icon(Icons.Default.Check, contentDescription = stringResource(R.string.a11y_selected))
-                        },
-                    )
-                }
-            }
-        }
-        Box(Modifier.weight(1f)) {
-            TextButton(onClick = { durationMenu = true }, enabled = enabled) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(stringResource(duration.labelRes))
-                    Icon(Icons.Default.ArrowDropDown, contentDescription = null)
-                }
-            }
-            DropdownMenu(expanded = durationMenu, onDismissRequest = { durationMenu = false }) {
-                BiliVideoDuration.entries.forEach { option ->
-                    DropdownMenuItem(
-                        text = { Text(stringResource(option.labelRes)) },
-                        onClick = {
-                            durationMenu = false
-                            onDuration(option)
-                        },
-                        trailingIcon = {
-                            if (option == duration) Icon(Icons.Default.Check, contentDescription = stringResource(R.string.a11y_selected))
-                        },
-                    )
-                }
-            }
-        }
+        DropdownFilterButton(
+            options = BiliVideoOrder.entries,
+            selected = order,
+            optionLabel = { stringResource(it.labelRes) },
+            onSelect = onOrder,
+            modifier = Modifier.weight(1f),
+            enabled = enabled,
+        )
+        DropdownFilterButton(
+            options = BiliVideoDuration.entries,
+            selected = duration,
+            optionLabel = { stringResource(it.labelRes) },
+            onSelect = onDuration,
+            modifier = Modifier.weight(1f),
+            enabled = enabled,
+        )
     }
 }
-
-private fun localReady(path: String?): Boolean = !path.isNullOrBlank() && if (path.startsWith('/')) File(path).isFile else true

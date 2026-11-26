@@ -227,6 +227,16 @@ class DlsiteArchiveRoutingTest {
         assertEquals(setOf("maniax", "home"), links.map { it.pathSegments.first() }.toSet())
     }
 
+    @Test
+    fun decodesEscapedScriptLinksAndKeepsNumericVolumeOrder() {
+        val page = "https://www.dlsite.com/home/split/=/product_id/RJ300957.html".toHttpUrl()
+        val links = DlsiteArchiveClient.parseDownloadLinks(page, """
+            <a class='btn_dl split' href='/home/download/=/number/2/product_id/RJ300957.html'>2</a>
+            <script>var u = "\/home\/download\/=\/number\/1\/product_id\/RJ300957.html";</script>
+        """.trimIndent(), "RJ300957")
+        assertEquals(listOf("1", "2"), links.map { it.pathSegments[4] })
+    }
+
     @Test fun distinguishesVerificationLoginUnknownPageAndBadRequestWithoutLeakingBodies() = runBlocking {
         for ((html, expected) in listOf(
             "<html><script src='/cdn-cgi/challenge-platform/test'></script></html>" to R.string.dlsite_archive_error_verify,

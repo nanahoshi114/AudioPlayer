@@ -25,6 +25,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import org.jsoup.Jsoup
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
@@ -33,31 +34,29 @@ import java.util.concurrent.TimeUnit
 /** Messages deliberately omit request URLs, cookies and server error bodies. */
 enum class DlsiteArchiveFailureKind { INTERRUPTED, INTEGRITY, UNAVAILABLE, OTHER }
 
+private val QUOTED_VALUE = Regex("\"([^\"<>\\r\\n]+)\"|'([^'<>\\r\\n]+)'")
+private val FILENAME_STAR = Regex("filename\\*\\s*=\\s*UTF-8''([^;]+)", RegexOption.IGNORE_CASE)
+private val FILENAME_PARAM = Regex("filename\\s*=\\s*(?:\"([^\"]+)\"|([^;]+))", RegexOption.IGNORE_CASE)
+private val PACKAGE_NAME = Regex(".*\\.(zip|rar|exe|[rR][0-9]{2,3}|[0-9]{3})", RegexOption.IGNORE_CASE)
+
 open class DlsiteArchiveException(
     override val userText: TextRef,
     internal val archiveKind: DlsiteArchiveFailureKind = DlsiteArchiveFailureKind.OTHER,
     cause: Throwable? = null,
 ) : IOException(userText.debugString(), cause), UserFacingError {
     internal val unavailable get() = archiveKind == DlsiteArchiveFailureKind.UNAVAILABLE
-
-    constructor(message: String, unavailable: Boolean = false) : this(
-        TextRef.Raw(message),
-        if (unavailable) DlsiteArchiveFailureKind.UNAVAILABLE else DlsiteArchiveFailureKind.OTHER,
-    )
 }
 
 /** Only integrity failures justify discarding the downloaded package before an explicit retry. */
 class DlsiteArchiveIntegrityException(text: TextRef) :
-    DlsiteArchiveException(text, DlsiteArchiveFailureKind.INTEGRITY) {
-    constructor(message: String) : this(TextRef.Raw(message))
-}
+    DlsiteArchiveException(text, DlsiteArchiveFailureKind.INTEGRITY)
 
 /** Original packages use the store session, independently of Play's signed optimized files. */
 class DlsiteArchiveClient internal constructor(
     private val session: () -> String?,
     private val transport: OkHttpClient,
 ) {
-    constructor(session: () -> String?) : this(session, OkHttpClient.Builder()
+    constructor(session: () -> String?) : this(session, com.nanahoshi.audioplayer.data.HttpRoots.shared.newBuilder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .build())
@@ -86,7 +85,7 @@ class DlsiteArchiveClient internal constructor(
                     }
                 }
                 val id = workno.trim().uppercase()
-                if (!Regex("(?:RJ|BJ|VJ)[0-9]+").matches(id)) {
+                if (!com.nanahoshi.audioplayer.data.WorkIds.matches(id)) {
                     throw DlsiteArchiveException(TextRef.Res(R.string.dlsite_archive_error_invalid_work_id))
                 }
                 if ((!stagingDir.isDirectory && !stagingDir.mkdirs()) || stagingDir.isFile) {
@@ -181,7 +180,7 @@ class DlsiteArchiveClient internal constructor(
                                 403 -> throw DlsiteArchiveException(TextRef.Res(R.string.dlsite_archive_error_forbidden))
                                 404 -> throw DlsiteArchiveException(TextRef.Res(R.string.dlsite_archive_error_unavailable), DlsiteArchiveFailureKind.UNAVAILABLE)
                             }
-                            if (!response.isSuccessful) {
+                            if (!response.isSuccessful && !(range != null && response.code == 416)) {
                                 throw DlsiteArchiveException(TextRef.Res(R.string.dlsite_archive_error_server_denied))
                             }
                             return action(response)
@@ -263,57 +262,78 @@ class DlsiteArchiveClient internal constructor(
                         offset = 0
                     }
                     if (part.size == null || offset != part.size) {
-                        request(part.request, "bytes=$offset-") { response ->
-                            if (isHtml(response)) throw DlsiteArchiveException(TextRef.Res(R.string.dlsite_archive_error_html_login))
-                            val responseName = archiveName(response)
-                            if (responseName != null && responseName != part.name) {
-                                throw DlsiteArchiveException(TextRef.Res(R.string.dlsite_archive_error_incomplete_response))
-                            }
-                            val length: Long?
-                            val append: Boolean
-                            if (response.code == 206) {
-                                val range = parseContentRange(response.header("Content-Range"))
-                                    ?: throw DlsiteArchiveException(TextRef.Res(R.string.dlsite_archive_error_invalid_range))
-                                if (range.first != offset) throw DlsiteArchiveException(TextRef.Res(R.string.dlsite_archive_error_wrong_range))
-                                if (part.size != null && range.third != part.size) {
-                                    throw DlsiteArchiveException(TextRef.Res(R.string.dlsite_archive_error_changed))
+                        var retried416 = false
+                        while (true) {
+                            var retryFromZero = false
+                            request(part.request, "bytes=$offset-") { response ->
+                                if (response.code == 416) {
+                                    val total = parseUnsatisfiableTotal(response.header("Content-Range"))
+                                    if (offset > 0 && total != null && total == offset) {
+                                        return@request
+                                    }
+                                    if (offset > 0 && !retried416) {
+                                        retried416 = true
+                                        if (partial.exists() && !partial.delete()) {
+                                            throw DlsiteArchiveException(TextRef.Res(R.string.dlsite_archive_error_resume))
+                                        }
+                                        offset = 0
+                                        retryFromZero = true
+                                        return@request
+                                    }
+                                    throw DlsiteArchiveException(TextRef.Res(R.string.dlsite_archive_error_server_denied))
                                 }
-                                length = range.third
-                                append = offset > 0
-                            } else {
-                                // A server ignoring Range requires restarting, never appending a full response.
-                                offset = 0
-                                length = response.body?.contentLength()?.takeIf { it >= 0 }
-                                append = false
-                            }
-                            val body = response.body ?: throw DlsiteArchiveException(TextRef.Res(R.string.dlsite_archive_error_empty_body))
-                            val transfer = this.progress?.phase(ProgressPhase.DOWNLOADING, force = true)
-                            transfer?.bytes(0, offset, length)
-                            body.byteStream().use { input ->
-                                partial.outputStream(append).use { output ->
-                                    val buffer = ByteArray(64 * 1024)
-                                    var first = true
-                                    while (true) {
-                                        checked()
-                                        val count = input.read(buffer)
-                                        if (count < 0) break
-                                        if (first && offset == 0L && looksLikeHtml(buffer, count)) {
-                                            throw DlsiteArchiveException(TextRef.Res(R.string.dlsite_archive_error_html_response))
+                                if (isHtml(response)) throw DlsiteArchiveException(TextRef.Res(R.string.dlsite_archive_error_html_login))
+                                val responseName = archiveName(response)
+                                if (responseName != null && responseName != part.name) {
+                                    throw DlsiteArchiveException(TextRef.Res(R.string.dlsite_archive_error_incomplete_response))
+                                }
+                                val length: Long?
+                                val append: Boolean
+                                if (response.code == 206) {
+                                    val range = parseContentRange(response.header("Content-Range"))
+                                        ?: throw DlsiteArchiveException(TextRef.Res(R.string.dlsite_archive_error_invalid_range))
+                                    if (range.first != offset) throw DlsiteArchiveException(TextRef.Res(R.string.dlsite_archive_error_wrong_range))
+                                    if (part.size != null && range.third != part.size) {
+                                        throw DlsiteArchiveException(TextRef.Res(R.string.dlsite_archive_error_changed))
+                                    }
+                                    length = range.third
+                                    append = offset > 0
+                                } else {
+                                    // A server ignoring Range requires restarting, never appending a full response.
+                                    offset = 0
+                                    length = response.body?.contentLength()?.takeIf { it >= 0 }
+                                    append = false
+                                }
+                                val body = response.body ?: throw DlsiteArchiveException(TextRef.Res(R.string.dlsite_archive_error_empty_body))
+                                val transfer = this.progress?.phase(ProgressPhase.DOWNLOADING, force = true)
+                                transfer?.bytes(0, offset, length)
+                                body.byteStream().use { input ->
+                                    partial.outputStream(append).use { output ->
+                                        val buffer = ByteArray(64 * 1024)
+                                        var first = true
+                                        while (true) {
+                                            checked()
+                                            val count = input.read(buffer)
+                                            if (count < 0) break
+                                            if (first && offset == 0L && looksLikeHtml(buffer, count)) {
+                                                throw DlsiteArchiveException(TextRef.Res(R.string.dlsite_archive_error_html_response))
+                                            }
+                                            first = false
+                                            output.write(buffer, 0, count)
+                                            offset += count
+                                            transfer?.bytes(count.toLong(), offset, length)
+                                            if (length != null && offset > length) {
+                                                throw DlsiteArchiveException(TextRef.Res(R.string.dlsite_archive_error_integrity))
+                                            }
+                                            progress(offset)
                                         }
-                                        first = false
-                                        output.write(buffer, 0, count)
-                                        offset += count
-                                        transfer?.bytes(count.toLong(), offset, length)
-                                        if (length != null && offset > length) {
-                                            throw DlsiteArchiveException(TextRef.Res(R.string.dlsite_archive_error_integrity))
-                                        }
-                                        progress(offset)
                                     }
                                 }
+                                if ((length != null && offset != length) || (part.size != null && offset != part.size)) {
+                                    throw IOException("Incomplete archive")
+                                }
                             }
-                            if ((length != null && offset != length) || (part.size != null && offset != part.size)) {
-                                throw IOException("Incomplete archive")
-                            }
+                            if (!retryFromZero) break
                         }
                     }
                     if (!partial.isFile || partial.length() == 0L) throw IOException("Empty archive")
@@ -382,11 +402,10 @@ class DlsiteArchiveClient internal constructor(
         /** Restore the store's six/eight-digit spelling after library identity normalization. */
         internal fun archiveWorknoCandidates(workno: String): List<String> {
             val id = workno.trim().uppercase()
-            val match = Regex("(RJ|BJ|VJ)([0-9]+)").matchEntire(id)
-            val preferred = match?.let {
-                val digits = it.groupValues[2]
+            val preferred = com.nanahoshi.audioplayer.data.WorkIds.parts(id)?.let {
+                val digits = it.digits
                 val width = if (digits.length <= 6) 6 else 8
-                it.groupValues[1] + digits.padStart(width, '0')
+                it.prefix + digits.padStart(width, '0')
             } ?: id
             return (listOf(preferred) + DlsiteClient.worknoCandidates(id)).distinct()
                 .filter { it.length - 2 == 6 || it.length - 2 >= 8 }
@@ -394,12 +413,27 @@ class DlsiteArchiveClient internal constructor(
 
         internal fun parseDownloadLinks(page: HttpUrl, html: String, workno: String): List<HttpUrl> {
             // Official pages may put a URL in href, data attributes or an inline onclick.
-            // Read quoted URL values without evaluating any of the page's JavaScript.
-            val values = listOf('"', '\'').asSequence().flatMap { quote ->
-                Regex("$quote([^$quote<>\\r\\n]+)$quote").findAll(html).map { it.groupValues[1] }
+            // jsoup resolves entities and attributes; quoted values inside inline scripts
+            // are still read as text, without evaluating any of the page's JavaScript.
+            val document = Jsoup.parse(html, page.toString())
+            val candidates = linkedSetOf<String>()
+            fun consider(candidate: String) {
+                val normalized = candidate.replace("\\/", "/").trim()
+                if (normalized.contains("/download/") || normalized.contains("product_id")) candidates += normalized
             }
-            val links = values.mapNotNull { value ->
-                val raw = decodeLink(value).replace("\\/", "/")
+            fun absorb(raw: String) {
+                val value = raw.trim()
+                if (value.isEmpty()) return
+                consider(value)
+                QUOTED_VALUE.findAll(value).forEach { match ->
+                    consider(match.groupValues[1].ifEmpty { match.groupValues[2] })
+                }
+            }
+            document.allElements.forEach { element ->
+                element.attributes().forEach { absorb(it.value) }
+                if (element.tagName() == "script" || element.tagName() == "style") absorb(element.data())
+            }
+            val links = candidates.mapNotNull { raw ->
                 val url = page.resolve(raw) ?: return@mapNotNull null
                 val segments = url.pathSegments
                 val id = segments.indexOf("product_id").takeIf { it >= 0 }?.let { segments.getOrNull(it + 1) }
@@ -442,41 +476,33 @@ class DlsiteArchiveClient internal constructor(
             return identity(first) == identity(second)
         }
 
-        private fun decodeLink(value: String): String {
-            val named = value.replace("&amp;", "&").replace("&quot;", "\"").replace("&apos;", "'")
-            return Regex("&#(x[0-9a-fA-F]+|[0-9]+);").replace(named) { match ->
-                val number = match.groupValues[1]
-                val code = if (number.startsWith("x")) number.drop(1).toIntOrNull(16) else number.toIntOrNull()
-                code?.takeIf { it in 1..0x10FFFF && it !in 0xD800..0xDFFF }
-                    ?.let { String(Character.toChars(it)) } ?: match.value
-            }
-        }
-
         private fun downloadPageError(html: String): TextRef {
+            val document = Jsoup.parse(html)
+            val title = document.title().lowercase()
             val lower = html.lowercase()
-            return when {
-                lower.contains("cf-chl") || lower.contains("challenge-platform") ||
-                    lower.contains("<title>just a moment") || lower.contains("<title>attention required") ->
-                    TextRef.Res(R.string.dlsite_archive_error_verify)
-                Regex("<input[^>]+(?:type|name)\\s*=\\s*[\"'](?:password|login_id)[\"']", RegexOption.IGNORE_CASE).containsMatchIn(html) ->
-                    TextRef.Res(R.string.dlsite_archive_error_store_login)
-                else -> TextRef.Res(R.string.dlsite_archive_error_missing_address)
+            val challenge = title.contains("just a moment") || title.contains("attention required") ||
+                lower.contains("challenge-platform") || lower.contains("cf-chl") ||
+                document.selectFirst("[class*=cf-chl], [id*=cf-chl], script[src*=challenge-platform], script[src*=cdn-cgi]") != null
+            if (challenge) return TextRef.Res(R.string.dlsite_archive_error_verify)
+            val login = document.select("input").any { input ->
+                input.attr("type").equals("password", true) || input.attr("name").equals("login_id", true)
             }
+            return if (login) TextRef.Res(R.string.dlsite_archive_error_store_login)
+            else TextRef.Res(R.string.dlsite_archive_error_missing_address)
         }
 
         internal fun parseContentRange(raw: String?): Triple<Long, Long, Long>? {
-            val match = Regex("bytes ([0-9]+)-([0-9]+)/([0-9]+)").matchEntire(raw.orEmpty()) ?: return null
-            val (start, end, total) = match.destructured
-            val first = start.toLongOrNull() ?: return null
-            val last = end.toLongOrNull() ?: return null
-            val size = total.toLongOrNull() ?: return null
-            return Triple(first, last, size).takeIf { first <= last && last < size }
+            val range = com.nanahoshi.audioplayer.data.HttpByteRange.parse(raw) ?: return null
+            return Triple(range.start, range.end, range.total)
         }
+
+        internal fun parseUnsatisfiableTotal(raw: String?): Long? =
+            com.nanahoshi.audioplayer.data.HttpByteRange.unsatisfiedTotal(raw)
 
         private fun archiveName(response: Response): String? {
             val disposition = response.header("Content-Disposition").orEmpty()
-            val encoded = Regex("filename\\*\\s*=\\s*UTF-8''([^;]+)", RegexOption.IGNORE_CASE).find(disposition)?.groupValues?.get(1)
-            val regular = Regex("filename\\s*=\\s*(?:\"([^\"]+)\"|([^;]+))", RegexOption.IGNORE_CASE)
+            val encoded = FILENAME_STAR.find(disposition)?.groupValues?.get(1)
+            val regular = FILENAME_PARAM
                 .find(disposition)?.let { it.groupValues[1].ifBlank { it.groupValues[2].trim() } }
             val segments = response.request.url.pathSegments
             val urlName = segments.indexOf("file").takeIf { it >= 0 }?.let { segments.getOrNull(it + 1) }
@@ -487,7 +513,7 @@ class DlsiteArchiveClient internal constructor(
         internal fun safePackageName(name: String) {
             if (name.length > 240 || name.any { it == '/' || it == '\\' || it == '\u0000' || it.isISOControl() } ||
                 name == "." || name == ".." || name.contains(':') ||
-                !Regex(".*\\.(zip|rar|exe|[rR][0-9]{2,3}|[0-9]{3})", RegexOption.IGNORE_CASE).matches(name)) {
+                !PACKAGE_NAME.matches(name)) {
                 throw DlsiteArchiveException(TextRef.Res(R.string.dlsite_archive_error_format))
             }
         }

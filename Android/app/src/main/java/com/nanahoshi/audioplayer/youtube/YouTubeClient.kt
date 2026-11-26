@@ -4,9 +4,11 @@ import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.text.TextRef
 import com.nanahoshi.audioplayer.text.UserFacingError
 import com.nanahoshi.audioplayer.data.TaskReporter
+import com.nanahoshi.audioplayer.data.toHttps
 import com.nanahoshi.audioplayer.data.ProgressPhase
 import com.nanahoshi.audioplayer.data.ProgressNetworkEvents
 import com.nanahoshi.audioplayer.data.taskProgress
+import com.nanahoshi.audioplayer.data.withResponse
 
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
@@ -26,11 +28,16 @@ internal class MediaRejected(val code: Int) : IOException("YouTube media rejecte
     override val userText = TextRef.Res(R.string.youtube_error_media_rejected)
 }
 
+private val PLAYLIST_ID_PATTERN = Regex("[A-Za-z0-9_-]{2,80}")
+private val STS_PATTERN = Regex("\"STS\"\\s*:\\s*(\\d+)")
+private val GATE_FIELD_PATTERN = Regex("\"([A-Za-z0-9_]+)\"\\s*:\\s*\"([^\"]+)\"")
+
 class YouTubeClient(
     private val cookie: () -> String?,
     private val solver: YouTubeSolver,
     mediaHttp: OkHttpClient? = null,
     private val diagnostics: (YouTubeDiagnostic) -> Unit = {},
+    httpRoot: OkHttpClient? = null,
     private val transport: (suspend (Request) -> String)? = null,
 ) {
     companion object {
@@ -44,7 +51,8 @@ class YouTubeClient(
         Client("ANDROID", "3", "21.26.364", "com.google.android.youtube/21.26.364 (Linux; U; Android 11) gzip"),
         Client("WEB", "1", "", WEB_AGENT),
     )
-    private val http = OkHttpClient.Builder().connectTimeout(20, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS)
+    private val http = (httpRoot ?: com.nanahoshi.audioplayer.data.HttpRoots.shared).newBuilder()
+        .connectTimeout(20, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS)
         .callTimeout(20, TimeUnit.SECONDS).protocols(listOf(Protocol.HTTP_1_1)).build()
     private val media = (mediaHttp ?: http).newBuilder().eventListenerFactory(ProgressNetworkEvents.factory).callTimeout(10, TimeUnit.MINUTES).readTimeout(30, TimeUnit.SECONDS)
         .addNetworkInterceptor { chain ->
@@ -64,7 +72,7 @@ class YouTubeClient(
             .addQueryParameter("url", "https://www.youtube.com/watch?v=$id").addQueryParameter("format", "json").build()
         val root = json(request(Request.Builder().url(url).header("User-Agent", WEB_AGENT).build()))
         val title = root.text("title").takeIf { it.isNotBlank() } ?: throw YouTubeException(TextRef.Res(R.string.youtube_error_missing_title))
-        val cover = root.text("thumbnail_url").replace("http://", "https://").toHttpUrlOrNull()
+        val cover = root.text("thumbnail_url").toHttps().toHttpUrlOrNull()
             ?.takeIf { it.isHttps && (it.host == "ytimg.com" || it.host.endsWith(".ytimg.com")) }?.toString()
             ?: "https://i.ytimg.com/vi/$id/hqdefault.jpg"
         return YouTubeVideo(id, title, root.text("author_name"), cover)
@@ -79,7 +87,7 @@ class YouTubeClient(
         }
     }
     suspend fun playlist(id: String): YouTubeResults {
-        if (!Regex("[A-Za-z0-9_-]{2,80}").matches(id)) throw YouTubeException(TextRef.Res(R.string.youtube_error_invalid_playlist_id))
+        if (!PLAYLIST_ID_PATTERN.matches(id)) throw YouTubeException(TextRef.Res(R.string.youtube_error_invalid_playlist_id))
         if ((id == "LL" || id == "WL") && cookie().isNullOrBlank()) throw YouTubeException(TextRef.Res(R.string.youtube_error_cookie_required))
         return pages("browse", id)
     }
@@ -91,7 +99,6 @@ class YouTubeClient(
         return when {
             body.contains("\"LOGGED_IN\":true") || body.contains("loggedIn\":true") ->
                 TextRef.Res(R.string.youtube_status_logged_in)
-            body.contains("\"LOGGED_IN\":false") -> TextRef.Res(R.string.youtube_status_unconfirmed)
             else -> TextRef.Res(R.string.youtube_status_unconfirmed)
         }
     }
@@ -99,9 +106,10 @@ class YouTubeClient(
         gate ?: try {
             val body = request(Request.Builder().url("https://www.youtube.com/").header("User-Agent", WEB_AGENT)
                 .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8").build())
-            fun field(name: String) = Regex("\"$name\"\\s*:\\s*\"([^\"]+)\"").find(body)?.groupValues?.get(1).orEmpty()
+            fun field(name: String) = GATE_FIELD_PATTERN.findAll(body)
+                .firstOrNull { it.groupValues[1] == name }?.groupValues?.get(2).orEmpty()
             Gate(field("VISITOR_DATA"), field("INNERTUBE_CLIENT_VERSION").ifBlank { WEB_VERSION },
-                field("jsUrl").replace("\\/", "/"), Regex("\"STS\"\\s*:\\s*(\\d+)").find(body)?.groupValues?.get(1)?.toIntOrNull() ?: 0)
+                field("jsUrl").replace("\\/", "/"), STS_PATTERN.find(body)?.groupValues?.get(1)?.toIntOrNull() ?: 0)
                 .also { if (it.visitor.isNotBlank()) gate = it }
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (_: Exception) { Gate() }
@@ -250,67 +258,40 @@ class YouTubeClient(
     }
 
     /** 每次只请求 1 MiB；断流重试当前段，已完成的段保留。 */
-    suspend fun copyAudio(audio: YouTubeAudio, partial: File, taskProgress: TaskReporter? = null, onProgress: (Long, Long) -> Unit) = suspendCancellableCoroutine<Unit> { continuation ->
+    suspend fun copyAudio(
+        audio: YouTubeAudio,
+        partial: File,
+        taskProgress: TaskReporter? = null,
+        onProgress: (Long, Long) -> Unit,
+    ) = withContext(Dispatchers.IO) {
         val started = System.nanoTime()
-        val currentCall = java.util.concurrent.atomic.AtomicReference<Call?>()
         var position = 0L
         var total = -1L
         val chunkSize = 1024L * 1024L
-        continuation.invokeOnCancellation { currentCall.get()?.cancel(); partial.delete() }
-
-        fun fail(error: Exception) {
-            partial.delete()
-            if (continuation.isActive) continuation.resumeWithException(
-                if (error is MediaRejected || error is YouTubeException) error else YouTubeException(TextRef.Res(R.string.youtube_error_audio_download_failed), error),
-            )
-        }
-        fun finish() {
-            try {
-                if (position < 1024 || partial.length() != position) throw YouTubeException(TextRef.Res(R.string.youtube_error_incomplete_audio))
-                val signature = partial.inputStream().use { input ->
-                    val header = ByteArray(8)
-                    input.read(header)
-                    String(header, 4, 4, Charsets.US_ASCII)
-                }
-                if (signature != "ftyp") throw YouTubeException(TextRef.Res(R.string.youtube_error_unrecognized_audio))
-                onProgress(position, total)
-                if (continuation.isActive) continuation.resume(Unit)
-            } catch (error: Exception) { fail(error) }
-        }
-        lateinit var enqueueChunk: (Int) -> Unit
-        fun failedAttempt(error: Exception, attempt: Int, stage: String, code: Int? = null, bytesRead: Long = position) {
-            if (!continuation.isActive) { partial.delete(); return }
-            reportFailure(stage, error, started, code, bytesRead, total)
-            if (error is IOException && error !is YouTubeException && error !is MediaRejected && attempt < 2) {
-                taskProgress?.retry()
-                taskProgress?.phase(ProgressPhase.RETRYING)
-                enqueueChunk(attempt + 1)
-            } else fail(error)
-        }
-        enqueueChunk = enqueue@{ attempt ->
-            if (!continuation.isActive) { partial.delete(); return@enqueue }
-            val start = position
-            val end = if (total > 0) minOf(start + chunkSize - 1, total - 1) else start + chunkSize - 1
-            val request = Request.Builder().url(audio.url).taskProgress(taskProgress)
-                .apply { audio.headers.forEach { (key, value) -> header(key, value) } }
-                .header("Range", "bytes=$start-$end").build()
-            val call = media.newCall(request)
-            currentCall.set(call)
-            if (!continuation.isActive) { call.cancel(); partial.delete(); return@enqueue }
-            call.enqueue(object : Callback {
-                override fun onFailure(call: Call, e: IOException) {
-                    failedAttempt(e, attempt, "media_connect")
-                }
-                override fun onResponse(call: Call, response: Response) {
-                    var read = 0L
-                    var complete = false
-                    try {
-                        response.use {
-                            if (!continuation.isActive) throw IOException("cancelled")
+        var success = false
+        val output = java.io.RandomAccessFile(partial, "rw")
+        try {
+            var attempt = 0
+            while (true) {
+                currentCoroutineContext().ensureActive()
+                val start = position
+                val end = if (total > 0) minOf(start + chunkSize - 1, total - 1) else start + chunkSize - 1
+                val request = Request.Builder().url(audio.url).taskProgress(taskProgress)
+                    .apply { audio.headers.forEach { (key, value) -> header(key, value) } }
+                    .header("Range", "bytes=$start-$end").build()
+                var reportedInResponse = false
+                var read = 0L
+                try {
+                    val complete = media.newCall(request).withResponse { response ->
+                        try {
+                            currentCoroutineContext().ensureActive()
                             if (response.code in setOf(401, 403, 404)) throw MediaRejected(response.code)
-                            if (response.code != 200 && response.code != 206) throw YouTubeException(TextRef.Res(R.string.youtube_error_audio_download_failed))
+                            if (response.code != 200 && response.code != 206) {
+                                throw YouTubeException(TextRef.Res(R.string.youtube_error_audio_download_failed))
+                            }
                             val body = response.body ?: throw YouTubeException(TextRef.Res(R.string.youtube_error_no_audio_body))
                             val length: Long
+                            var chunkComplete = false
                             if (response.code == 206) {
                                 val range = parseMediaRange(response.header("Content-Range"))
                                     ?: throw YouTubeException(TextRef.Res(R.string.youtube_error_unrecognized_audio))
@@ -319,23 +300,27 @@ class YouTubeClient(
                                 }
                                 total = range.total
                                 length = range.end - range.start + 1
-                                if (body.contentLength() >= 0 && body.contentLength() != length) throw YouTubeException(TextRef.Res(R.string.youtube_error_incomplete_data))
+                                if (body.contentLength() >= 0 && body.contentLength() != length) {
+                                    throw YouTubeException(TextRef.Res(R.string.youtube_error_incomplete_data))
+                                }
                             } else {
                                 // 小文件即使忽略 Range 也可一次完成；大文件不能退回被限速的整段读取。
-                                if (start != 0L || body.contentLength() > chunkSize) throw YouTubeException(TextRef.Res(R.string.youtube_error_server_response))
+                                if (start != 0L || body.contentLength() > chunkSize) {
+                                    throw YouTubeException(TextRef.Res(R.string.youtube_error_server_response))
+                                }
                                 length = body.contentLength()
                                 if (length >= 0) total = length
-                                complete = true
+                                chunkComplete = true
                             }
                             val transfer = taskProgress?.phase(ProgressPhase.DOWNLOADING)
                             transfer?.bytes(0, start, total.takeIf { it > 0 })
-                            body.byteStream().use { input -> java.io.RandomAccessFile(partial, "rw").use { output ->
+                            body.byteStream().use { input ->
                                 output.setLength(start)
                                 output.seek(start)
                                 val buffer = ByteArray(64 * 1024)
                                 var reported = 0L
                                 while (length < 0 || read < length) {
-                                    if (!continuation.isActive) throw IOException("cancelled")
+                                    currentCoroutineContext().ensureActive()
                                     val remaining = if (length < 0) chunkSize + 1 - read else length - read
                                     if (remaining <= 0) throw YouTubeException(TextRef.Res(R.string.youtube_error_server_response))
                                     val count = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
@@ -346,25 +331,62 @@ class YouTubeClient(
                                     output.write(buffer, 0, count)
                                     read += count
                                     transfer?.bytes(count.toLong(), start + read, total.takeIf { it > 0 })
-                                    if (length < 0 && read > chunkSize) throw YouTubeException(TextRef.Res(R.string.youtube_error_server_response))
+                                    if (length < 0 && read > chunkSize) {
+                                        throw YouTubeException(TextRef.Res(R.string.youtube_error_server_response))
+                                    }
                                     if (read - reported >= 256 * 1024) {
-                                        onProgress(start + read, total.coerceAtLeast(0)); reported = read
+                                        onProgress(start + read, total.coerceAtLeast(0))
+                                        reported = read
                                     }
                                 }
-                            } }
+                            }
+                            chunkComplete
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (error: Exception) {
+                            currentCoroutineContext().ensureActive()
+                            reportedInResponse = true
+                            reportFailure("media_read", error, started, response.code, start + read, total)
+                            throw error
                         }
-                        if (!continuation.isActive) { partial.delete(); return }
-                        position = start + read
-                        if (total < 0 && complete) total = position
-                        onProgress(position, total.coerceAtLeast(0))
-                        if (complete || position == total) finish() else enqueueChunk(0)
-                    } catch (error: Exception) {
-                        failedAttempt(error, attempt, "media_read", response.code, start + read)
+                    }
+                    currentCoroutineContext().ensureActive()
+                    position = start + read
+                    if (total < 0 && complete) total = position
+                    onProgress(position, total.coerceAtLeast(0))
+                    if (complete || position == total) break
+                    attempt = 0
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    currentCoroutineContext().ensureActive()
+                    if (!reportedInResponse) {
+                        reportFailure("media_connect", error, started, null, position, total)
+                    }
+                    if (error is IOException && error !is YouTubeException && error !is MediaRejected && attempt < 2) {
+                        attempt++
+                        taskProgress?.retry()
+                        taskProgress?.phase(ProgressPhase.RETRYING)
+                    } else {
+                        throw if (error is MediaRejected || error is YouTubeException) error
+                        else YouTubeException(TextRef.Res(R.string.youtube_error_audio_download_failed), error)
                     }
                 }
-            })
+            }
+            if (position < 1024 || partial.length() != position) {
+                throw YouTubeException(TextRef.Res(R.string.youtube_error_incomplete_audio))
+            }
+            output.seek(0)
+            val header = ByteArray(8)
+            output.readFully(header)
+            val signature = String(header, 4, 4, Charsets.US_ASCII)
+            if (signature != "ftyp") throw YouTubeException(TextRef.Res(R.string.youtube_error_unrecognized_audio))
+            onProgress(position, total)
+            success = true
+        } finally {
+            runCatching { output.close() }
+            if (!success) partial.delete()
         }
-        enqueueChunk(0)
     }
     private fun json(value: String): JsonElement = try { Json.parseToJsonElement(value) } catch (_: Exception) { throw YouTubeException(TextRef.Res(R.string.youtube_error_unreadable_content)) }
     private suspend fun request(request: Request): String {
@@ -379,13 +401,19 @@ class YouTubeClient(
                 override fun onResponse(call: Call, response: Response) {
                     try {
                         val value = response.use {
-                            if (!it.isSuccessful) throw YouTubeException(TextRef.Res(
-                                if (it.code == 401) R.string.youtube_error_login_expired
-                                else R.string.youtube_error_request_failed,
-                            ))
-                            it.body?.string() ?: throw YouTubeException(TextRef.Res(R.string.youtube_error_no_content))
+                            if (!it.isSuccessful) throw YouTubeException(
+                                TextRef.Res(
+                                    if (it.code == 401) R.string.youtube_error_login_expired
+                                    else R.string.youtube_error_request_failed,
+                                ),
+                                statusCode = it.code,
+                            )
+                            it.body?.string()?.takeIf { body -> body.isNotEmpty() }
+                                ?: throw YouTubeException(TextRef.Res(R.string.youtube_error_no_content))
                         }
                         if (continuation.isActive) continuation.resume(value)
+                    } catch (error: YouTubeException) {
+                        if (continuation.isActive) continuation.resumeWithException(error)
                     } catch (_: Exception) {
                         if (continuation.isActive) {
                             continuation.resumeWithException(YouTubeException(

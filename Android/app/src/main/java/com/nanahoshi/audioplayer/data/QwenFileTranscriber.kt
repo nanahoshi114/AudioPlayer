@@ -6,6 +6,12 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.putJsonObject
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
@@ -15,16 +21,15 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
-import org.json.JSONArray
-import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 internal class QwenFileTranscriber(
     private val calls: InflightCalls,
+    root: OkHttpClient = HttpRoots.shared,
 ) {
-    private val http = OkHttpClient.Builder()
+    private val http = root.newBuilder()
         .eventListenerFactory(ProgressNetworkEvents.factory)
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(2, TimeUnit.MINUTES)
@@ -63,7 +68,7 @@ internal class QwenFileTranscriber(
         return cuesFromQwenPayload(payload)
     }
 
-    private suspend fun policy(origin: HttpUrl, ticket: InflightCalls.Ticket, token: String): JSONObject {
+    private suspend fun policy(origin: HttpUrl, ticket: InflightCalls.Ticket, token: String): JsonObject {
         val url = origin.newBuilder()
             .addPathSegment("api")
             .addPathSegment("v1")
@@ -72,12 +77,12 @@ internal class QwenFileTranscriber(
             .addQueryParameter("model", QWEN_FILE_MODEL)
             .build()
         val json = get(url, ticket, token)
-        return json.optJSONObject("data") ?: throw WhisperException(TextRef.Res(R.string.whisper_error_failed))
+        return json.jsonObject("data") ?: throw WhisperException(TextRef.Res(R.string.whisper_error_failed))
     }
 
-    private fun upload(policy: JSONObject, file: File, ticket: InflightCalls.Ticket): String {
-        val host = policy.optString("upload_host").toHttpUrlOrNull() ?: throw WhisperException(TextRef.Res(R.string.whisper_error_failed))
-        val dir = policy.optString("upload_dir").trim().trim('/')
+    private fun upload(policy: JsonObject, file: File, ticket: InflightCalls.Ticket): String {
+        val host = policy.jsonStringOrEmpty("upload_host").toHttpUrlOrNull() ?: throw WhisperException(TextRef.Res(R.string.whisper_error_failed))
+        val dir = policy.jsonStringOrEmpty("upload_dir").trim().trim('/')
         if (dir.isEmpty()) throw WhisperException(TextRef.Res(R.string.whisper_error_failed))
         val header = file.inputStream().use { input ->
             val buffer = ByteArray(16)
@@ -88,11 +93,11 @@ internal class QwenFileTranscriber(
         val key = "$dir/$name"
         val body = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
-            .addFormDataPart("OSSAccessKeyId", policy.optString("oss_access_key_id"))
-            .addFormDataPart("Signature", policy.optString("signature"))
-            .addFormDataPart("policy", policy.optString("policy"))
-            .addFormDataPart("x-oss-object-acl", policy.optString("x_oss_object_acl"))
-            .addFormDataPart("x-oss-forbid-overwrite", policy.optString("x_oss_forbid_overwrite"))
+            .addFormDataPart("OSSAccessKeyId", policy.jsonStringOrEmpty("oss_access_key_id"))
+            .addFormDataPart("Signature", policy.jsonStringOrEmpty("signature"))
+            .addFormDataPart("policy", policy.jsonStringOrEmpty("policy"))
+            .addFormDataPart("x-oss-object-acl", policy.jsonStringOrEmpty("x_oss_object_acl"))
+            .addFormDataPart("x-oss-forbid-overwrite", policy.jsonStringOrEmpty("x_oss_forbid_overwrite"))
             .addFormDataPart("key", key)
             .addFormDataPart("success_action_status", "200")
             .addFormDataPart("file", name, file.asRequestBody(AUDIO.toMediaType()).withUploadProgress(ticket.progress))
@@ -112,11 +117,15 @@ internal class QwenFileTranscriber(
             .addPathSegment("asr")
             .addPathSegment("transcription")
             .build()
-        val payload = JSONObject()
-            .put("model", QWEN_FILE_MODEL)
-            .put("input", JSONObject().put("file_urls", JSONArray().put(ossUrl)))
-            .put("parameters", JSONObject().put("language_hints", JSONArray().put("ja")))
-            .toString()
+        val payload = buildJsonObject {
+            put("model", QWEN_FILE_MODEL)
+            putJsonObject("input") {
+                putJsonArray("file_urls") { add(JsonPrimitive(ossUrl)) }
+            }
+            putJsonObject("parameters") {
+                putJsonArray("language_hints") { add(JsonPrimitive("ja")) }
+            }
+        }.toString()
         val json = execute(
             Request.Builder()
                 .url(url)
@@ -132,8 +141,8 @@ internal class QwenFileTranscriber(
             if (!response.isSuccessful) throw WhisperException(qwenErrorMessage(text))
             parseObject(text)
         }
-        val output = json.optJSONObject("output") ?: throw WhisperException(qwenErrorMessage(json.toString()))
-        val id = output.optString("task_id")
+        val output = json.jsonObject("output") ?: throw WhisperException(qwenErrorMessage(json.toString()))
+        val id = output.jsonStringOrEmpty("task_id")
         if (id.isBlank()) throw WhisperException(TextRef.Res(R.string.whisper_error_failed))
         return id
     }
@@ -149,8 +158,8 @@ internal class QwenFileTranscriber(
             .build()
         while (true) {
             val json = get(url, ticket, token)
-            val output = json.optJSONObject("output") ?: throw WhisperException(qwenErrorMessage(json.toString()))
-            val status = output.optString("task_status")
+            val output = json.jsonObject("output") ?: throw WhisperException(qwenErrorMessage(json.toString()))
+            val status = output.jsonStringOrEmpty("task_status")
             ticket.progress?.phase(when (status) {
                 "PENDING" -> ProgressPhase.REMOTE_PENDING
                 "RUNNING" -> ProgressPhase.REMOTE_RUNNING
@@ -165,18 +174,18 @@ internal class QwenFileTranscriber(
                     delay(2_000)
                 }
                 "SUCCEEDED" -> {
-                    val result = output.optJSONArray("results")?.optJSONObject(0)
+                    val result = (output.jsonArray("results")?.getOrNull(0) as? JsonObject)
                         ?: throw WhisperException(TextRef.Res(R.string.whisper_error_failed))
-                    if (result.optString("subtask_status") == "FAILED") {
-                        throw WhisperException(result.optString("message").takeIf { it.isNotBlank() }?.take(80)?.let(TextRef::Raw) ?: TextRef.Res(R.string.whisper_error_failed))
+                    if (result.jsonString("subtask_status") == "FAILED") {
+                        throw WhisperException(result.jsonString("message")?.takeIf { it.isNotBlank() }?.take(80)?.let(TextRef::Raw) ?: TextRef.Res(R.string.whisper_error_failed))
                     }
-                    return result.optString("transcription_url").takeIf { it.isNotBlank() }
+                    return result.jsonString("transcription_url")?.takeIf { it.isNotBlank() }
                         ?: throw WhisperException(TextRef.Res(R.string.whisper_error_failed))
                 }
                 else -> {
-                    val result = output.optJSONArray("results")?.optJSONObject(0)
-                    val message = result?.optString("message").takeIf { !it.isNullOrBlank() }
-                        ?: output.optString("message").takeIf { it.isNotBlank() }
+                    val result = output.jsonArray("results")?.getOrNull(0) as? JsonObject
+                    val message = result?.jsonString("message")?.takeIf { it.isNotBlank() }
+                        ?: output.jsonString("message")?.takeIf { it.isNotBlank() }
                     throw WhisperException(message?.take(80)?.let(TextRef::Raw) ?: TextRef.Res(R.string.whisper_error_failed))
                 }
             }
@@ -192,7 +201,7 @@ internal class QwenFileTranscriber(
         }
     }
 
-    private suspend fun get(url: HttpUrl, ticket: InflightCalls.Ticket, token: String): JSONObject {
+    private suspend fun get(url: HttpUrl, ticket: InflightCalls.Ticket, token: String): JsonObject {
         val request = Request.Builder().url(url).header("Authorization", "Bearer $token").build()
         val call = http.newCall(request)
         if (!calls.begin(ticket, call)) throw CancellationException()
@@ -235,11 +244,8 @@ internal class QwenFileTranscriber(
         }
     }
 
-    private fun parseObject(text: String): JSONObject = try {
-        JSONObject(text)
-    } catch (_: Exception) {
-        throw WhisperException(TextRef.Res(R.string.whisper_error_failed))
-    }
+    private fun parseObject(text: String): JsonObject =
+        parseJsonObjectOrNull(text) ?: throw WhisperException(TextRef.Res(R.string.whisper_error_failed))
 
     private companion object {
         const val AUDIO = "application/octet-stream"

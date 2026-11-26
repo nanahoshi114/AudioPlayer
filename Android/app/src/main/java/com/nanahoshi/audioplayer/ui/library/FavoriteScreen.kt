@@ -8,7 +8,6 @@ import android.app.Application
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -17,19 +16,19 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.Text
 import com.nanahoshi.audioplayer.ui.components.AppTopBar
+import com.nanahoshi.audioplayer.ui.components.CoverImage
 import com.nanahoshi.audioplayer.ui.components.EmptyState
 import com.nanahoshi.audioplayer.ui.components.ErrorState
+import com.nanahoshi.audioplayer.ui.components.LoadMoreOnScrollEnd
+import com.nanahoshi.audioplayer.ui.components.LoadingState
+import com.nanahoshi.audioplayer.ui.components.SelectionState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
-import androidx.compose.runtime.snapshotFlow
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
@@ -39,7 +38,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nanahoshi.audioplayer.bilibili.FavFolder
 import com.nanahoshi.audioplayer.bilibili.FavVideo
 import com.nanahoshi.audioplayer.graph
-import com.nanahoshi.audioplayer.ui.CoverImage
 import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -51,7 +49,8 @@ class FavoriteViewModel(app: Application) : AndroidViewModel(app) {
     val folders = MutableStateFlow<List<FavFolder>>(emptyList())
     val opened = MutableStateFlow<FavFolder?>(null)
     val videos = MutableStateFlow<List<FavVideo>>(emptyList())
-    val selected = MutableStateFlow<Set<String>>(emptySet())
+    private val selection = SelectionState<String>()
+    val selected = selection.flow
     val loading = MutableStateFlow(false)
     val importing = MutableStateFlow(false)
     val hasMore = MutableStateFlow(false)
@@ -85,7 +84,7 @@ class FavoriteViewModel(app: Application) : AndroidViewModel(app) {
         stopPaging()
         opened.value = folder
         videos.value = emptyList()
-        selected.value = emptySet()
+        selection.clear()
         hasMore.value = true
         nextPage = 1
         loadMore()
@@ -95,7 +94,7 @@ class FavoriteViewModel(app: Application) : AndroidViewModel(app) {
         stopPaging()
         opened.value = null
         videos.value = emptyList()
-        selected.value = emptySet()
+        selection.clear()
         hasMore.value = false
         error.value = null
     }
@@ -140,11 +139,10 @@ class FavoriteViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun toggle(bvid: String) {
-        val current = selected.value
-        selected.value = if (bvid in current) current - bvid else current + bvid
+        selection.toggle(bvid)
     }
 
-    fun importSelected(folderId: Long?, onDone: () -> Unit) {
+    fun importSelected(onDone: () -> Unit) {
         val bvids = selected.value.toList()
         if (bvids.isEmpty()) {
             graph.show(R.string.bilibili_select_video)
@@ -179,7 +177,7 @@ class FavoriteViewModel(app: Application) : AndroidViewModel(app) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun FavoriteScreen(onBack: () -> Unit, folderId: Long? = null, viewModel: FavoriteViewModel = viewModel()) {
+fun FavoriteScreen(onBack: () -> Unit, viewModel: FavoriteViewModel = viewModel()) {
     val folders by viewModel.folders.collectAsStateWithLifecycle()
     val opened by viewModel.opened.collectAsStateWithLifecycle()
     val videos by viewModel.videos.collectAsStateWithLifecycle()
@@ -194,16 +192,15 @@ fun FavoriteScreen(onBack: () -> Unit, folderId: Long? = null, viewModel: Favori
 
     BackHandler(enabled = folder != null) { viewModel.closeFolder() }
 
-    LaunchedEffect(folder?.id, videos.size, hasMore, loading, loadError) {
-        if (folder == null || loading || !hasMore || loadError != null) return@LaunchedEffect
-        snapshotFlow {
-            if (videos.isEmpty()) return@snapshotFlow true
-            val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: return@snapshotFlow false
-            last >= listState.layoutInfo.totalItemsCount - 3
-        }.collect { nearEnd ->
-            if (nearEnd && viewModel.error.value == null) viewModel.loadMore()
-        }
-    }
+    LoadMoreOnScrollEnd(
+        state = listState,
+        itemCount = videos.size,
+        canLoadMore = folder != null && hasMore,
+        loading = loading,
+        hasError = loadError != null,
+        loadWhenEmpty = true,
+        onLoadMore = viewModel::loadMore,
+    )
 
     Column(Modifier.fillMaxSize()) {
         AppTopBar(
@@ -266,11 +263,11 @@ fun FavoriteScreen(onBack: () -> Unit, folderId: Long? = null, viewModel: Favori
             }
         }
         if (loading || importing) {
-            CircularProgressIndicator(Modifier.padding(16.dp).align(Alignment.CenterHorizontally))
+            LoadingState()
         }
         if (folder != null) {
             Button(
-                onClick = { viewModel.importSelected(folderId, onBack) },
+                onClick = { viewModel.importSelected(onBack) },
                 enabled = !importing && selected.isNotEmpty(),
                 modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
             ) { Text(stringResource(R.string.common_add_to_library)) }

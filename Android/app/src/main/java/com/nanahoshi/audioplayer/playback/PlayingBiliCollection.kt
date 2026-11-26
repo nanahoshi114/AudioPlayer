@@ -1,5 +1,6 @@
 package com.nanahoshi.audioplayer.playback
 
+import com.nanahoshi.audioplayer.bilibili.BV_PATTERN
 import com.nanahoshi.audioplayer.bilibili.BiliCollection
 import com.nanahoshi.audioplayer.bilibili.BiliVideoCollectionCache
 import com.nanahoshi.audioplayer.data.TrackSource
@@ -12,7 +13,7 @@ import kotlinx.coroutines.launch
 
 internal fun QueuedTrack?.biliVideoId(): String? {
     if (this?.source != TrackSource.BILIBILI) return null
-    return sequenceOf(bvid, workno).filterNotNull().firstOrNull { Regex("BV[0-9A-Za-z]{10}").matches(it) }
+    return sequenceOf(bvid, workno).filterNotNull().firstOrNull { BV_PATTERN.matches(it) }
 }
 
 internal data class PlayingBiliVideo(val bvid: String?, val queueItemId: Long, val session: Long)

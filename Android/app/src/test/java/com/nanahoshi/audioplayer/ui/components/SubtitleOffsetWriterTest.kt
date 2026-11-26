@@ -183,4 +183,37 @@ class SubtitleOffsetWriterTest {
             scope.cancel()
         }
     }
+
+    @Test
+    fun earlyRoomEmissionDuringInFlightPersistKeepsNewerPendingValue(): Unit = runBlocking {
+        val firstPersistStarted = CompletableDeferred<Unit>()
+        val allowFirstReturn = CompletableDeferred<Unit>()
+        val writes = Collections.synchronizedList(mutableListOf<Long?>())
+        val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+        val writer = SubtitleOffsetWriter(scope, persist = { _, offset ->
+            writes += offset
+            if (writes.size == 1) {
+                firstPersistStarted.complete(Unit)
+                allowFirstReturn.await()
+            }
+        })
+        try {
+            assertEquals(500L, writer.step(trackId, 0L, 500L))
+            withTimeout(5_000) { firstPersistStarted.await() }
+
+            // 第一次写入尚在途，用户继续加 500ms，同时 Room 先回流了 +500ms。
+            assertEquals(1000L, writer.step(trackId, 0L, 500L))
+            assertEquals(1000L, writer.displayedOffset(trackId, 500L))
+            assertEquals(1000L, writer.pendingOffsets.value[trackId])
+
+            allowFirstReturn.complete(Unit)
+            withTimeout(5_000) { while (writes.size < 2) delay(5) }
+            assertEquals(listOf<Long?>(500L, 1000L), writes)
+            assertEquals(1000L, writer.displayedOffset(trackId, 500L))
+            writer.sync(trackId, 1000L)
+            assertNull(writer.pendingOffsets.value[trackId])
+        } finally {
+            scope.cancel()
+        }
+    }
 }

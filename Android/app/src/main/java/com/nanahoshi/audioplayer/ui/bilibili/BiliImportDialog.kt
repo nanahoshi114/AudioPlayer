@@ -9,12 +9,12 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nanahoshi.audioplayer.bilibili.BiliImportMode
 import com.nanahoshi.audioplayer.data.BiliImportPrompt
 import com.nanahoshi.audioplayer.data.BiliImportRequests
+import com.nanahoshi.audioplayer.ui.components.SegmentedTabBar
 
 @Composable
 internal fun BiliImportDialog(
@@ -40,18 +40,14 @@ internal fun BiliImportDialog(
                                 ),
                             )
                         } else {
-                            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                                SegmentedButton(selected = option.mode == BiliImportMode.SPLIT,
-                                    onClick = { requests.edit(prompt.id, index) { it.copy(mode = BiliImportMode.SPLIT) } },
-                                    shape = SegmentedButtonDefaults.itemShape(0, 2)) {
-                                    Text(stringResource(R.string.bilibili_import_separate), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
-                                }
-                                SegmentedButton(selected = option.mode == BiliImportMode.GROUPED,
-                                    onClick = { requests.edit(prompt.id, index) { it.copy(mode = BiliImportMode.GROUPED) } },
-                                    shape = SegmentedButtonDefaults.itemShape(1, 2)) {
-                                    Text(stringResource(R.string.bilibili_import_grouped), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
-                                }
-                            }
+                            val separateLabel = stringResource(R.string.bilibili_import_separate)
+                            val groupedLabel = stringResource(R.string.bilibili_import_grouped)
+                            SegmentedTabBar(
+                                options = listOf(BiliImportMode.SPLIT, BiliImportMode.GROUPED),
+                                selected = option.mode,
+                                label = { mode -> if (mode == BiliImportMode.SPLIT) separateLabel else groupedLabel },
+                                onSelect = { mode -> requests.edit(prompt.id, index) { it.copy(mode = mode) } },
+                            )
                             if (option.mode == BiliImportMode.GROUPED) Text(
                                 stringResource(R.string.bilibili_import_grouped_summary, option.details.parts.size),
                                 Modifier.padding(top = 8.dp),
@@ -78,7 +74,10 @@ internal fun BiliImportDialog(
                                 val toggle = { requests.edit(prompt.id, index) {
                                     it.copy(selected = if (part.cid in it.selected) it.selected - part.cid else it.selected + part.cid)
                                 } }
-                                Row(Modifier.fillMaxWidth().clickable(onClick = toggle), verticalAlignment = Alignment.CenterVertically) {
+                                Row(
+                                    Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(onClick = toggle),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
                                     Checkbox(part.cid in option.selected, { toggle() })
                                     Text("P${part.page} · ${part.title}")
                                 }

@@ -1,6 +1,6 @@
 package com.nanahoshi.audioplayer.ui.bilibili
 
-import com.nanahoshi.audioplayer.text.resolveNoUrl
+import com.nanahoshi.audioplayer.text.resolveUserError
 import android.app.Application
 import androidx.compose.runtime.*
 import androidx.lifecycle.AndroidViewModel
@@ -8,12 +8,26 @@ import androidx.lifecycle.viewModelScope
 import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.bilibili.*
 import com.nanahoshi.audioplayer.data.TrackSource
+import com.nanahoshi.audioplayer.data.db.DownloadStatus
 import com.nanahoshi.audioplayer.data.readyBiliAudio
 import com.nanahoshi.audioplayer.dlsite.RemotePlayable
 import com.nanahoshi.audioplayer.graph
 import com.nanahoshi.audioplayer.text.TextRef
-import com.nanahoshi.audioplayer.text.resolve
+import com.nanahoshi.audioplayer.text.UserFacingException
+import com.nanahoshi.audioplayer.ui.components.SelectionState
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.stateIn
+import java.io.File
+
+internal data class BiliVideoRowStats(
+    val savedCount: Int,
+    val downloadedCount: Int,
+    val activeCount: Int,
+)
 
 class BiliBrowserViewModel(app: Application) : AndroidViewModel(app) {
     private val graph = app.graph()
@@ -31,11 +45,12 @@ class BiliBrowserViewModel(app: Application) : AndroidViewModel(app) {
     var showingCollections by mutableStateOf(false); private set
     fun showCollections(value: Boolean) {
         if (showingCollections == value) return
-        selected = emptySet(); cancelParts(); showingCollections = value
+        selection.clear(); cancelParts(); showingCollections = value
         if (value && !collections.searched) uploader?.let { user -> collections.start { graph.bilibili.collections.catalogue(user.mid, it) } }
     }
     var uploader by mutableStateOf<BiliUploader?>(null); private set
-    var selected by mutableStateOf<Set<String>>(emptySet()); private set
+    private val selection = SelectionState<String>()
+    val selected: Set<String> get() = selection.ids
     var resolving by mutableStateOf(false); private set
     var working by mutableStateOf(false); private set
     internal var choice by mutableStateOf<BiliPartChoice?>(null); private set
@@ -50,15 +65,33 @@ class BiliBrowserViewModel(app: Application) : AndroidViewModel(app) {
     }
     val tracks = graph.db.tracks().observeAll()
     val downloads = graph.downloads.observe()
+    internal val videoStats: StateFlow<Map<String, BiliVideoRowStats>> = combine(tracks, downloads) { allTracks, allJobs ->
+        val tracksByBvid = allTracks.filter { it.source == TrackSource.BILIBILI && !it.bvid.isNullOrBlank() }
+            .groupBy { it.bvid!! }
+        val jobsByBvid = allJobs.filter { it.source == TrackSource.BILIBILI.name && !it.workKey.isNullOrBlank() }
+            .groupBy { it.workKey!! }
+        val bvids = tracksByBvid.keys + jobsByBvid.keys
+        bvids.associateWith { bvid ->
+            val saved = tracksByBvid[bvid].orEmpty()
+            val videoJobs = jobsByBvid[bvid].orEmpty()
+            val active = videoJobs.count { it.status == DownloadStatus.QUEUED || it.status == DownloadStatus.RUNNING }
+            val downloaded = (
+                saved.filter { localReady(it.localUri) }.map { it.cid.toString() } +
+                    videoJobs.filter { it.status == DownloadStatus.DONE && localReady(it.localPath) }
+                        .mapNotNull { it.fileKey }
+                ).toSet().size
+            BiliVideoRowStats(saved.size, downloaded, active)
+        }
+    }.flowOn(Dispatchers.IO).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
     internal val shownVideos get() = if (uploader != null) uploads else videos
 
     fun updateQuery(value: String) {
-        cancelSearch(); cancelParts(); selected = emptySet()
+        cancelSearch(); cancelParts(); selection.clear()
         if (mode == BiliSearchMode.VIDEO) videoQuery = value else upQuery = value
     }
     fun switchMode(value: BiliSearchMode) {
         if (mode == value) return
-        cancelSearch(); cancelParts(); selected = emptySet(); mode = value
+        cancelSearch(); cancelParts(); selection.clear(); mode = value
     }
     fun updateVideoOrder(value: BiliVideoOrder) {
         if (videoOrder == value) return
@@ -75,8 +108,18 @@ class BiliBrowserViewModel(app: Application) : AndroidViewModel(app) {
         if (videoQuery.isNotBlank()) search()
     }
     fun cancelSearch() { videos.cancel(); uploaders.cancel(); uploads.cancel(); collections.cancel() }
+
+    fun searchUploader(name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        closeUploader()
+        mode = BiliSearchMode.UPLOADER
+        upQuery = trimmed
+        search()
+    }
+
     fun search() {
-        cancelSearch(); cancelParts(); selected = emptySet()
+        cancelSearch(); cancelParts(); selection.clear()
         try {
             when (val input = biliInput(query, mode)) {
                 is BiliSearchInput.Uploader -> openUploader(BiliUploader(input.mid, appContext.getString(R.string.bilibili_uploader_default, input.mid)))
@@ -96,27 +139,24 @@ class BiliBrowserViewModel(app: Application) : AndroidViewModel(app) {
                     videos.start { graph.bilibili.searchVideos(input.text, it, order, duration) }
                 } else uploaders.start { graph.bilibili.searchUploaders(input.text, it) }
             }
-        } catch (error: BilibiliException) { graph.showRaw(appContext.resolveNoUrl(error.userText, R.string.bilibili_error_read_failed)) }
+        } catch (error: BilibiliException) { graph.showError(error, R.string.bilibili_error_read_failed) }
     }
     fun openUploader(value: BiliUploader) {
-        cancelSearch(); cancelParts(); selected = emptySet(); uploader = value; showingCollections = false
+        cancelSearch(); cancelParts(); selection.clear(); uploader = value; showingCollections = false
         collections.cancel()
         collections = BiliPagedState(viewModelScope) { it.key }
         uploads.start { graph.bilibili.uploaderVideos(value.mid, it) }
     }
-    fun closeUploader() { collections.cancel(); uploads.cancel(); cancelParts(); uploader = null; selected = emptySet() }
+    fun closeUploader() { collections.cancel(); uploads.cancel(); cancelParts(); uploader = null; selection.clear() }
     fun refreshUploader() {
         val user = uploader ?: return
-        selected = emptySet()
+        selection.clear()
         if (showingCollections) collections.start { graph.bilibili.collections.catalogue(user.mid, it) }
         else uploads.start { graph.bilibili.uploaderVideos(user.mid, it) }
     }
-    fun toggle(id: String) { selected = if (id in selected) selected - id else selected + id }
-    fun clearSelection() { selected = emptySet() }
-    fun selectAll() {
-        val ids = shownVideos.items.map { it.bvid }.toSet()
-        selected = if (ids.isNotEmpty() && ids.all { it in selected }) selected - ids else selected + ids
-    }
+    fun toggle(id: String) = selection.toggle(id)
+    fun clearSelection() = selection.clear()
+    fun selectAll() = selection.toggleAll(shownVideos.items.map { it.bvid })
     fun cancelParts() { partGeneration++; partJob?.cancel(); partJob = null; resolving = false; choice = null }
 
     internal fun prepare(action: BiliAction, targets: List<BiliVideoHit>) {
@@ -140,14 +180,13 @@ class BiliBrowserViewModel(app: Application) : AndroidViewModel(app) {
                         failed += appContext.getString(
                             R.string.bilibili_item_failure,
                             video.title,
-                            if (error is BilibiliException) appContext.resolveNoUrl(error.userText, R.string.bilibili_error_read_failed)
-                            else appContext.getString(R.string.bilibili_part_read_failed_short),
+                            appContext.resolveUserError(error, R.string.bilibili_part_read_failed_short),
                         )
                     }
                 }
                 if (token != partGeneration) return@launch
                 if (action != BiliAction.PLAY) {
-                    if (groups.isEmpty()) { graph.messages.value = failed.joinToString("\n"); return@launch }
+                    if (groups.isEmpty()) { graph.showRaw(failed.joinToString("\n")); return@launch }
                     val requests = graph.biliImportRequests.choose(groups.map { BiliVideoDetails(it.video, it.parts) }, failed) ?: return@launch
                     working = true
                     try {
@@ -156,7 +195,7 @@ class BiliBrowserViewModel(app: Application) : AndroidViewModel(app) {
                         if (failed.isEmpty()) TextRef.Res(R.string.online_added_to_library)
                         else TextRef.Res(R.string.bilibili_added_with_failures, listOf(failed.size)),
                     )
-                        selected = emptySet()
+                        selection.clear()
                     } finally { working = false }
                     return@launch
                 }
@@ -200,12 +239,15 @@ class BiliBrowserViewModel(app: Application) : AndroidViewModel(app) {
                             )))
                         }
                     }
-                    BiliAction.SAVE -> error(appContext.getString(R.string.bilibili_choose_import_mode))
+                    BiliAction.SAVE -> throw UserFacingException(TextRef.Res(R.string.bilibili_choose_import_mode))
                 }
-                selected = emptySet()
+                selection.clear()
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { graph.show(R.string.bilibili_operation_failed) }
+            catch (failure: Exception) { graph.showError(failure, R.string.bilibili_operation_failed) }
             finally { working = false }
         }
     }
 }
+
+private fun localReady(path: String?): Boolean =
+    !path.isNullOrBlank() && if (path.startsWith('/')) File(path).isFile else true

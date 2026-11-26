@@ -1,6 +1,5 @@
 package com.nanahoshi.audioplayer.ui.library
 
-import com.nanahoshi.audioplayer.text.resolveNoUrl
 import com.nanahoshi.audioplayer.text.resolveUserError
 import com.nanahoshi.audioplayer.data.ExternalFileDownloader
 import com.nanahoshi.audioplayer.data.LocalAudio
@@ -45,6 +44,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import com.nanahoshi.audioplayer.ui.components.AppTopBar
+import com.nanahoshi.audioplayer.ui.components.ErrorState
 import com.nanahoshi.audioplayer.ui.components.LoadingState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -380,7 +380,7 @@ private fun ZoomImage(
                 },
                 loading = { LoadingState(stringResource(R.string.library_file_loading_image), Modifier.fillMaxSize()) },
                 error = {
-                    ImagePreviewError(stringResource(errorMessage), onRetry ?: { retry += 1 })
+                    ErrorState(stringResource(errorMessage), onRetry ?: { retry += 1 }, Modifier.fillMaxSize())
                 },
             )
         }
@@ -460,16 +460,8 @@ private fun PreviewZoomImage(request: RemotePreview, viewModel: FilePreviewViewM
             model = model, contentDescription = request.name,
             errorMessage = R.string.library_file_image_failed, onRetry = { retryCount++ },
         )
-        message != null -> ImagePreviewError(message) { retryCount++ }
+        message != null -> ErrorState(message, { retryCount++ }, Modifier.fillMaxSize())
         else -> LoadingState(stringResource(R.string.library_file_loading_image), Modifier.fillMaxSize())
-    }
-}
-
-@Composable
-private fun ImagePreviewError(message: String, onRetry: () -> Unit) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(message)
-        androidx.compose.material3.TextButton(onClick = onRetry) { Text(stringResource(R.string.common_retry)) }
     }
 }
 
@@ -558,8 +550,7 @@ private fun ExternalOpenContent(request: RemotePreview, localUri: String?, viewM
                     } catch (_: android.content.ActivityNotFoundException) {
                         error = context.getString(R.string.library_file_no_app)
                     } catch (failure: Exception) {
-                        error = if (failure is com.nanahoshi.audioplayer.data.ExternalFileException) context.resolveNoUrl(failure.userText, R.string.library_file_open_other_failed)
-                        else context.getString(R.string.library_file_open_other_failed)
+                        error = context.resolveUserError(failure, R.string.library_file_open_other_failed)
                     } finally { loading = false }
                 }
             }, modifier = Modifier.padding(top = 12.dp)) { Text(stringResource(R.string.library_file_open_with_other)) }

@@ -17,6 +17,7 @@ import com.nanahoshi.audioplayer.dlsite.RemotePlayable
 import com.nanahoshi.audioplayer.japaneseasmr.JaArticle
 import com.nanahoshi.audioplayer.japaneseasmr.JaFailure
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -43,6 +44,18 @@ data class PlayerUiState(
     val canSeekForward: Boolean = false,
 )
 
+internal data class StoredAudioRequest(
+    val path: String,
+    val title: String,
+    val artist: String? = null,
+    val trackId: Long? = null,
+    val source: com.nanahoshi.audioplayer.data.TrackSource? = null,
+    val workKey: String? = null,
+    val workCode: String? = null,
+    val fileKey: String? = null,
+    val remoteUrl: String? = null,
+)
+
 internal data class JaPlaybackFailure(val queueId: Long, val reason: JaFailure, val postId: String?, val mediaKey: String?) {
     val messageRes: Int get() = when (reason) {
         JaFailure.MEDIA_VERIFY, JaFailure.WORK_FILE_MISSING, JaFailure.UNSAFE -> reason.messageRes
@@ -56,7 +69,11 @@ class PlayerClient(
     private val onRemovalRejected: (String) -> Unit = {},
 ) {
     private val appContext = context.applicationContext
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Main.immediate + CoroutineExceptionHandler { _, error ->
+            android.util.Log.w("PlayerClient", "controller operation failed", error)
+        },
+    )
     private val ready = CompletableDeferred<MediaController>()
     private val queueMutex = Mutex()
     private val _state = MutableStateFlow(PlayerUiState())
@@ -76,7 +93,7 @@ class PlayerClient(
         _jaPlaybackFailure.value = null
     }
 
-    internal suspend fun recoverJaLocalCopy(player: Player, failed: MediaItem): Boolean {
+    internal suspend fun recoverLocalCopy(player: Player, failed: MediaItem): Boolean {
         var recovered = false
         withRevalidatedQueue { items, _ ->
             val current = player.currentMediaItem
@@ -85,7 +102,11 @@ class PlayerClient(
             }
             val replacement = items.firstOrNull { it.mediaId == failed.mediaId } ?: return@withRevalidatedQueue
             val uri = replacement.localConfiguration?.uri
-            if (uri?.scheme != "japaneseasmr" || uri.host != "audio") return@withRevalidatedQueue
+            val isJa = failed.mediaMetadata.extras?.getBoolean(EXTRA_JA_LOCAL_COPY) == true &&
+                uri?.scheme == "japaneseasmr" && uri.host == "audio"
+            val isBili = failed.mediaMetadata.extras?.getBoolean(EXTRA_BILI_LOCAL_COPY) == true &&
+                uri?.scheme == "bilibili" && uri.host == "audio"
+            if (!isJa && !isBili) return@withRevalidatedQueue
             val index = player.currentMediaItemIndex
             val position = player.currentPosition.coerceAtLeast(0L)
             val shouldPlay = player.playWhenReady
@@ -124,14 +145,29 @@ class PlayerClient(
         val future = MediaController.Builder(context, token).buildAsync()
         future.addListener(
             {
-                val controller = future.get()
-                controller.addListener(object : Player.Listener {
-                    override fun onEvents(player: Player, events: Player.Events) {
-                        publish(player)
-                    }
-                })
-                ready.complete(controller)
-                publish(controller)
+                try {
+                    val controller = future.get()
+                    controller.addListener(object : Player.Listener {
+                        override fun onEvents(player: Player, events: Player.Events) {
+                            publish(player)
+                        }
+                    })
+                    ready.complete(controller)
+                    publish(controller)
+                } catch (error: java.util.concurrent.CancellationException) {
+                    ready.completeExceptionally(error)
+                } catch (error: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    ready.completeExceptionally(error)
+                    onRemovalRejected(appContext.getString(R.string.player_error_playback))
+                } catch (error: java.util.concurrent.ExecutionException) {
+                    val cause = error.cause ?: error
+                    ready.completeExceptionally(cause)
+                    onRemovalRejected(appContext.getString(R.string.player_error_playback))
+                } catch (error: Exception) {
+                    ready.completeExceptionally(error)
+                    onRemovalRejected(appContext.getString(R.string.player_error_playback))
+                }
             },
             ContextCompat.getMainExecutor(context),
         )
@@ -229,25 +265,6 @@ class PlayerClient(
         return found
     }
 
-    fun playTracks(tracks: List<TrackEntity>) = scope.launch {
-        if (tracks.isEmpty()) return@launch
-        val probed = probeTracks(tracks)
-        var fallbackId: Long? = null
-        queueMutex.withLock {
-            val first = tracks.first()
-            val existing = library.firstQueueItemId(first.id)
-            if (existing == null) {
-                appendLocked(probed.take(1), startPlaying = true)
-            } else {
-                if (!tryPlayFromPlayer(existing)) fallbackId = existing
-            }
-            // missing 在 first 处理之后判定，保持原有去重行为。
-            val missing = probed.drop(1).filter { library.firstQueueItemId(it.first.id) == null }
-            if (missing.isNotEmpty()) appendLocked(missing, startPlaying = false)
-        }
-        fallbackId?.let { playQueueItemFallback(it) }
-    }
-
     fun append(tracks: List<TrackEntity>) = scope.launch {
         val probed = probeTracks(tracks)
         queueMutex.withLock { appendLocked(probed, startPlaying = false) }
@@ -279,6 +296,70 @@ class PlayerClient(
 
     fun replaceAndPlayItems(items: List<QueuePlayable>) = enqueueItems(items, replace = true)
     fun appendItems(items: List<QueuePlayable>) = enqueueItems(items, replace = false)
+
+    internal fun playStoredAudio(request: StoredAudioRequest) = scope.launch {
+        val resolved = withContext(Dispatchers.IO) {
+            val track = library.storedAudioTrack(request.trackId, request.path)
+            if (track != null) return@withContext track to null
+            if (request.source == com.nanahoshi.audioplayer.data.TrackSource.JAPANESE_ASMR) {
+                if (request.remoteUrl?.startsWith("japaneseasmr://file?") == true) {
+                    return@withContext null to RemotePlayable(
+                        title = request.title,
+                        artist = request.artist,
+                        coverUri = null,
+                        remoteUrl = request.remoteUrl,
+                        source = com.nanahoshi.audioplayer.data.TrackSource.JAPANESE_ASMR,
+                        referer = "",
+                        workno = request.workCode ?: request.workKey,
+                        fileKey = request.fileKey,
+                    )
+                }
+                val postId = request.workKey ?: return@withContext null
+                val key = request.fileKey ?: return@withContext null
+                val (post, mediaKind) = library.jaPostAndMediaKind(postId, key) ?: return@withContext null
+                return@withContext null to RemotePlayable(
+                    title = request.title,
+                    artist = request.artist ?: post.title,
+                    coverUri = post.coverUri,
+                    remoteUrl = post.url,
+                    source = com.nanahoshi.audioplayer.data.TrackSource.JAPANESE_ASMR,
+                    referer = com.nanahoshi.audioplayer.japaneseasmr.JapaneseAsmrClient.REFERER,
+                    workno = postId,
+                    fileKey = key,
+                    mediaKind = mediaKind,
+                )
+            }
+            val file = java.io.File(request.path).canonicalFile
+            val youtube = request.source == com.nanahoshi.audioplayer.data.TrackSource.YOUTUBE ||
+                file.startsWith(java.io.File(appContext.filesDir, "youtube").canonicalFile)
+            val bili = request.source == com.nanahoshi.audioplayer.data.TrackSource.BILIBILI ||
+                file.startsWith(java.io.File(appContext.filesDir, "bilibili").canonicalFile)
+            val id = request.workCode ?: request.workKey
+            val resolvedFileKey = request.fileKey ?: when {
+                youtube -> "audio"
+                bili -> file.nameWithoutExtension
+                else -> null
+            }
+            val referer = if (bili && !id.isNullOrBlank()) "https://www.bilibili.com/video/$id" else ""
+            null to RemotePlayable(
+                title = request.title,
+                artist = request.artist,
+                coverUri = null,
+                remoteUrl = if (youtube) "https://www.youtube.com/watch?v=${id.orEmpty()}" else request.path,
+                source = when {
+                    youtube -> com.nanahoshi.audioplayer.data.TrackSource.YOUTUBE
+                    bili -> com.nanahoshi.audioplayer.data.TrackSource.BILIBILI
+                    else -> com.nanahoshi.audioplayer.data.TrackSource.LOCAL
+                },
+                referer = referer,
+                workno = id?.takeIf { (youtube || bili) && it.isNotBlank() },
+                fileKey = resolvedFileKey?.takeIf { youtube || bili },
+            )
+        } ?: return@launch
+        val (track, remote) = resolved
+        if (track != null) replaceAndPlay(listOf(track))
+        else if (remote != null) replaceAndPlayRemote(listOf(remote))
+    }
 
     private fun enqueueItems(items: List<QueuePlayable>, replace: Boolean) = scope.launch {
         if (items.isEmpty()) return@launch

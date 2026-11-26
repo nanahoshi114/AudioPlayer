@@ -185,6 +185,51 @@ class DlsiteOriginalStoreAndroidTest {
             assertNull(db.tracks().getById(selected)!!.localUri)
             assertNotNull(entries.single { it.relativePath == "original/bonus.flac" }.trackId)
             assertEquals("gen", db.dlsiteOriginals().work("RJ123456")!!.generation)
+
+            // 同一路径再次发布仍须让位给已占用该文件的曲目，不得改写其标题、目录或本地路径。
+            val before = checkNotNull(db.tracks().getById(owner))
+            val repeated = store.importDirectory("RJ123456", generation, "gen")
+            assertEquals(listOf("original/WAV/voice.wav"), repeated.skipped)
+            val after = checkNotNull(db.tracks().getById(owner))
+            assertEquals(before.title, after.title)
+            assertEquals(before.folderId, after.folderId)
+            assertEquals(before.localUri, after.localUri)
+            assertEquals(owner, db.dlsiteOriginals().entries("RJ123456")
+                .single { it.relativePath == "original/WAV/voice.wav" }.trackId)
+        } finally {
+            db.close()
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun concurrentRootRemovalDoesNotResurrectTheWorkDuringRestore() = runBlocking {
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        val directory = File(context.filesDir, "original-store-restore/${UUID.randomUUID()}").apply { mkdirs() }
+        try {
+            val credentials = CredentialStore(context)
+            val dlsite = DlsiteClient(credentials)
+            val library = LibraryRepository(context, db, BilibiliClient(credentials), AsmrClient(), dlsite)
+            val facts = WorkFacts("fixture", "circle", emptyList(), emptyList(), "", "RJ123456")
+            val root = db.folders().insert(FolderEntity(name = "fixture", position = 0,
+                asmrWorkId = 123456, asmrSourceId = "RJ123456", workMeta = facts.toJson()))
+            val generation = File(directory, "gen").apply {
+                File(this, "original/WAV").mkdirs()
+                File(this, "original/WAV/voice.wav").writeBytes(ByteArray(32))
+            }
+            val store = DlsiteOriginalStore(context, db, dlsite, library) { _, _, _ -> emptyList() }
+            store.importDirectory("RJ123456", generation, "gen")
+            assertEquals(root, db.dlsiteOriginals().work("RJ123456")!!.rootFolderId)
+
+            // 发布期间用户移除了作品根目录：expectedRootId 不匹配时必须直接放弃，不能复活作品。
+            db.folders().delete(root)
+            val restored = store.importDirectory("RJ123456", generation, "gen", expectedRootId = root)
+
+            assertEquals(root, restored.rootFolderId)
+            assertEquals(0, restored.audioCount)
+            assertEquals("gen", db.dlsiteOriginals().work("RJ123456")!!.generation)
+            assertNull(library.folderBySource("RJ123456"))
+            assertTrue("并发移除后不得重新创建作品根目录", db.folders().all().none { it.asmrSourceId == "RJ123456" })
         } finally {
             db.close()
             directory.deleteRecursively()

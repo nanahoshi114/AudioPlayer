@@ -42,7 +42,7 @@ class DlsiteOriginalMigrationAndroidTest {
             old.version = 14
         }
         val migrated = Room.databaseBuilder(context, AppDatabase::class.java, name)
-            .addMigrations(AppDatabase.MIGRATION_14_15, AppDatabase.MIGRATION_15_16, AppDatabase.MIGRATION_16_17, AppDatabase.MIGRATION_17_18, AppDatabase.MIGRATION_18_19, AppDatabase.MIGRATION_19_20, AppDatabase.MIGRATION_20_21, AppDatabase.MIGRATION_21_22, AppDatabase.MIGRATION_22_23, AppDatabase.MIGRATION_23_24).build()
+            .addMigrations(*AppDatabase.ALL_MIGRATIONS).build()
         val fresh = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
         try {
             val track = migrated.tracks().getById(1)!!

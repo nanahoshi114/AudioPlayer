@@ -77,4 +77,14 @@ class SubtitleLanguageTest {
         assertFalse(LoadedSubtitles(inputs.first(), false, true).canTranslate)
         assertTrue(LoadedSubtitles(cues("おやすみ"), false, true).canTranslate)
     }
+
+    @Test fun cuesClippedByNegativeOffsetCanStillBeTranslated() {
+        val source = listOf(SubtitleCue(0, 1000, "こんにちは"))
+        val loaded = LoadedSubtitles(source, generatedEmpty = false, generated = false)
+            .copy(cues = emptyList(), appliedOffsetMs = -1_000L)
+        assertTrue(loaded.canTranslate)
+        assertEquals(source, loaded.sourceCues)
+        assertEquals(source, loaded.unshiftedCues)
+        assertTrue(loaded.cues.isEmpty())
+    }
 }

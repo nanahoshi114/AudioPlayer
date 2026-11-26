@@ -63,6 +63,50 @@ fun AppTopBar(
     )
 }
 
+internal fun heroTopBarAlpha(scrollPx: Float, heroHeightPx: Float, topBarHeightPx: Float): Float {
+    if (heroHeightPx <= 0f) return 1f
+    val collapsible = (heroHeightPx - topBarHeightPx).coerceAtLeast(1f)
+    val fadeStart = collapsible * 0.45f
+    val fadeSpan = (collapsible - fadeStart).coerceAtLeast(1f)
+    return ((scrollPx - fadeStart) / fadeSpan).coerceIn(0f, 1f)
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ImmersiveTopBar(
+    title: String,
+    containerAlpha: Float,
+    modifier: Modifier = Modifier,
+    onBack: (() -> Unit)? = null,
+    actions: @Composable RowScope.() -> Unit = {},
+) {
+    TopAppBar(
+        modifier = modifier,
+        title = {
+            Text(
+                title,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
+            )
+        },
+        navigationIcon = {
+            if (onBack != null) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.a11y_back))
+                }
+            }
+        },
+        actions = actions,
+        colors = TopAppBarDefaults.topAppBarColors(
+            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = containerAlpha.coerceIn(0f, 1f)),
+            navigationIconContentColor = MaterialTheme.colorScheme.onSurface,
+            titleContentColor = MaterialTheme.colorScheme.onSurface,
+            actionIconContentColor = MaterialTheme.colorScheme.onSurface,
+        ),
+    )
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SelectionTopBar(

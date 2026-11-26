@@ -20,6 +20,8 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.ui.components.WorkFileBrowser
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
@@ -32,6 +34,7 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class WorkBrowserAndroidTest {
     @get:Rule val compose = createComposeRule()
+    private val strings = InstrumentationRegistry.getInstrumentation().targetContext
 
     @Test
     fun loadingTheParentDoesNotMeasureItsSavedPositionAgainstTheChildRows() {
@@ -64,11 +67,12 @@ class WorkBrowserAndroidTest {
         }
         compose.onNodeWithText("文件 0").assertIsDisplayed()
         compose.runOnIdle {
-            assertTrue(child.layoutInfo.viewportSize.height in 1 until fullViewport)
+            assertTrue(fullViewport > 0)
+            assertEquals(fullViewport, child.layoutInfo.viewportSize.height)
             location.value = parent
             loading.value = true
         }
-        compose.onNodeWithText("正在读取文件…").assertIsDisplayed()
+        compose.onNodeWithText(strings.getString(R.string.stored_loading)).assertIsDisplayed()
         compose.runOnIdle {
             assertEquals(30, parent.firstVisibleItemIndex)
             loading.value = false

@@ -221,4 +221,21 @@ class StoredFilesTest {
             root.deleteRecursively()
         }
     }
+
+    @Test
+    fun subtitleFilesInSkipsOriginalSubtreeAndSanitizeEntryNameReplacesDotSegments() {
+        val root = createTempDirectory(prefix = "stored-skip-original").toFile()
+        try {
+            val work = File(root, "dlsite/RJ001")
+            val playSub = File(work, "play/sub.lrc").apply { parentFile?.mkdirs(); writeText("lrc") }
+            File(work, "original/gen1/sub.srt").apply { parentFile?.mkdirs(); writeText("srt") }
+            val found = subtitleFilesIn(work, skipDir = File(work, "original").canonicalFile).map { it.canonicalPath }
+            assertEquals(listOf(playSub.canonicalPath), found)
+            assertEquals("_", sanitizeEntryName("."))
+            assertEquals("_", sanitizeEntryName(".."))
+            assertEquals("_", sanitizeEntryName(" .. "))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
 }

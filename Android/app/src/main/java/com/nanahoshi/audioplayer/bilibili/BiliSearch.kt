@@ -2,10 +2,16 @@ package com.nanahoshi.audioplayer.bilibili
 
 import androidx.annotation.StringRes
 import com.nanahoshi.audioplayer.R
+import com.nanahoshi.audioplayer.data.toHttps
 import com.nanahoshi.audioplayer.text.TextRef
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.*
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import org.jsoup.Jsoup
+
+internal val BV_PATTERN = Regex("BV[0-9A-Za-z]{10}")
+private val UID_PATTERN = Regex("(?i)UID\\s*[:：]?\\s*\\d+")
+private val UID_PREFIX = Regex("(?i)UID\\s*[:：]?\\s*")
 
 enum class BiliSearchMode { VIDEO, UPLOADER }
 
@@ -49,11 +55,11 @@ internal fun biliInput(raw: String, mode: BiliSearchMode): BiliSearchInput {
         if (mode == BiliSearchMode.UPLOADER) R.string.bilibili_error_uploader_hint
         else R.string.bilibili_error_video_hint,
     ))
-    Regex("BV[0-9A-Za-z]{10}").find(text)?.let { return BiliSearchInput.Video(it.value) }
+    BV_PATTERN.find(text)?.let { return BiliSearchInput.Video(it.value) }
     val url = text.toHttpUrlOrNull()
     val uid = when {
         url?.host == "space.bilibili.com" -> url.pathSegments.firstOrNull()
-        Regex("(?i)UID\\s*[:：]?\\s*\\d+").matches(text) -> text.replace(Regex("(?i)UID\\s*[:：]?\\s*"), "")
+        UID_PATTERN.matches(text) -> UID_PREFIX.replace(text, "")
         mode == BiliSearchMode.UPLOADER && text.all(Char::isDigit) -> text
         else -> null
     }
@@ -65,14 +71,9 @@ internal fun biliInput(raw: String, mode: BiliSearchMode): BiliSearchInput {
 private fun JsonElement.field(key: String): JsonElement = (this as? JsonObject)?.get(key) ?: JsonNull
 private fun JsonElement.text(key: String): String = (field(key) as? JsonPrimitive)?.contentOrNull.orEmpty()
 private fun JsonElement.number(key: String): Long? = text(key).toLongOrNull()
-internal fun biliPlainText(raw: String): String = raw.replace(Regex("<[^>]*>"), "")
-    .replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"")
-    .replace("&#39;", "'").replace("&#x27;", "'").replace("&nbsp;", " ").replace("&amp;", "&").trim()
-private fun cover(raw: String) = when {
-    raw.startsWith("//") -> "https:$raw"
-    raw.startsWith("http://") -> "https://" + raw.removePrefix("http://")
-    else -> raw
-}
+/** 搜索结果里的标题、昵称和简介可能带高亮标签与 HTML 实体。 */
+internal fun biliPlainText(raw: String): String = Jsoup.parse(raw).text().replace(' ', ' ').trim()
+private fun cover(raw: String) = raw.toHttps()
 internal fun biliDuration(raw: String): Long {
     val parts = raw.trim().split(':').map { it.trim().toLongOrNull() ?: return 0 }
     if (parts.size !in 1..3 || parts.any { it !in 0..99999 }) return 0
@@ -153,7 +154,7 @@ class BiliSearchApi(
         else -> if (data.number("numResults") == 0L) emptyList() else throw BilibiliException(0, TextRef.Res(R.string.bilibili_error_no_search_list))
     }
     private fun video(item: JsonElement, owner: Long = 0): BiliVideoHit? {
-        val bvid = item.text("bvid").takeIf { Regex("BV[0-9A-Za-z]{10}").matches(it) } ?: return null
+        val bvid = item.text("bvid").takeIf { BV_PATTERN.matches(it) } ?: return null
         return BiliVideoHit(bvid, biliPlainText(item.text("title")), biliPlainText(item.text("author")),
             cover(item.text("pic")), biliDuration(item.text("duration").ifBlank { item.text("length") }), item.number("mid") ?: owner)
     }

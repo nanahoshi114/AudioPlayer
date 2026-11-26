@@ -10,14 +10,11 @@ import com.nanahoshi.audioplayer.japaneseasmr.jaAudioIdentity
 import com.nanahoshi.audioplayer.playback.LoadedSubtitles
 import com.nanahoshi.audioplayer.youtube.readyYouTubeAudio
 import java.io.File
-import java.security.MessageDigest
 
 internal const val WHISPER_STAGING_DIRECTORY = "whisper-src"
 
 internal fun stagedFilePath(filesDir: File, contentUri: String): String {
-    val hash = MessageDigest.getInstance("SHA-256")
-        .digest(contentUri.toByteArray(Charsets.UTF_8))
-        .joinToString("") { "%02x".format(it) }
+    val hash = sha256Hex(contentUri)
     return File(filesDir, "$WHISPER_STAGING_DIRECTORY/$hash").absolutePath
 }
 

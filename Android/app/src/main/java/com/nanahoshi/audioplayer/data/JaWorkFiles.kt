@@ -2,7 +2,6 @@ package com.nanahoshi.audioplayer.data
 
 import com.nanahoshi.audioplayer.text.TextRef
 import com.nanahoshi.audioplayer.R
-import android.media.MediaMetadataRetriever
 import androidx.room.withTransaction
 import com.nanahoshi.audioplayer.data.db.AppDatabase
 import com.nanahoshi.audioplayer.data.db.DownloadEntity
@@ -64,9 +63,12 @@ internal class JaWorkFiles(private val db: AppDatabase, filesDir: File) {
         val packages: Map<String, JaDownloadPackageEntity>,
     )
 
+    private val numberedVolume = Regex("""(?i)(.+)\.part(\d+)\.rar""")
+private val oldStyleVolume = Regex("""(?i)(.+)\.r(\d\d)""")
+
     private fun groups(files: List<JaRemoteFile>): List<Group> {
-        val numbered = Regex("""(?i)(.+)\.part(\d+)\.rar""")
-        val oldVolume = Regex("""(?i)(.+)\.r(\d\d)""")
+        val numbered = numberedVolume
+        val oldVolume = oldStyleVolume
         val volumes = files.filter { numbered.matches(it.relativePath) || oldVolume.matches(it.relativePath) }
         val used = mutableSetOf<JaRemoteFile>()
         val result = mutableListOf<Group>()
@@ -505,22 +507,14 @@ internal class JaWorkFiles(private val db: AppDatabase, filesDir: File) {
 
     private fun duration(file: File): Long? {
         if (!LocalAudio.isAudio(file.name)) return null
-        val reader = MediaMetadataRetriever()
-        return try {
-            reader.setDataSource(file.absolutePath)
-            reader.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
-        } catch (_: RuntimeException) {
-            null
-        } finally {
-            reader.release()
-        }
+        return LocalAudio.readDurationMs(file.absolutePath)
     }
 
     suspend fun cleanup() {
         val live = db.downloads().observe().first().filter { it.kind == JA_WORK_DOWNLOAD && it.status != DownloadStatus.DONE }
             .mapNotNull { task -> task.workKey?.let { staging(it, task.id) } }.toSet()
         for (work in root.listFiles().orEmpty()) {
-            if (!Regex("RJ[0-9]+").matches(work.name)) continue
+            if (!WorkIds.matches(work.name)) continue
             File(work, "staging").listFiles().orEmpty().filter { it !in live }.forEach { it.deleteRecursively() }
         }
         cleanupGenerations()
@@ -535,14 +529,11 @@ internal class JaWorkFiles(private val db: AppDatabase, filesDir: File) {
             retired.filter { it.trackId in queued }.mapNotNull { it.localPath }
         val paths = references.filter { it.startsWith('/') }.toSet()
         val candidates = retired.mapNotNull { it.localPath }.toSet()
-        for (work in root.listFiles().orEmpty()) {
-            for (generation in File(work, "files").listFiles().orEmpty()) {
-                if (!generation.isDirectory || runCatching { UUID.fromString(generation.name) }.isFailure) continue
-                for (file in generation.walkBottomUp()) {
-                    if (file.isDirectory) {
-                        if (startup) file.delete()
-                    } else if (file.absolutePath !in paths && (startup || file.absolutePath in candidates)) file.delete()
-                }
+        WorkGenerationCleaner.forEachGeneration(root, "files") { _, generation ->
+            for (file in generation.walkBottomUp()) {
+                if (file.isDirectory) {
+                    if (startup) file.delete()
+                } else if (file.absolutePath !in paths && (startup || file.absolutePath in candidates)) file.delete()
             }
         }
     }

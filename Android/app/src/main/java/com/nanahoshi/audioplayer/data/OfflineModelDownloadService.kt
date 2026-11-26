@@ -3,21 +3,12 @@ package com.nanahoshi.audioplayer.data
 import com.nanahoshi.audioplayer.text.TextRef
 import com.nanahoshi.audioplayer.R
 import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
 import android.app.PendingIntent
-import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.content.pm.ServiceInfo
 import android.net.Uri
-import android.os.Build
-import android.os.IBinder
-import android.os.PowerManager
 import androidx.core.app.NotificationCompat
-import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
-import com.nanahoshi.audioplayer.MainActivity
 import com.nanahoshi.audioplayer.graph
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -27,21 +18,20 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.UUID
-import java.util.concurrent.TimeUnit
 
-internal class OfflineModelDownloadService : Service() {
+internal class OfflineModelDownloadService : DataSyncForegroundService() {
     private class Transfer(val job: Job, val token: String, val cancel: PendingIntent)
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val transfers = mutableMapOf<OfflineWhisperModel, Transfer>()
     private val managers get() = application.graph().offlineWhisperModels
-    private val notifications by lazy { getSystemService(NotificationManager::class.java) }
+    private val notifications by lazy { getSystemService(android.app.NotificationManager::class.java) }
     private var latestStartId = 0
-    private var foreground = false
     private var progressUpdates: Job? = null
-    private var wakeLock: PowerManager.WakeLock? = null
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    override val channelId get() = CHANNEL_ID
+    override val channelNameRes get() = R.string.channel_model_downloads
+    override val notificationId get() = NOTIFICATION_ID
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         latestStartId = startId
@@ -67,28 +57,11 @@ internal class OfflineModelDownloadService : Service() {
     }
 
     private fun promote(): Boolean {
-        if (foreground) return true
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            notifications.createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, getString(R.string.channel_model_downloads), NotificationManager.IMPORTANCE_LOW),
-            )
-        }
-        return try {
-            ServiceCompat.startForeground(
-                this,
-                NOTIFICATION_ID,
-                progressNotification(),
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
-            )
-            foreground = true
-            true
-        } catch (_: IllegalStateException) {
+        if (!enterForeground(progressNotification())) {
             reportStartFailure()
-            false
-        } catch (_: SecurityException) {
-            reportStartFailure()
-            false
+            return false
         }
+        return true
     }
 
     private fun reportStartFailure() {
@@ -110,7 +83,6 @@ internal class OfflineModelDownloadService : Service() {
         )
         val transfer = Transfer(job, token, cancel)
         transfers[model] = transfer
-        keepAwake()
         notifications.notify(NOTIFICATION_ID, progressNotification())
         if (progressUpdates == null) {
             progressUpdates = scope.launch {
@@ -129,16 +101,6 @@ internal class OfflineModelDownloadService : Service() {
         }
     }
 
-    private fun keepAwake() {
-        if (wakeLock?.isHeld == true) return
-        wakeLock = getSystemService(PowerManager::class.java)
-            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:OfflineModelDownload")
-            .apply {
-                setReferenceCounted(false)
-                acquire(TimeUnit.HOURS.toMillis(6))
-            }
-    }
-
     private fun stopWhenIdle() {
         if (transfers.isNotEmpty()) return
         progressUpdates?.cancel()
@@ -147,28 +109,11 @@ internal class OfflineModelDownloadService : Service() {
         stopSelfResult(latestStartId)
     }
 
-    private fun releaseWakeLock() {
-        wakeLock?.let { if (it.isHeld) it.release() }
-        wakeLock = null
-    }
-
     private fun progressNotification(): Notification {
-        val openApp = PendingIntent.getActivity(
-            this,
-            0,
-            Intent(this, MainActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
-            PendingIntent.FLAG_IMMUTABLE,
-        )
-        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+        val builder = DataSyncNotifications.progressBuilder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle(getString(R.string.notification_model_title))
-            .setContentIntent(openApp)
-            .setCategory(NotificationCompat.CATEGORY_PROGRESS)
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setContentIntent(DataSyncNotifications.openApp(this, NOTIFICATION_ID))
         val lines = mutableListOf<String>()
         var done = 0L
         var total = 0L
@@ -192,15 +137,16 @@ internal class OfflineModelDownloadService : Service() {
     }
 
     override fun onTimeout(startId: Int, fgsType: Int) {
+        markStopping()
         cancelTransfers(TextRef.Res(R.string.download_error_timeout))
         stopSelf()
     }
 
     override fun onDestroy() {
+        markStopping()
         cancelTransfers(TextRef.Res(R.string.notification_model_interrupted))
-        releaseWakeLock()
         scope.cancel()
-        if (foreground) ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        exitForeground()
         super.onDestroy()
     }
 

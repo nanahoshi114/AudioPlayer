@@ -4,33 +4,21 @@ import com.nanahoshi.audioplayer.youtube.normalizeYouTubeCookie
 
 import android.content.Context
 import android.content.SharedPreferences
-import androidx.security.crypto.EncryptedSharedPreferences
-import androidx.security.crypto.MasterKey
-private const val BILI_REFRESH_INTERVAL_MS = 20 * 60 * 60 * 1000L
-private const val BILI_REFRESH_RETRY_MS = 10 * 60 * 1000L
-
-/** 续期成功后 20 小时再查；失败后只冷却 10 分钟，避免会话失效却长期不重试。 */
-internal fun biliRefreshDueAt(checkedAt: Long, failedAt: Long, now: Long): Boolean {
-    if (failedAt > 0L && now - failedAt < BILI_REFRESH_RETRY_MS) return false
-    if (now - checkedAt >= BILI_REFRESH_INTERVAL_MS) return true
-    return failedAt > 0L
-}
-
-/** ticket 至少还要有效 60 秒才随请求发送；过期或临期一律不带，避免触发 -403。 */
-internal fun ticketIsFresh(expiresAtEpochSec: Long, nowEpochSec: Long): Boolean =
-    expiresAtEpochSec > nowEpochSec + 60
 
 class CredentialStore(context: Context) {
     private val appContext = context.applicationContext
-    private val plainPrefs: SharedPreferences =
+    internal val plainPrefs: SharedPreferences =
         appContext.getSharedPreferences("player_prefs", Context.MODE_PRIVATE)
 
-    private val secretPrefs: SharedPreferences by lazy { createSecretPrefs() }
+    internal val secretPrefs: SharedPreferences by lazy { createSecretPreferences(appContext) }
+    private val biliLock = Any()
+    private val whisperLock = Any()
+    private val translateLock = Any()
 
     val biliSession = kotlinx.coroutines.flow.MutableStateFlow(0L)
     val youtubeSession = kotlinx.coroutines.flow.MutableStateFlow(0L)
     val biliRefreshFailure = kotlinx.coroutines.flow.MutableStateFlow(
-        plainPrefs.getLong(KEY_BILI_REFRESH_FAILED, 0L) > 0L,
+        plainPrefs.getLong(CredentialKeys.KEY_BILI_REFRESH_FAILED, 0L) > 0L,
     )
 
     fun youtubeCookie(): String? = secretPrefs.getString("youtube_cookie", null)?.takeIf { it.isNotBlank() }
@@ -44,196 +32,242 @@ class CredentialStore(context: Context) {
         youtubeSession.value += 1
     }
 
-    fun cookie(): String? = secretPrefs.getString(KEY_COOKIE, null)?.takeIf { it.isNotBlank() }
+    fun cookie(): String? = secretPrefs.getString(CredentialKeys.KEY_COOKIE, null)?.takeIf { it.isNotBlank() }
 
     fun saveCookie(raw: String) {
-        val value = raw.trim()
-        if (value.isEmpty()) {
-            clearCookie()
-            return
+        synchronized(biliLock) {
+            val value = raw.trim()
+            if (value.isEmpty()) {
+                clearCookie()
+                return
+            }
+            val changed = value != cookie()
+            val edit = secretPrefs.edit().putString(CredentialKeys.KEY_COOKIE, value)
+            if (changed) {
+                edit.remove(CredentialKeys.KEY_BILI_REFRESH)
+                edit.remove(CredentialKeys.KEY_BILI_PENDING_REVOKE_TOKEN)
+            }
+            edit.apply()
+            if (changed) {
+                plainPrefs.edit().remove(CredentialKeys.KEY_BILI_REFRESH_CHECKED).remove(CredentialKeys.KEY_BILI_REFRESH_FAILED).apply()
+                biliRefreshFailure.value = false
+                biliSession.value += 1
+            }
         }
-        val changed = value != cookie()
-        val edit = secretPrefs.edit().putString(KEY_COOKIE, value)
-        if (changed) edit.remove(KEY_BILI_REFRESH)
-        edit.apply()
-        if (changed) {
-            plainPrefs.edit().remove(KEY_BILI_REFRESH_CHECKED).remove(KEY_BILI_REFRESH_FAILED).apply()
+    }
+
+    fun saveBiliSession(cookie: String, refreshToken: String) {
+        synchronized(biliLock) {
+            val value = cookie.trim()
+            if (value.isEmpty()) {
+                clearCookie()
+                return
+            }
+            val edit = secretPrefs.edit()
+                .putString(CredentialKeys.KEY_COOKIE, value)
+                .remove(CredentialKeys.KEY_BILI_PENDING_REVOKE_TOKEN)
+            val token = refreshToken.trim()
+            if (token.isEmpty()) edit.remove(CredentialKeys.KEY_BILI_REFRESH) else edit.putString(CredentialKeys.KEY_BILI_REFRESH, token)
+            edit.apply()
+            plainPrefs.edit().remove(CredentialKeys.KEY_BILI_REFRESH_CHECKED).remove(CredentialKeys.KEY_BILI_REFRESH_FAILED).apply()
             biliRefreshFailure.value = false
             biliSession.value += 1
         }
     }
 
-    fun saveBiliSession(cookie: String, refreshToken: String) {
-        val old = cookie().orEmpty()
-        val value = cookie.trim()
-        if (value.isEmpty()) {
-            clearCookie()
-            return
-        }
-        val edit = secretPrefs.edit().putString(KEY_COOKIE, value)
-        val token = refreshToken.trim()
-        if (token.isEmpty()) edit.remove(KEY_BILI_REFRESH) else edit.putString(KEY_BILI_REFRESH, token)
-        edit.apply()
-        plainPrefs.edit().remove(KEY_BILI_REFRESH_CHECKED).remove(KEY_BILI_REFRESH_FAILED).apply()
-        biliRefreshFailure.value = false
-        val oldMid = com.nanahoshi.audioplayer.bilibili.cookieField(old, "DedeUserID")
-        val newMid = com.nanahoshi.audioplayer.bilibili.cookieField(value, "DedeUserID")
-        if (oldMid != newMid || (newMid == null && old != value)) biliSession.value += 1
-    }
-
     fun clearCookie() {
-        val changed = cookie() != null
-        secretPrefs.edit().remove(KEY_COOKIE).remove(KEY_BILI_REFRESH).apply()
-        plainPrefs.edit().remove(KEY_BILI_REFRESH_CHECKED).remove(KEY_BILI_REFRESH_FAILED).apply()
-        biliRefreshFailure.value = false
-        if (changed) biliSession.value += 1
+        synchronized(biliLock) {
+            val changed = cookie() != null || biliRefreshToken() != null || pendingBiliRevokeToken() != null
+            secretPrefs.edit()
+                .remove(CredentialKeys.KEY_COOKIE)
+                .remove(CredentialKeys.KEY_BILI_REFRESH)
+                .remove(CredentialKeys.KEY_BILI_PENDING_REVOKE_TOKEN)
+                .apply()
+            plainPrefs.edit().remove(CredentialKeys.KEY_BILI_REFRESH_CHECKED).remove(CredentialKeys.KEY_BILI_REFRESH_FAILED).apply()
+            biliRefreshFailure.value = false
+            if (changed) biliSession.value += 1
+        }
     }
 
-    fun biliRefreshToken(): String? = secretPrefs.getString(KEY_BILI_REFRESH, null)?.takeIf { it.isNotBlank() }
+    fun biliSessionSnapshot(): BiliSessionSnapshot = synchronized(biliLock) {
+        BiliSessionSnapshot(
+            generation = biliSession.value,
+            cookie = cookie().orEmpty(),
+            refreshToken = biliRefreshToken().orEmpty(),
+            pendingRevokeToken = pendingBiliRevokeToken(),
+        )
+    }
+
+    fun commitRefreshedBiliSession(
+        expectedGeneration: Long,
+        newCookie: String,
+        newRefreshToken: String,
+        oldRefreshToken: String,
+    ): Boolean = synchronized(biliLock) {
+        if (biliSession.value != expectedGeneration) return false
+        val value = newCookie.trim()
+        val token = newRefreshToken.trim()
+        if (value.isEmpty() || token.isEmpty()) return false
+        val edit = secretPrefs.edit()
+            .putString(CredentialKeys.KEY_COOKIE, value)
+            .putString(CredentialKeys.KEY_BILI_REFRESH, token)
+        val pending = oldRefreshToken.trim()
+        if (pending.isNotEmpty() && pending != token) {
+            edit.putString(CredentialKeys.KEY_BILI_PENDING_REVOKE_TOKEN, pending)
+        }
+        edit.apply()
+        true
+    }
+
+    fun pendingBiliRevokeToken(): String? = synchronized(biliLock) {
+        secretPrefs.getString(CredentialKeys.KEY_BILI_PENDING_REVOKE_TOKEN, null)?.trim()?.takeIf { it.isNotEmpty() }
+    }
+
+    fun clearPendingBiliRevocation(expectedGeneration: Long, revokedToken: String): Boolean = synchronized(biliLock) {
+        if (biliSession.value != expectedGeneration) return false
+        val current = pendingBiliRevokeToken() ?: return true
+        if (current != revokedToken.trim()) return false
+        secretPrefs.edit().remove(CredentialKeys.KEY_BILI_PENDING_REVOKE_TOKEN).apply()
+        true
+    }
+
+    fun biliRefreshToken(): String? = secretPrefs.getString(CredentialKeys.KEY_BILI_REFRESH, null)?.takeIf { it.isNotBlank() }
 
     fun hasBiliRefresh(): Boolean = biliRefreshToken() != null
 
     fun biliRefreshDue(): Boolean = biliRefreshDueAt(
-        plainPrefs.getLong(KEY_BILI_REFRESH_CHECKED, 0L),
-        plainPrefs.getLong(KEY_BILI_REFRESH_FAILED, 0L),
+        plainPrefs.getLong(CredentialKeys.KEY_BILI_REFRESH_CHECKED, 0L),
+        plainPrefs.getLong(CredentialKeys.KEY_BILI_REFRESH_FAILED, 0L),
         System.currentTimeMillis(),
     )
 
-    fun markBiliRefreshChecked() {
-        plainPrefs.edit()
-            .putLong(KEY_BILI_REFRESH_CHECKED, System.currentTimeMillis())
-            .remove(KEY_BILI_REFRESH_FAILED)
-            .apply()
-        biliRefreshFailure.value = false
+    fun markBiliRefreshChecked(expectedGeneration: Long? = null) {
+        synchronized(biliLock) {
+            if (expectedGeneration != null && biliSession.value != expectedGeneration) return
+            plainPrefs.edit()
+                .putLong(CredentialKeys.KEY_BILI_REFRESH_CHECKED, System.currentTimeMillis())
+                .remove(CredentialKeys.KEY_BILI_REFRESH_FAILED)
+                .apply()
+            biliRefreshFailure.value = false
+        }
     }
 
-    fun markBiliRefreshFailed() {
-        plainPrefs.edit().putLong(KEY_BILI_REFRESH_FAILED, System.currentTimeMillis()).apply()
-        biliRefreshFailure.value = true
+    fun markBiliRefreshFailed(expectedGeneration: Long? = null) {
+        synchronized(biliLock) {
+            if (expectedGeneration != null && biliSession.value != expectedGeneration) return
+            plainPrefs.edit().putLong(CredentialKeys.KEY_BILI_REFRESH_FAILED, System.currentTimeMillis()).apply()
+            biliRefreshFailure.value = true
+        }
     }
 
-    fun biliRefreshFailed(): Boolean = plainPrefs.getLong(KEY_BILI_REFRESH_FAILED, 0L) > 0L
+    fun biliRefreshFailed(): Boolean = plainPrefs.getLong(CredentialKeys.KEY_BILI_REFRESH_FAILED, 0L) > 0L
 
     fun hasCookie(): Boolean = cookie() != null
 
-    fun dlsiteCookie(): String? = secretPrefs.getString(KEY_DLSITE_COOKIE, null)?.takeIf { it.isNotBlank() }
+    fun dlsiteCookie(): String? = secretPrefs.getString(CredentialKeys.KEY_DLSITE_COOKIE, null)?.takeIf { it.isNotBlank() }
 
     fun saveDlsiteCookie(raw: String) {
         val value = raw.trim()
         if (value.isEmpty()) {
             clearDlsiteCookie()
         } else {
-            secretPrefs.edit().putString(KEY_DLSITE_COOKIE, value).apply()
+            secretPrefs.edit().putString(CredentialKeys.KEY_DLSITE_COOKIE, value).apply()
         }
     }
 
     fun clearDlsiteCookie() {
-        secretPrefs.edit().remove(KEY_DLSITE_COOKIE).apply()
+        secretPrefs.edit().remove(CredentialKeys.KEY_DLSITE_COOKIE).apply()
     }
 
     fun whisperBaseUrl(model: String? = null): String? {
-        migrateWhisper()
-        val id = knownWhisperModel(model) ?: resolvedWhisperModel()
-        return normalizeWhisperBase(plainPrefs.getString(whisperBaseKey(id), null))
+        synchronized(whisperLock) {
+            migrateWhisper()
+            val id = knownWhisperModel(model) ?: resolvedWhisperModel()
+            return normalizeWhisperBase(plainPrefs.getString(CredentialKeys.whisperBaseKey(id), null))
+        }
     }
 
     fun whisperToken(model: String? = null): String? {
+        synchronized(whisperLock) {
+            migrateWhisper()
+            val id = knownWhisperModel(model) ?: resolvedWhisperModel()
+            return secretPrefs.getString(CredentialKeys.whisperTokenKey(id), null)?.trim()?.takeIf { it.isNotEmpty() }
+        }
+    }
+
+    fun whisperCredentials(model: String? = null): Pair<String?, String?> = synchronized(whisperLock) {
         migrateWhisper()
         val id = knownWhisperModel(model) ?: resolvedWhisperModel()
-        return secretPrefs.getString(whisperTokenKey(id), null)?.trim()?.takeIf { it.isNotEmpty() }
+        val configured = canonicalWhisperEndpoint(effectiveWhisperBase(id, whisperBaseUrl(id)), id)
+        val token = secretPrefs.getString(CredentialKeys.whisperTokenKey(id), null)?.trim()?.takeIf { it.isNotEmpty() }
+        configured to token
     }
 
     fun hasWhisper(model: String? = null): Boolean {
-        migrateWhisper()
-        val id = knownWhisperModel(model) ?: resolvedWhisperModel()
-        return whisperToken(id) != null && effectiveWhisperBase(id, whisperBaseUrl(id)) != null
+        synchronized(whisperLock) {
+            migrateWhisper()
+            val id = knownWhisperModel(model) ?: resolvedWhisperModel()
+            return whisperToken(id) != null && effectiveWhisperBase(id, whisperBaseUrl(id)) != null
+        }
     }
 
     fun whisperModel(): String? {
-        migrateWhisper()
-        return knownWhisperModel(plainPrefs.getString(KEY_WHISPER_MODEL, null))
+        synchronized(whisperLock) {
+            migrateWhisper()
+            return knownWhisperModel(plainPrefs.getString(CredentialKeys.KEY_WHISPER_MODEL, null))
+        }
     }
 
     fun resolvedWhisperModel(): String {
-        migrateWhisper()
-        return whisperModel() ?: WHISPER_MODEL_QWEN
+        synchronized(whisperLock) {
+            migrateWhisper()
+            return whisperModel() ?: WHISPER_MODEL_QWEN
+        }
     }
 
     fun saveWhisper(baseUrl: String, token: String, model: String) {
-        migrateWhisper()
-        val known = knownWhisperModel(model) ?: return
-        plainPrefs.edit().putString(KEY_WHISPER_MODEL, known).apply()
-        if (isOnDeviceWhisperModel(known)) return
-        val base = normalizeWhisperBase(baseUrl)
-        val edit = plainPrefs.edit()
-        if (base == null) edit.remove(whisperBaseKey(known)) else edit.putString(whisperBaseKey(known), base)
-        edit.apply()
-        val secret = token.trim()
-        if (secret.isEmpty()) {
-            secretPrefs.edit().remove(whisperTokenKey(known)).apply()
-        } else {
-            secretPrefs.edit().putString(whisperTokenKey(known), secret).apply()
+        synchronized(whisperLock) {
+            migrateWhisper()
+            val known = knownWhisperModel(model) ?: return
+            plainPrefs.edit().putString(CredentialKeys.KEY_WHISPER_MODEL, known).apply()
+            if (isOnDeviceWhisperModel(known)) return
+            val base = normalizeWhisperBase(baseUrl)
+            val edit = plainPrefs.edit()
+            if (base == null) edit.remove(CredentialKeys.whisperBaseKey(known)) else edit.putString(CredentialKeys.whisperBaseKey(known), base)
+            edit.apply()
+            val secret = token.trim()
+            if (secret.isEmpty()) {
+                secretPrefs.edit().remove(CredentialKeys.whisperTokenKey(known)).apply()
+            } else {
+                secretPrefs.edit().putString(CredentialKeys.whisperTokenKey(known), secret).apply()
+            }
         }
     }
 
     fun clearWhisper(model: String? = null) {
-        migrateWhisper()
-        val id = knownWhisperModel(model) ?: resolvedWhisperModel()
-        plainPrefs.edit().remove(whisperBaseKey(id)).apply()
-        secretPrefs.edit().remove(whisperTokenKey(id)).apply()
-    }
-
-    private fun migrateWhisper() {
-        migrateLegacyWhisper()
-        migrateRemovedWhisperModels()
-    }
-
-    private fun migrateRemovedWhisperModels() {
-        if (plainPrefs.getBoolean(KEY_WHISPER_MODEL_MIGRATED_V2, false)) return
-        if (knownWhisperModel(plainPrefs.getString(KEY_WHISPER_MODEL, null)) == null) {
-            plainPrefs.edit().putString(KEY_WHISPER_MODEL, WHISPER_MODEL_QWEN).apply()
+        synchronized(whisperLock) {
+            migrateWhisper()
+            val id = knownWhisperModel(model) ?: resolvedWhisperModel()
+            plainPrefs.edit().remove(CredentialKeys.whisperBaseKey(id)).apply()
+            secretPrefs.edit().remove(CredentialKeys.whisperTokenKey(id)).apply()
         }
-        plainPrefs.edit().putBoolean(KEY_WHISPER_MODEL_MIGRATED_V2, true).apply()
-    }
-
-    private fun migrateLegacyWhisper() {
-        if (plainPrefs.getBoolean(KEY_WHISPER_MIGRATED, false)) return
-        val legacyBase = normalizeWhisperBase(plainPrefs.getString(KEY_WHISPER_BASE, null))
-        val legacyToken = secretPrefs.getString(KEY_WHISPER_TOKEN, null)?.trim()?.takeIf { it.isNotEmpty() }
-        val stored = knownWhisperModel(plainPrefs.getString(KEY_WHISPER_MODEL, null))
-        // 旧地址对应的三个模型已删除，只有 DashScope 的旧凭证还迁得动。
-        val dashscope = legacyBase != null && qwenHttpOrigin(legacyBase) == QWEN_WHISPER_BASE
-        val model = stored ?: if (dashscope) WHISPER_MODEL_QWEN else null
-        if (model != null) {
-            if (dashscope && plainPrefs.getString(whisperBaseKey(model), null).isNullOrBlank()) {
-                plainPrefs.edit().putString(whisperBaseKey(model), legacyBase).apply()
-            }
-            if (dashscope && legacyToken != null && secretPrefs.getString(whisperTokenKey(model), null).isNullOrBlank()) {
-                secretPrefs.edit().putString(whisperTokenKey(model), legacyToken).apply()
-            }
-            if (stored == null) {
-                plainPrefs.edit().putString(KEY_WHISPER_MODEL, model).apply()
-            }
-        }
-        plainPrefs.edit().remove(KEY_WHISPER_BASE).putBoolean(KEY_WHISPER_MIGRATED, true).apply()
-        secretPrefs.edit().remove(KEY_WHISPER_TOKEN).apply()
     }
 
     fun translatePlatform(): TranslatePlatform {
         migrateTranslate()
-        return translatePlatformOf(plainPrefs.getString(KEY_TRANSLATE_PLATFORM, null))
+        return translatePlatformOf(plainPrefs.getString(CredentialKeys.KEY_TRANSLATE_PLATFORM, null))
     }
 
     fun translateBaseUrl(): String = translatePlatform().baseUrl
 
     fun translateToken(platform: TranslatePlatform = translatePlatform()): String? {
         migrateTranslate()
-        return secretPrefs.getString(translateTokenKey(platform), null)?.trim()?.takeIf { it.isNotEmpty() }
+        return secretPrefs.getString(CredentialKeys.translateTokenKey(platform), null)?.trim()?.takeIf { it.isNotEmpty() }
     }
 
     fun translateModelInput(platform: TranslatePlatform = translatePlatform()): String {
         migrateTranslate()
-        return plainPrefs.getString(translateModelKey(platform), null)?.trim().orEmpty()
+        return plainPrefs.getString(CredentialKeys.translateModelKey(platform), null)?.trim().orEmpty()
     }
 
     fun translateModel(platform: TranslatePlatform = translatePlatform()): String {
@@ -245,93 +279,111 @@ class CredentialStore(context: Context) {
 
     fun translateThinking(): Boolean {
         migrateTranslate()
-        return plainPrefs.getBoolean(KEY_TRANSLATE_THINKING, false)
+        return plainPrefs.getBoolean(CredentialKeys.KEY_TRANSLATE_THINKING, false)
     }
 
     fun translateEffort(platform: TranslatePlatform = translatePlatform()): String {
         migrateTranslate()
-        return platform.effortOrDefault(plainPrefs.getString(translateEffortKey(platform), null))
+        return platform.effortOrDefault(plainPrefs.getString(CredentialKeys.translateEffortKey(platform), null))
     }
 
     fun translateAutoPolish(): Boolean {
         migrateTranslate()
-        return plainPrefs.getBoolean(KEY_TRANSLATE_AUTO_POLISH, false)
+        return plainPrefs.getBoolean(CredentialKeys.KEY_TRANSLATE_AUTO_POLISH, false)
     }
 
     fun translateAutoCorrect(): Boolean {
         migrateTranslate()
-        return plainPrefs.getBoolean(KEY_TRANSLATE_AUTO_CORRECT, false)
+        return plainPrefs.getBoolean(CredentialKeys.KEY_TRANSLATE_AUTO_CORRECT, false)
+    }
+
+    fun translateJapaneseProofread(): Boolean {
+        migrateTranslate()
+        return plainPrefs.getBoolean(CredentialKeys.KEY_TRANSLATE_JP_PROOFREAD, false)
+    }
+
+    fun translateJapaneseMerge(): Boolean {
+        migrateTranslate()
+        return plainPrefs.getBoolean(CredentialKeys.KEY_TRANSLATE_JP_MERGE, false)
+    }
+
+    fun translateConfig(): TranslateConfig = synchronized(translateLock) {
+        migrateTranslate()
+        val platform = translatePlatform()
+        TranslateConfig(
+            platform = platform,
+            baseUrl = platform.baseUrl,
+            token = translateToken(platform),
+            model = translateModel(platform),
+            thinking = translateThinking(),
+            effort = translateEffort(platform),
+        )
     }
 
     fun saveTranslate(platform: TranslatePlatform, token: String, model: String) {
-        migrateTranslate()
-        plainPrefs.edit().putString(KEY_TRANSLATE_PLATFORM, platform.name).apply()
-        val secret = token.trim()
-        if (secret.isEmpty()) {
-            secretPrefs.edit().remove(translateTokenKey(platform)).apply()
-        } else {
-            secretPrefs.edit().putString(translateTokenKey(platform), secret).apply()
-        }
-        val name = model.trim()
-        if (name.isEmpty()) {
-            plainPrefs.edit().remove(translateModelKey(platform)).apply()
-        } else {
-            plainPrefs.edit().putString(translateModelKey(platform), name).apply()
+        synchronized(translateLock) {
+            migrateTranslate()
+            plainPrefs.edit().putString(CredentialKeys.KEY_TRANSLATE_PLATFORM, platform.name).apply()
+            val secret = token.trim()
+            if (secret.isEmpty()) {
+                secretPrefs.edit().remove(CredentialKeys.translateTokenKey(platform)).apply()
+            } else {
+                secretPrefs.edit().putString(CredentialKeys.translateTokenKey(platform), secret).apply()
+            }
+            val name = model.trim()
+            if (name.isEmpty()) {
+                plainPrefs.edit().remove(CredentialKeys.translateModelKey(platform)).apply()
+            } else {
+                plainPrefs.edit().putString(CredentialKeys.translateModelKey(platform), name).apply()
+            }
         }
     }
 
     fun clearTranslate(platform: TranslatePlatform = translatePlatform()) {
-        migrateTranslate()
-        plainPrefs.edit().remove(translateModelKey(platform)).apply()
-        secretPrefs.edit().remove(translateTokenKey(platform)).apply()
+        synchronized(translateLock) {
+            migrateTranslate()
+            plainPrefs.edit().remove(CredentialKeys.translateModelKey(platform)).apply()
+            secretPrefs.edit().remove(CredentialKeys.translateTokenKey(platform)).apply()
+        }
     }
 
     fun saveTranslateThinking(enabled: Boolean) {
-        migrateTranslate()
-        plainPrefs.edit().putBoolean(KEY_TRANSLATE_THINKING, enabled).apply()
+        synchronized(translateLock) {
+            migrateTranslate()
+            plainPrefs.edit().putBoolean(CredentialKeys.KEY_TRANSLATE_THINKING, enabled).apply()
+        }
     }
 
     fun saveTranslateEffort(platform: TranslatePlatform, effort: String) {
-        migrateTranslate()
-        plainPrefs.edit().putString(translateEffortKey(platform), platform.effortOrDefault(effort)).apply()
+        synchronized(translateLock) {
+            migrateTranslate()
+            plainPrefs.edit().putString(CredentialKeys.translateEffortKey(platform), platform.effortOrDefault(effort)).apply()
+        }
     }
 
     fun saveTranslateAutoPolish(enabled: Boolean) {
         migrateTranslate()
-        plainPrefs.edit().putBoolean(KEY_TRANSLATE_AUTO_POLISH, enabled).apply()
+        plainPrefs.edit().putBoolean(CredentialKeys.KEY_TRANSLATE_AUTO_POLISH, enabled).apply()
     }
 
     fun saveTranslateAutoCorrect(enabled: Boolean) {
         migrateTranslate()
-        plainPrefs.edit().putBoolean(KEY_TRANSLATE_AUTO_CORRECT, enabled).apply()
+        plainPrefs.edit().putBoolean(CredentialKeys.KEY_TRANSLATE_AUTO_CORRECT, enabled).apply()
     }
 
-    private fun migrateTranslate() {
-        if (plainPrefs.getBoolean(KEY_TRANSLATE_MIGRATED, false)) return
-        val legacyBase = plainPrefs.getString(KEY_TRANSLATE_BASE, null)
-        val platform = platformForLegacyBase(legacyBase)
-        if (platform != null) {
-            plainPrefs.edit().putString(KEY_TRANSLATE_PLATFORM, platform.name).apply()
-            val legacyModel = plainPrefs.getString(KEY_TRANSLATE_MODEL, null)?.trim()?.takeIf { it.isNotEmpty() }
-            val legacyToken = secretPrefs.getString(KEY_TRANSLATE_TOKEN, null)?.trim()?.takeIf { it.isNotEmpty() }
-            if (legacyModel != null && plainPrefs.getString(translateModelKey(platform), null).isNullOrBlank()) {
-                plainPrefs.edit().putString(translateModelKey(platform), legacyModel).apply()
-            }
-            if (legacyToken != null && secretPrefs.getString(translateTokenKey(platform), null).isNullOrBlank()) {
-                secretPrefs.edit().putString(translateTokenKey(platform), legacyToken).apply()
-            }
-        }
-        plainPrefs.edit()
-            .remove(KEY_TRANSLATE_BASE)
-            .remove(KEY_TRANSLATE_MODEL)
-            .putBoolean(KEY_TRANSLATE_MIGRATED, true)
-            .apply()
-        secretPrefs.edit().remove(KEY_TRANSLATE_TOKEN).apply()
+    fun saveTranslateJapaneseProofread(enabled: Boolean) {
+        migrateTranslate()
+        plainPrefs.edit().putBoolean(CredentialKeys.KEY_TRANSLATE_JP_PROOFREAD, enabled).apply()
     }
 
-    fun buvid3(): String = plainPrefs.getString(KEY_BUVID, null).orEmpty()
+    fun saveTranslateJapaneseMerge(enabled: Boolean) {
+        migrateTranslate()
+        plainPrefs.edit().putBoolean(CredentialKeys.KEY_TRANSLATE_JP_MERGE, enabled).apply()
+    }
 
-    fun buvid4(): String = plainPrefs.getString(KEY_BUVID4, null).orEmpty()
+    fun buvid3(): String = plainPrefs.getString(CredentialKeys.KEY_BUVID, null).orEmpty()
+
+    fun buvid4(): String = plainPrefs.getString(CredentialKeys.KEY_BUVID4, null).orEmpty()
 
     fun needsSpiBuvid(): Boolean {
         val current = buvid3()
@@ -340,26 +392,26 @@ class CredentialStore(context: Context) {
 
     fun saveSpiBuvid(buvid3: String, buvid4: String) {
         plainPrefs.edit()
-            .putString(KEY_BUVID, buvid3)
-            .putString(KEY_BUVID4, buvid4)
+            .putString(CredentialKeys.KEY_BUVID, buvid3)
+            .putString(CredentialKeys.KEY_BUVID4, buvid4)
             .apply()
     }
 
-    fun ticket(): String? = plainPrefs.getString(KEY_TICKET, null)?.takeIf { it.isNotBlank() }
+    fun ticket(): String? = plainPrefs.getString(CredentialKeys.KEY_TICKET, null)?.takeIf { it.isNotBlank() }
 
-    fun ticketExpiresAt(): Long = plainPrefs.getLong(KEY_TICKET_EXPIRES, 0L)
+    fun ticketExpiresAt(): Long = plainPrefs.getLong(CredentialKeys.KEY_TICKET_EXPIRES, 0L)
 
     fun hasFreshTicket(): Boolean = ticketIsFresh(ticketExpiresAt(), System.currentTimeMillis() / 1000)
 
     fun saveTicket(ticket: String, expiresAtEpochSec: Long) {
         plainPrefs.edit()
-            .putString(KEY_TICKET, ticket)
-            .putLong(KEY_TICKET_EXPIRES, expiresAtEpochSec)
+            .putString(CredentialKeys.KEY_TICKET, ticket)
+            .putLong(CredentialKeys.KEY_TICKET_EXPIRES, expiresAtEpochSec)
             .apply()
     }
 
     fun clearTicket() {
-        plainPrefs.edit().remove(KEY_TICKET).putLong(KEY_TICKET_EXPIRES, 0L).apply()
+        plainPrefs.edit().remove(CredentialKeys.KEY_TICKET).putLong(CredentialKeys.KEY_TICKET_EXPIRES, 0L).apply()
     }
 
     fun guestCookieHeader(): String = buildList {
@@ -369,8 +421,8 @@ class CredentialStore(context: Context) {
         if (buvid4.isNotBlank()) add("buvid4=$buvid4")
     }.joinToString("; ")
 
-    fun cookieHeader(): String {
-        val user = cookie()?.replace("\r", "")?.replace("\n", "")?.trim()
+    fun cookieHeader(userCookie: String? = cookie()): String {
+        val user = userCookie?.replace("\r", "")?.replace("\n", "")?.trim()
         val parts = mutableListOf<String>()
         val buvid3 = buvid3()
         if (buvid3.contains("-")) parts += "buvid3=$buvid3"
@@ -390,62 +442,7 @@ class CredentialStore(context: Context) {
             .map { it.trim() }
             .filter { part ->
                 val key = part.substringBefore('=').trim()
-                key.isNotBlank() && key !in MANAGED_COOKIE_KEYS
+                key.isNotBlank() && key !in CredentialKeys.MANAGED_COOKIE_KEYS
             }
             .joinToString("; ")
-
-    private fun createSecretPrefs(): SharedPreferences {
-        val masterKey = MasterKey.Builder(appContext)
-            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-            .build()
-        return EncryptedSharedPreferences.create(
-            appContext,
-            SECRET_FILE,
-            masterKey,
-            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
-        )
-    }
-
-    private companion object {
-        const val SECRET_FILE = "bili_secret_prefs"
-        const val KEY_COOKIE = "bili_cookie"
-        const val KEY_BILI_REFRESH = "bili_refresh_token"
-        const val KEY_BILI_REFRESH_CHECKED = "bili_refresh_checked_at"
-        const val KEY_BILI_REFRESH_FAILED = "bili_refresh_failed_at"
-        const val KEY_DLSITE_COOKIE = "dlsite_cookie"
-        const val KEY_WHISPER_BASE = "whisper_base_url"
-        const val KEY_WHISPER_TOKEN = "whisper_token"
-        const val KEY_WHISPER_MODEL = "whisper_model"
-        const val KEY_WHISPER_MIGRATED = "whisper_credentials_migrated"
-        const val KEY_WHISPER_MODEL_MIGRATED_V2 = "whisper_model_migrated_v2"
-
-        fun whisperBaseKey(model: String) = "whisper_base_$model"
-
-        fun whisperTokenKey(model: String) = "whisper_token_$model"
-        const val KEY_TRANSLATE_BASE = "translate_base_url"
-        const val KEY_TRANSLATE_TOKEN = "translate_token"
-        const val KEY_TRANSLATE_MODEL = "translate_model"
-        const val KEY_TRANSLATE_PLATFORM = "translate_platform"
-        const val KEY_TRANSLATE_THINKING = "translate_thinking"
-        const val KEY_TRANSLATE_AUTO_POLISH = "translate_auto_polish"
-        const val KEY_TRANSLATE_AUTO_CORRECT = "translate_auto_correct"
-        const val KEY_TRANSLATE_MIGRATED = "translate_credentials_migrated"
-
-        fun translateTokenKey(platform: TranslatePlatform) = "translate_token_${platform.name}"
-
-        fun translateModelKey(platform: TranslatePlatform) = "translate_model_${platform.name}"
-
-        fun translateEffortKey(platform: TranslatePlatform) = "translate_effort_${platform.name}"
-        const val KEY_BUVID = "buvid3"
-
-        fun normalizeWhisperBase(raw: String?): String? {
-            val value = raw?.trim()?.trimEnd('/')?.takeIf { it.isNotEmpty() } ?: return null
-            return value
-        }
-        const val KEY_BUVID4 = "buvid4"
-        const val KEY_TICKET = "bili_ticket"
-        const val KEY_TICKET_EXPIRES = "bili_ticket_expires"
-        val MANAGED_COOKIE_KEYS = setOf("buvid3", "buvid4", "bili_ticket", "bili_ticket_expires")
-    }
 }

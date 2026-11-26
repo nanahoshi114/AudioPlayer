@@ -103,6 +103,10 @@
     <string name="settings_deep_thinking">深度思考</string>
     <string name="settings_thinking_effort">思考强度</string>
     <string name="settings_auto_polish">翻译后自动润色</string>
+    <string name="settings_japanese_proofread">日文校对</string>
+    <string name="settings_japanese_proofread_help">仅对日文字幕生效。翻译时顺带修正明显的错字、断词和标点。</string>
+    <string name="settings_japanese_merge">语义合并</string>
+    <string name="settings_japanese_merge_help">仅对日文字幕生效。将确属同一句的相邻字幕合并后翻译；关闭校对时保持原日文文字不变。</string>
     <string name="settings_translate_tuning">自动修正合并格式</string>
     <string name="settings_translate_tuning_help">开启后，如果模型合并的字幕句子太多、时间太长或字数太多，会要求它拆分一次再交付。每批最多请求两次。关闭后直接使用符合基本格式的结果。</string>
     <string name="settings_saved">已保存</string>

@@ -25,7 +25,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Subtitles
@@ -36,7 +35,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
@@ -168,7 +166,7 @@ internal fun TrackSubtitlePickerSheet(
         onDismissRequest = { if (!busy) onDismiss() },
         sheetState = sheetState,
     ) {
-        SheetHeader(
+        ModalSheetHeader(
             title = stringResource(R.string.subtitle_picker_title),
             subtitle = trackTitle,
             closeEnabled = !busy,
@@ -185,26 +183,12 @@ internal fun TrackSubtitlePickerSheet(
             return@ModalBottomSheet
         }
         if (libraryTrack == null) {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 24.dp, vertical = 20.dp)
-                    .navigationBarsPadding(),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Text(
-                    stringResource(R.string.subtitle_picker_library_required),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(16.dp))
-                TextButton(
-                    onClick = onDismiss,
-                    modifier = Modifier.defaultMinSize(minHeight = 48.dp),
-                ) {
-                    Text(stringResource(R.string.common_close))
-                }
-            }
+            EmptyState(
+                title = stringResource(R.string.subtitle_picker_library_required),
+                actionLabel = stringResource(R.string.common_close),
+                onAction = onDismiss,
+                modifier = Modifier.navigationBarsPadding(),
+            )
             return@ModalBottomSheet
         }
 
@@ -577,29 +561,21 @@ internal fun TrackSubtitlePickerSheet(
         }
 
         needsCopyPrompt?.let { (uri, displayName) ->
-            AlertDialog(
-                onDismissRequest = { if (!busy) needsCopyPrompt = null },
-                title = { Text(stringResource(R.string.subtitle_picker_needs_copy_title)) },
-                text = { Text(stringResource(R.string.subtitle_picker_needs_copy_message)) },
-                confirmButton = {
-                    TextButton(
-                        enabled = !busy,
-                        onClick = {
-                            needsCopyPrompt = null
-                            runAction(closeAfter = true) {
-                                val ok = actions.importAndBindCopy(libraryTrack.id, uri, displayName)
-                                if (!ok) actions.showMessage(R.string.subtitle_picker_import_failed)
-                                ok
-                            }
-                        },
-                    ) { Text(stringResource(R.string.subtitle_picker_import_copy)) }
+            ConfirmActionDialog(
+                title = stringResource(R.string.subtitle_picker_needs_copy_title),
+                message = stringResource(R.string.subtitle_picker_needs_copy_message),
+                confirmLabel = stringResource(R.string.subtitle_picker_import_copy),
+                destructive = false,
+                enabled = !busy,
+                onConfirm = {
+                    needsCopyPrompt = null
+                    runAction(closeAfter = true) {
+                        val ok = actions.importAndBindCopy(libraryTrack.id, uri, displayName)
+                        if (!ok) actions.showMessage(R.string.subtitle_picker_import_failed)
+                        ok
+                    }
                 },
-                dismissButton = {
-                    TextButton(
-                        enabled = !busy,
-                        onClick = { needsCopyPrompt = null },
-                    ) { Text(stringResource(R.string.common_cancel)) }
-                },
+                onDismiss = { needsCopyPrompt = null },
             )
         }
     }
@@ -640,7 +616,7 @@ internal fun FileToTrackSubtitleSheet(
         onDismissRequest = { if (!busy) onDismiss() },
         sheetState = sheetState,
     ) {
-        SheetHeader(
+        ModalSheetHeader(
             title = stringResource(R.string.subtitle_file_bind_title),
             subtitle = file.name,
             closeEnabled = !busy,
@@ -734,51 +710,6 @@ internal fun FileToTrackSubtitleSheet(
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun SheetHeader(
-    title: String,
-    subtitle: String,
-    closeEnabled: Boolean = true,
-    onDismiss: () -> Unit,
-) {
-    Column(Modifier.fillMaxWidth()) {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(start = 16.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text(
-                    title,
-                    style = MaterialTheme.typography.titleMedium,
-                    maxLines = 1,
-                    softWrap = false,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                if (subtitle.isNotBlank()) {
-                    Text(
-                        subtitle,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-            IconButton(
-                onClick = onDismiss,
-                enabled = closeEnabled,
-                modifier = Modifier.size(48.dp),
-            ) {
-                Icon(Icons.Default.Close, contentDescription = stringResource(R.string.a11y_close))
-            }
-        }
-        HorizontalDivider()
     }
 }
 

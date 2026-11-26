@@ -1,33 +1,22 @@
 package com.nanahoshi.audioplayer.japaneseasmr
 
-import kotlinx.coroutines.CompletableDeferred
-import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
+import com.nanahoshi.audioplayer.data.TokenRequestCoordinator
 
 internal class JaRefreshRequests {
-    internal class Pending(val post: JaPostRef) {
-        val result = CompletableDeferred<JaArticle?>()
+    class Pending internal constructor(
+        internal val shared: TokenRequestCoordinator.Pending<JaPostRef, JaArticle>,
+    ) {
+        val post: JaPostRef get() = shared.payload
     }
 
-    private val requests = ConcurrentHashMap<String, Pending>()
-
-    suspend fun verify(post: JaPostRef, open: suspend (String) -> Boolean): JaArticle? {
-        val token = UUID.randomUUID().toString()
-        val request = Pending(post)
-        requests[token] = request
-        try {
-            return if (open(token)) request.result.await() else null
-        } finally {
-            requests.remove(token, request)
-        }
+    private val requests = TokenRequestCoordinator<JaPostRef, JaArticle> { post, article ->
+        article.post.postId == post.postId && article.post.rj.equals(post.rj, ignoreCase = true)
     }
 
-    fun get(token: String) = requests[token]
+    suspend fun verify(post: JaPostRef, open: suspend (String) -> Boolean): JaArticle? =
+        requests.await(post, open)
 
-    fun finish(token: String, article: JaArticle?) {
-        val pending = requests.remove(token) ?: return
-        pending.result.complete(article?.takeIf {
-            it.post.postId == pending.post.postId && it.post.rj.equals(pending.post.rj, ignoreCase = true)
-        })
-    }
+    fun get(token: String): Pending? = requests.get(token)?.let(::Pending)
+
+    fun finish(token: String, article: JaArticle?) = requests.finish(token, article)
 }

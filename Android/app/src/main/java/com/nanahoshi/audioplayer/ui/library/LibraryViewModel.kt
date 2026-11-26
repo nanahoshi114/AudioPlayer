@@ -6,7 +6,7 @@ import com.nanahoshi.audioplayer.text.resolveNoUrl
 import androidx.annotation.StringRes
 import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.text.TextRef
-import com.nanahoshi.audioplayer.text.resolve
+import com.nanahoshi.audioplayer.text.UserFacingException
 
 import android.app.Application
 import android.net.Uri
@@ -46,6 +46,7 @@ import com.nanahoshi.audioplayer.playback.SubtitleCandidateEntry
 import com.nanahoshi.audioplayer.playback.WorkSubtitleCandidate
 import com.nanahoshi.audioplayer.playback.nearestSubtitleWorkRoot
 import com.nanahoshi.audioplayer.playback.pickSubtitleName
+import com.nanahoshi.audioplayer.ui.components.SelectionState
 import com.nanahoshi.audioplayer.ui.components.SubtitlePickerActions
 import com.nanahoshi.audioplayer.ui.components.subtitlePickerActions
 import kotlinx.coroutines.CancellationException
@@ -68,53 +69,10 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-enum class LibrarySourceFilter {
-    ALL,
-    BILIBILI,
-    YOUTUBE,
-    ASMR,
-    LOCAL,
-}
-
-data class LibraryListing(
-    val folders: List<FolderEntity>,
-    val entries: List<LibraryEntry>,
-    val browsing: Boolean = true,
-    val hiddenSubtitleCount: Int = 0,
-)
-
-sealed interface LibraryEntry {
-    val name: String
-    val addedAt: Long
-
-    data class Audio(val track: TrackEntity, val hasSubtitle: Boolean = false) : LibraryEntry {
-        override val name: String get() = track.title
-        override val addedAt: Long get() = track.addedAt
-    }
-
-    data class File(val file: LibraryFileEntity) : LibraryEntry {
-        override val name: String get() = file.name
-        override val addedAt: Long get() = file.addedAt
-    }
-}
-
-sealed interface CachePrompt {
-    data class Source(val sources: List<TrackSource>) : CachePrompt
-    data class JapanesePosts(
-        val posts: List<com.nanahoshi.audioplayer.japaneseasmr.JaPostRef>,
-        val refresh: Boolean = false,
-    ) : CachePrompt
-    data class JapaneseChoice(val title: String, val message: String, val options: List<Pair<Any, String>>) : CachePrompt
-    data class JapaneseVerify(val token: String, val articleTitle: String? = null, val buzzheavier: Boolean = false) : CachePrompt
-    class JapaneseWaiting(val title: String) : CachePrompt
-    data class Format(val conflict: FormatConflict) : CachePrompt
-}
-
 @OptIn(ExperimentalCoroutinesApi::class)
 class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     private val graph = app.graph()
     private val appContext = app.applicationContext
-    private fun text(@StringRes id: Int, vararg args: Any): String = appContext.getString(id, *args)
     val removalPolicy = graph.library.observeAllFolders().map {
         com.nanahoshi.audioplayer.data.LibraryRemovalPolicy(it)
     }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5000), null)
@@ -213,9 +171,12 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     private val busyCounter = BusyCounter()
     val busy get() = busyCounter.busy
-    val selectedTrackIds = MutableStateFlow<Set<Long>>(emptySet())
-    val selectedFolderIds = MutableStateFlow<Set<Long>>(emptySet())
-    val selectedFileIds = MutableStateFlow<Set<Long>>(emptySet())
+    private val trackSelection = SelectionState<Long>()
+    private val folderSelection = SelectionState<Long>()
+    private val fileSelection = SelectionState<Long>()
+    val selectedTrackIds = trackSelection.flow
+    val selectedFolderIds = folderSelection.flow
+    val selectedFileIds = fileSelection.flow
     private val metaRequested = mutableSetOf<Long>()
 
     fun toggleSubtitleFiles() {
@@ -226,7 +187,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
                 .mapNotNullTo(mutableSetOf()) { entry ->
                     (entry as? LibraryEntry.File)?.file?.takeIf { isSubtitleFile(it.name) }?.id
                 }
-            selectedFileIds.value = selectedFileIds.value - visibleSubtitleIds
+            fileSelection.removeAll(visibleSubtitleIds)
         }
     }
 
@@ -238,9 +199,9 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
                 if (ids.isNotEmpty()) graph.library.observeAllFiles() else emptyFlow()
             }.collect { files ->
                 if (workLocation.value != null && !showSubtitleFiles.value) {
-                    val selected = selectedFileIds.value
+                    val selected = fileSelection.ids
                     val hidden = files.filter { it.id in selected && isSubtitleFile(it.name) }.map { it.id }
-                    selectedFileIds.value = selected - hidden
+                    fileSelection.removeAll(hidden)
                 }
             }
         }
@@ -524,6 +485,31 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun goToFolder(targetFolderId: Long?) {
+        if (currentFolderId.value == targetFolderId) return
+        searchQuery.value = ""
+        pendingAsmr.value = null
+        rjLookup?.cancel()
+        openJob?.cancel()
+        sourceCheckJob?.cancel()
+        openGeneration += 1
+        clearSelection()
+        if (targetFolderId == null) {
+            clearWorkSource()
+            currentFolderId.value = null
+            return
+        }
+        viewModelScope.launch {
+            val target = graph.library.folder(targetFolderId)
+            if (target == null) {
+                clearWorkSource()
+                currentFolderId.value = null
+            } else {
+                openFolder(target)
+            }
+        }
+    }
+
     private fun clearWorkSource() {
         sourceCheckJob?.cancel()
         workRootId.value = null
@@ -540,10 +526,6 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         val count = graph.library.importTree(uri, currentFolderId.value, keepStructure)
         if (count == 0) graph.show(R.string.library_folder_no_audio)
         else graph.show(R.string.library_imported_count, count)
-    }
-
-    fun createFolder(name: String) = launch {
-        graph.library.createFolder(currentFolderId.value, name)
     }
 
     fun recognizeFolder(folderId: Long, input: String) = launch {
@@ -569,11 +551,11 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun downloadTracks(tracks: List<TrackEntity>): Int? {
-        val dlsite = tracks.filter { it.source == TrackSource.DLSITE && !LocalAudio.hasStoredCopy(it.localUri) }
+        val dlsite = tracks.filter { it.source == TrackSource.DLSITE && !LocalAudio.hasStoredCopy(appContext, it.localUri) }
         if (dlsite.isEmpty()) return graph.downloads.enqueue(tracks)
         val works = linkedMapOf<String, String>()
         for (track in dlsite) {
-            val workno = graph.downloads.requestWorkno(track) ?: error(text(R.string.library_missing_work_id))
+            val workno = graph.downloads.requestWorkno(track) ?: throw UserFacingException(TextRef.Res(R.string.library_missing_work_id))
             works.putIfAbsent(workno, workno)
         }
         val mode = graph.dlsiteDownloadRequests.choose(
@@ -689,252 +671,17 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         pendingAudioDelete.value = null
     }
 
-    val cachePrompt = MutableStateFlow<CachePrompt?>(null)
-    private var cacheJob: Job? = null
-    private var cacheAnswer: CompletableDeferred<Any?>? = null
+    private val cacheFlow = LibraryCacheFlow(graph, appContext, viewModelScope, { workFileSource.value }, { workLocation.value })
+    val cachePrompt get() = cacheFlow.cachePrompt
 
-    fun answerCache(answer: Any?) {
-        cacheAnswer?.complete(answer)
-    }
+    fun answerCache(answer: Any?) = cacheFlow.answerCache(answer)
 
-    fun cancelCacheWait(prompt: CachePrompt.JapaneseWaiting) {
-        if (cachePrompt.compareAndSet(prompt, null)) cacheJob?.cancel()
-    }
+    fun cancelCacheWait(prompt: CachePrompt.JapaneseWaiting) = cacheFlow.cancelCacheWait(prompt)
 
-    private suspend fun <T> waitForJapaneseDownload(
-        prompt: CachePrompt.JapaneseWaiting,
-        read: suspend () -> T,
-    ): T {
-        cachePrompt.value = prompt
-        try {
-            return read()
-        } finally {
-            cachePrompt.compareAndSet(prompt, null)
-        }
-    }
+    fun cacheFolder(folderId: Long) = cacheFlow.cacheFolder(folderId)
 
-    private suspend fun askCache(prompt: CachePrompt): Any? {
-        val answer = CompletableDeferred<Any?>()
-        cacheAnswer = answer
-        cachePrompt.value = prompt
-        try {
-            return answer.await()
-        } finally {
-            if (cacheAnswer === answer) {
-                cachePrompt.value = null
-                cacheAnswer = null
-            }
-        }
-    }
+    fun refreshJapaneseArticles(rootId: Long) = cacheFlow.refreshJapaneseArticles(rootId)
 
-    fun cacheFolder(folderId: Long) {
-        cacheJob?.cancel()
-        cacheJob = viewModelScope.launch {
-            try {
-                cacheWork(folderId)
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Exception) {
-                graph.showError(error, R.string.library_operation_failed)
-            }
-        }
-    }
-
-    private suspend fun selectJapanesePosts(
-        posts: List<com.nanahoshi.audioplayer.japaneseasmr.JaPostRef>,
-        refresh: Boolean = false,
-    ) = if (posts.size <= 1) posts else when (val answer = askCache(CachePrompt.JapanesePosts(posts, refresh))) {
-        is String -> posts.filter { it.postId == answer }
-        true -> if (refresh) posts else emptyList()
-        else -> emptyList()
-    }
-
-    fun refreshJapaneseArticles(rootId: Long) {
-        cacheJob?.cancel()
-        cacheJob = viewModelScope.launch {
-            val rows = graph.db.japaneseAsmr().postsForRoot(rootId)
-            val trail = workLocation.value?.path.orEmpty().map { it.id }
-            val current = rows.firstOrNull { it.articleFolderId in trail }
-            val selected = if (current != null) listOf(current.ref()) else selectJapanesePosts(rows.map { it.ref() }, refresh = true)
-            val result = mutableListOf<String>()
-            for (post in selected) {
-                try {
-                    val article = try {
-                        graph.japaneseAsmr.article(post.postId, post.rj, refresh = true)
-                    } catch (failure: com.nanahoshi.audioplayer.japaneseasmr.JapaneseAsmrException) {
-                        if (failure.verificationPage == null) throw failure
-                        graph.jaRefreshRequests.verify(post) { token ->
-                            askCache(CachePrompt.JapaneseVerify(token, post.title)) == true
-                        } ?: break
-                    }
-                    val updated = graph.player.refreshJaArticle(article, rootId, cleanup = true)
-                    result += appContext.getString(R.string.library_ja_refresh_line, post.title, updated.message(appContext))
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (failure: Exception) {
-                    val reason = appContext.resolveUserError(failure, R.string.library_refresh_failed)
-                    result += appContext.getString(R.string.library_ja_refresh_line, post.title, reason)
-                }
-            }
-            if (result.isNotEmpty()) graph.messages.value = result.joinToString("\n")
-        }
-    }
-
-    private suspend fun cacheJapaneseWork(root: FolderEntity): Int {
-        val posts = graph.db.japaneseAsmr().postsForRoot(root.id).map { it.ref() }
-        val selected = selectJapanesePosts(posts)
-        if (selected.isEmpty()) return 0
-        try {
-            val entries = waitForJapaneseDownload(CachePrompt.JapaneseWaiting(text(R.string.ja_download_reading_entry))) {
-                graph.downloads.jaWorkEntries(selected)
-            }
-            val entry = if (entries.size == 1) entries.single() else {
-                val titles = entries.groupingBy { it.post.title }.eachCount()
-                val options = entries.mapIndexed { index, option ->
-                    val title = option.post.title
-                    index to if (titles[title] == 1) title else text(R.string.ja_download_entry_suffix, title, index + 1)
-                }
-                val pick = askCache(CachePrompt.JapaneseChoice(
-                    text(R.string.ja_download_choose_entry_title),
-                    text(R.string.ja_download_choose_entry_message),
-                    options,
-                ))
-                entries.getOrNull(pick as? Int ?: return 0) ?: return 0
-            }
-            val readingFiles = CachePrompt.JapaneseWaiting(text(R.string.ja_download_reading_manifest))
-            val manifest = waitForJapaneseDownload(readingFiles) {
-                graph.downloads.prepareJaManifest(
-                    entry, root.id,
-                    onReadVerifiedManifest = { cachePrompt.value = readingFiles },
-                    onVerify = { token, buzzheavier -> askCache(CachePrompt.JapaneseVerify(token, buzzheavier = buzzheavier)) == true },
-                )
-            } ?: return 0
-            suspend fun checkFiles(force: Boolean) =
-                waitForJapaneseDownload(CachePrompt.JapaneseWaiting(text(R.string.ja_download_checking_local))) {
-                    graph.downloads.checkJaWork(manifest, force)
-                }
-            var check = checkFiles(force = false)
-            val retained = if (check.retained > 0) text(R.string.ja_download_retained_suffix, check.retained) else ""
-            if (check.pending == 0 && !check.lengthOnly) {
-                graph.show(R.string.ja_download_files_local, retained)
-                return 0
-            }
-            val total = manifest.bytes?.let {
-                android.text.format.Formatter.formatShortFileSize(getApplication<Application>(), it)
-            } ?: text(R.string.ja_download_total_unknown)
-            val note = if (check.lengthOnly) text(R.string.ja_download_length_only_note) else ""
-            val title = text(if (check.pending == 0) R.string.ja_download_files_local_title else R.string.ja_download_download_work)
-            val options = buildList<Pair<Any, String>> {
-                if (check.pending > 0) add(false to text(R.string.ja_download_confirm))
-                if (check.lengthOnly) add(true to text(R.string.ja_download_redownload))
-            }
-            val force = askCache(CachePrompt.JapaneseChoice(
-                title,
-                text(R.string.ja_download_manifest_summary, manifest.files.size, total, check.pending, note, retained),
-                options,
-            )) as? Boolean ?: return 0
-            if (force) check = checkFiles(force = true)
-            val replace = !check.needsReplace || askCache(CachePrompt.JapaneseChoice(
-                text(R.string.ja_download_replace_title),
-                text(R.string.ja_download_replace_message),
-                listOf(true to text(R.string.ja_download_replace), false to text(R.string.ja_download_keep_old)),
-            )) == true
-            val queued = graph.downloads.enqueueJaWork(root.id, manifest, replace, force)
-            if (!queued.added) graph.show(R.string.ja_download_task_exists)
-            return if (queued.added) 1 else 0
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (failure: Exception) {
-            val detail = (failure as? com.nanahoshi.audioplayer.japaneseasmr.JaWorkException)?.userText?.let { appContext.resolve(it) }
-                ?: text(R.string.ja_download_read_failed)
-            val fallback = askCache(CachePrompt.JapaneseChoice(
-                text(R.string.ja_download_failed_title),
-                detail,
-                listOf(true to text(R.string.ja_download_use_track)),
-            )) == true
-            if (!fallback) return 0
-            val tracks = selected.flatMap { post ->
-                val article = graph.japaneseAsmr.article(post.postId, post.rj)
-                graph.library.importJapaneseAsmrPost(article, root.id)
-                val matches = com.nanahoshi.audioplayer.japaneseasmr.resolveStoredJaMatches(article, post.postId, graph.db.japaneseAsmr())
-                matches.filterValues { it.media != null }.keys.mapNotNull { graph.db.japaneseAsmr().track(post.postId, it) }
-            }
-            return graph.downloads.enqueue(tracks)
-        }
-    }
-
-    private suspend fun cacheWork(folderId: Long) {
-        val byId = graph.library.allFolders().associateBy { it.id }
-        val root = workRootOf(folderId, byId)
-        val sourceFolderId = root?.id ?: folderId
-        // 已购买（读缓存）且 asmr.one 也有这部作品时，让用户选来源。
-        val sources = graph.library.prepareWorkSources(sourceFolderId)
-        val available = buildList {
-            if (sources?.hasPlay == true || sources?.purchased == true) add(TrackSource.DLSITE)
-            if (sources?.hasAsmr == true) add(TrackSource.ASMR)
-            if (sources?.hasJapaneseAsmr == true) add(TrackSource.JAPANESE_ASMR)
-        }
-        val chosen = if (available.size > 1) askCache(CachePrompt.Source(available)) as? TrackSource ?: return else null
-        val tracks = if (root == null) graph.library.tracksInTree(folderId)
-            else graph.library.asmrTracksInTree(folderId)
-        // 普通父目录仍下载整个子树；DLsite 子作品各自转为一个完整原始包任务。
-        if (root == null) {
-            val worknos = tracks.filter { it.source == TrackSource.DLSITE }
-                .mapNotNull { graph.downloads.requestWorkno(it) }
-                .distinctBy { com.nanahoshi.audioplayer.dlsite.DlsiteClient.canonicalWorkno(it) }
-            val jaWorks = tracks.filter { it.source == TrackSource.JAPANESE_ASMR }
-                .mapNotNull { workRootOf(it.folderId, byId) }.distinctBy { it.id }
-            var jaCount = 0
-            for (work in jaWorks) jaCount += cacheJapaneseWork(work)
-            val count = graph.downloads.prepare {
-                val archives = worknos.count { graph.downloads.enqueueDlsiteArchive(it).added }
-                archives + graph.downloads.enqueue(tracks.filter {
-                    it.source != TrackSource.DLSITE && it.source != TrackSource.JAPANESE_ASMR
-                })
-            } + jaCount
-            if (count > 0 || jaWorks.isEmpty()) {
-                if (count == 0) graph.show(R.string.library_no_audio_to_download)
-        else graph.show(R.string.library_added_download_count, count)
-            }
-            return
-        }
-        // 没弹窗时：当前来源优先，作品外面按 Play 优先，其次 asmr.one。
-        val source = chosen
-            ?: workFileSource.value?.takeIf { current -> current in available || tracks.any { it.source == current } }
-            ?: available.firstOrNull()
-            ?: tracks.firstOrNull()?.source ?: TrackSource.ASMR
-        if (source == TrackSource.JAPANESE_ASMR) {
-            val count = cacheJapaneseWork(root)
-            if (count > 0) graph.show(R.string.library_added_download_count, count)
-            return
-        }
-        if (source == TrackSource.DLSITE) {
-            val worknos = root?.asmrSourceId?.let { listOf(it) }
-                ?: tracks.filter { it.source == TrackSource.DLSITE }.mapNotNull { graph.downloads.requestWorkno(it) }
-                    .distinctBy { com.nanahoshi.audioplayer.dlsite.DlsiteClient.canonicalWorkno(it) }
-            if (worknos.isEmpty()) error(text(R.string.library_missing_work_id))
-            val count = graph.downloads.prepare {
-                worknos.count { graph.downloads.enqueueDlsiteArchive(it, root?.name ?: it, root?.id).added }
-            }
-            if (count == 0) graph.show(R.string.library_no_audio_to_download)
-            else graph.show(R.string.library_added_archive_download_count, count)
-            return
-        }
-        val sourceTracks = if (source == TrackSource.ASMR && tracks.none { it.source == source }) {
-            graph.library.ensureWorkSource(root.id, source)
-            graph.library.asmrTracksInTree(folderId)
-        } else tracks
-        val pending = sourceTracks.filter { it.source == source && !LocalAudio.hasStoredCopy(it.localUri) }
-        var dropped = emptySet<Long>()
-        val conflicts = findFormatConflicts(pending.map { CacheCandidate(it.id, it.folderId, it.title) })
-        for (conflict in conflicts) {
-            val keep = askCache(CachePrompt.Format(conflict)) as? String ?: return
-            dropped = dropped + idsToDrop(conflict, keep)
-        }
-        val count = graph.downloads.enqueue(pending.filter { it.id !in dropped })
-        if (count == 0) graph.show(R.string.library_no_audio_to_download)
-        else graph.show(R.string.library_added_download_count, count)
-    }
 
     fun addSelectionToPlaylist(playlistId: Long) = launch {
         val tracks = selectedTracks()
@@ -996,10 +743,10 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun beginSelection(trackId: Long? = null, folderId: Long? = null, fileId: Long? = null) {
-        if (selectedTrackIds.value.isEmpty() && selectedFolderIds.value.isEmpty() && selectedFileIds.value.isEmpty()) {
-            selectedTrackIds.value = listOfNotNull(trackId).toSet()
-            selectedFolderIds.value = listOfNotNull(folderId).toSet()
-            selectedFileIds.value = listOfNotNull(fileId).toSet()
+        if (trackSelection.isEmpty && folderSelection.isEmpty && fileSelection.isEmpty) {
+            trackSelection.replace(listOfNotNull(trackId).toSet())
+            folderSelection.replace(listOfNotNull(folderId).toSet())
+            fileSelection.replace(listOfNotNull(fileId).toSet())
         } else if (trackId != null) {
             toggleTrack(trackId)
         } else if (folderId != null) {
@@ -1009,25 +756,16 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun toggleTrack(id: Long) {
-        val current = selectedTrackIds.value
-        selectedTrackIds.value = if (id in current) current - id else current + id
-    }
+    fun toggleTrack(id: Long) = trackSelection.toggle(id)
 
-    fun toggleFolder(id: Long) {
-        val current = selectedFolderIds.value
-        selectedFolderIds.value = if (id in current) current - id else current + id
-    }
+    fun toggleFolder(id: Long) = folderSelection.toggle(id)
 
-    fun toggleFile(id: Long) {
-        val current = selectedFileIds.value
-        selectedFileIds.value = if (id in current) current - id else current + id
-    }
+    fun toggleFile(id: Long) = fileSelection.toggle(id)
 
     fun clearSelection() {
-        selectedTrackIds.value = emptySet()
-        selectedFolderIds.value = emptySet()
-        selectedFileIds.value = emptySet()
+        trackSelection.clear()
+        folderSelection.clear()
+        fileSelection.clear()
     }
 
     fun playNextSelection() = launch {
@@ -1095,131 +833,29 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     internal val subtitlePickerActions: SubtitlePickerActions = graph.subtitlePickerActions(viewModelScope)
 
+    private val subtitleOps = LibrarySubtitleOps(graph, appContext, viewModelScope, { workFileSource.value }, { workRootId.value })
+
     internal suspend fun listWorkTracksForSubtitle(
         file: LibraryFileEntity,
-    ): List<Pair<TrackEntity, TrackSubtitleBindingEntity?>> = withContext(Dispatchers.IO) {
-        val catalog = loadWorkSubtitleCatalog(graph.db, file.folderId)
-        val source = workFileSource.value
-        val candidateTracks = if (catalog != null) {
-            val filtered = if (source == null) catalog.tracks else catalog.tracks.filter { it.source == source }
-            filtered.ifEmpty { catalog.tracks }
-        } else {
-            val folderTracks = graph.library.tracksIn(file.folderId)
-            val filtered = if (source == null) folderTracks else folderTracks.filter { it.source == source }
-            filtered.ifEmpty { folderTracks }
-        }.sortedForLibrary(LibrarySort.NAME)
-        if (candidateTracks.isEmpty()) return@withContext emptyList()
-        val bindings = candidateTracks.map { it.id }.chunked(900)
-            .flatMap { graph.db.trackSubtitles().getForTracks(it) }
-            .associateBy { it.trackId }
-        candidateTracks.map { track -> track to bindings[track.id] }
-    }
+    ): List<Pair<TrackEntity, TrackSubtitleBindingEntity?>> = subtitleOps.listWorkTracksForSubtitle(file)
 
-    internal suspend fun bindSubtitleFileToTrack(file: LibraryFileEntity, track: TrackEntity) {
-        graph.subtitleBindings.bindLibraryFile(track.id, file.id, file.name)
-        graph.show(R.string.subtitle_file_bound_notice, track.title)
-    }
+    internal suspend fun bindSubtitleFileToTrack(file: LibraryFileEntity, track: TrackEntity) =
+        subtitleOps.bindSubtitleFileToTrack(file, track)
 
-    internal suspend fun loadBatchSubtitleSetup(currentFolderId: Long?): BatchSubtitleSetup = withContext(Dispatchers.IO) {
-        val targetFolderId = currentFolderId ?: workRootId.value
-        val catalog = loadWorkSubtitleCatalog(graph.db, targetFolderId)
-            ?: return@withContext BatchSubtitleSetup(emptyList(), emptyList(), null, null)
-        val root = nearestSubtitleWorkRoot(targetFolderId, catalog.folders)
-        val source = workFileSource.value
-        val rootLabel = text(R.string.library_root_label)
-        val folderPath = { folderId: Long ->
-            relativeWorkPath(folderId, root?.id, catalog.folders).ifBlank { rootLabel }
-        }
-        val audioFolders = catalog.tracks
-            .filter { source == null || it.source == source }
-            .groupBy { it.folderId }
-            .entries
-            .mapNotNull { (folderId, tracks) ->
-                folderId ?: return@mapNotNull null
-                BatchAudioFolderChoice(
-                    folderId = folderId,
-                    relativePath = folderPath(folderId),
-                    tracks = tracks.sortedForLibrary(LibrarySort.NAME),
-                )
-            }
-            .sortedBy { it.relativePath.lowercase() }
-        val subtitleFolders = catalog.files
-            .mapNotNull { file ->
-                file.folderId?.let { BatchSubtitleFolderKey(it, resolveLibraryFileSource(file, catalog.jaFileIds)) to file }
-            }
-            .groupBy({ it.first }, { it.second })
-            .map { (key, files) ->
-                val entries = files.sortedBy { it.name.lowercase() }
-                    .map { SubtitleCandidateEntry(name = it.name, fileId = it.id) }
-                BatchSubtitleFolderChoice(
-                    key = key,
-                    relativePath = folderPath(key.folderId),
-                    candidates = entries,
-                )
-            }
-            .sortedWith(compareBy({ it.relativePath.lowercase() }, { it.key.source?.name }))
-        val preferredAudio = audioFolders.firstOrNull { it.folderId == targetFolderId }?.folderId
-            ?: audioFolders.firstOrNull()?.folderId
-        val preferredSub = subtitleFolders.firstOrNull { it.key.folderId == targetFolderId && it.key.source == source }?.key
-            ?: subtitleFolders.firstOrNull { it.key.folderId == targetFolderId }?.key
-            ?: subtitleFolders.firstOrNull()?.key
-        BatchSubtitleSetup(audioFolders, subtitleFolders, preferredAudio, preferredSub)
-    }
+    internal suspend fun loadBatchSubtitleSetup(currentFolderId: Long?): BatchSubtitleSetup =
+        subtitleOps.loadBatchSubtitleSetup(currentFolderId)
 
-    private fun relativeWorkPath(
-        folderId: Long?,
-        rootId: Long?,
-        folders: Map<Long, FolderEntity>,
-    ): String {
-        val parts = ArrayList<String>()
-        var current = folderId
-        while (current != null && current != rootId) {
-            val folder = folders[current] ?: break
-            parts += folder.name
-            current = folder.parentId
-        }
-        return parts.asReversed().joinToString("/")
-    }
-
-    internal suspend fun commitBatchLibrarySubtitles(pairs: List<Pair<Long, Long>>) {
-        if (pairs.isEmpty()) return
-        graph.subtitleBindings.batchBindLibraryFiles(pairs)
-        graph.show(R.string.subtitle_batch_bound_count, pairs.size)
-    }
+    internal suspend fun commitBatchLibrarySubtitles(pairs: List<Pair<Long, Long>>) =
+        subtitleOps.commitBatchLibrarySubtitles(pairs)
 
     internal suspend fun commitBatchExternalSubtitles(
         pairs: List<BatchExternalPair>,
         treeUri: Uri,
-    ): BindExternalResult {
-        val result = graph.subtitleBindings.batchBindExternalTree(pairs, treeUri)
-        if (result == BindExternalResult.Bound) {
-            graph.show(R.string.subtitle_batch_bound_count, pairs.size)
-        }
-        return result
-    }
+    ): BindExternalResult = subtitleOps.commitBatchExternalSubtitles(pairs, treeUri)
 
-    /** 复制在 ViewModel 作用域中执行并返回成功数，弹层关闭或旋转不会中断批量导入。 */
     internal suspend fun commitBatchExternalCopies(pairs: List<BatchExternalPair>): Int =
-        viewModelScope.async(Dispatchers.IO) {
-            var imported = 0
-            var failed = 0
-            for (pair in pairs) {
-                val ok = try {
-                    graph.subtitleBindings.importAndBindCopy(pair.trackId, pair.uri, pair.displayName)
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (_: Exception) {
-                    false
-                }
-                if (ok) imported++ else failed++
-            }
-            when {
-                imported > 0 && failed > 0 -> graph.show(R.string.subtitle_batch_imported_partial, imported, failed)
-                imported > 0 -> graph.show(R.string.subtitle_batch_imported_count, imported)
-                else -> graph.show(R.string.subtitle_picker_import_failed)
-            }
-            imported
-        }.await()
+        subtitleOps.commitBatchExternalCopies(pairs)
+
 
     private fun acrossLibrary(
         block: (List<FolderEntity>, List<TrackEntity>, List<LibraryFileEntity>) -> LibraryListing,
@@ -1248,236 +884,4 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
     }
-}
-
-/** 多个后台操作共用 busy；全部结束才复位，避免互相覆盖。只在主线程调用。 */
-internal class BusyCounter {
-    val busy = MutableStateFlow(false)
-    private var count = 0
-
-    fun begin() {
-        count += 1
-        busy.value = true
-    }
-
-    fun end() {
-        count -= 1
-        if (count == 0) busy.value = false
-    }
-}
-
-private data class LibraryRequest(
-    val listKey: LibraryListKey,
-    val query: String,
-    val sort: LibrarySort,
-    val workSource: TrackSource?,
-)
-
-internal data class LibraryListKey(
-    val folderId: Long?,
-    val filter: LibrarySourceFilter,
-    val isSearching: Boolean,
-)
-
-internal data class LoadedLibraryListing(val key: LibraryListKey, val listing: LibraryListing)
-
-internal fun libraryListKey(folderId: Long?, filter: LibrarySourceFilter, query: String): LibraryListKey =
-    LibraryListKey(folderId, if (folderId == null) filter else LibrarySourceFilter.ALL, query.isNotBlank())
-
-private val RJ_QUERY = Regex("\\d{1,7}")
-
-internal fun effectiveLibrarySort(global: LibrarySort, workRootId: Long?): LibrarySort =
-    if (workRootId != null) LibrarySort.NAME else global
-
-internal fun searchListing(
-    query: String,
-    sort: LibrarySort,
-    folders: List<FolderEntity>,
-    tracks: List<TrackEntity>,
-    files: List<LibraryFileEntity>,
-    scopeFolderId: Long? = null,
-): LibraryListing {
-    val byId = folders.associateBy { it.id }
-    val scope = if (scopeFolderId == null) null else {
-        val ids = mutableSetOf(scopeFolderId)
-        var changed: Boolean
-        do { changed = false; folders.forEach { if (it.parentId in ids && ids.add(it.id)) changed = true } } while (changed)
-        ids
-    }
-    fun groupRoot(parent: Long?) = workRootOf(parent, byId)?.takeIf {
-        scope == null || (it.id in scope && it.id != scopeFolderId)
-    }
-    val workRoots = LinkedHashMap<Long, FolderEntity>()
-    val directFolders = LinkedHashMap<Long, FolderEntity>()
-
-    fun addFolder(folder: FolderEntity) {
-        // 作品内部的子文件夹和音频都归到作品根，搜索结果里一个作品只出现一次。
-        val root = groupRoot(folder.id)
-        if (root != null) {
-            workRoots[root.id] = root
-        } else {
-            directFolders[folder.id] = folder
-        }
-    }
-
-    val digits = RJ_QUERY.matches(query)
-    for (folder in folders) {
-        if (scope != null && (folder.id !in scope || folder.id == scopeFolderId)) continue
-        val rjMatch = digits && folder.matchesRj(query)
-        val nameMatch = folder.name.contains(query, ignoreCase = true) || folder.biliBvid?.contains(query, ignoreCase = true) == true
-        val tagMatch = folder.asmrSourceId != null &&
-            !rjMatch &&
-            !nameMatch &&
-            folder.workTags().any { it.contains(query, ignoreCase = true) }
-        if (rjMatch || nameMatch || tagMatch) addFolder(folder)
-    }
-
-    val directTracks = mutableListOf<TrackEntity>()
-    tracks.forEach { track ->
-        if (scope != null && track.folderId !in scope) return@forEach
-        if (!track.title.contains(query, ignoreCase = true)) return@forEach
-        val root = groupRoot(track.folderId)
-        if (root != null) workRoots[root.id] = root else directTracks += track
-    }
-
-    val directFiles = mutableListOf<LibraryFileEntity>()
-    files.forEach { file ->
-        if (scope != null && file.folderId !in scope) return@forEach
-        if (isSubtitleFile(file.name) || !file.name.contains(query, ignoreCase = true)) return@forEach
-        val root = groupRoot(file.folderId)
-        if (root != null) workRoots[root.id] = root else directFiles += file
-    }
-
-    return LibraryListing(
-        folders = (workRoots.values + directFolders.values).sortedForLibrary(sort),
-        entries = mixedEntries(directTracks, directFiles, sort, files),
-        browsing = false,
-    )
-}
-
-/** 向上找最近的作品根；普通文件夹返回 null。 */
-internal fun workRootOf(folderId: Long?, byId: Map<Long, FolderEntity>): FolderEntity? {
-    var current = folderId?.let(byId::get)
-    while (current != null) {
-        if (!current.asmrSourceId.isNullOrBlank() || current.biliBvid != null) return current
-        current = current.parentId?.let(byId::get)
-    }
-    return null
-}
-
-private fun FolderEntity.workTags(): List<String> =
-    WorkFacts.fromJson(workMeta)?.tags.orEmpty()
-
-private fun FolderEntity.isOrdinaryFolder(): Boolean =
-    asmrSourceId.isNullOrBlank() && asmrWorkId == null && biliBvid == null
-
-internal fun applySearchSourceFilter(found: LibraryListing, filter: LibrarySourceFilter): LibraryListing = when (filter) {
-    LibrarySourceFilter.ALL -> found
-    LibrarySourceFilter.ASMR -> found.copy(
-        folders = found.folders.filter { !it.asmrSourceId.isNullOrBlank() },
-        entries = emptyList(),
-    )
-    LibrarySourceFilter.BILIBILI -> found.copy(
-        folders = found.folders.filter { it.biliBvid != null },
-        entries = found.entries.filter { it is LibraryEntry.Audio && it.track.source == TrackSource.BILIBILI },
-    )
-    LibrarySourceFilter.YOUTUBE -> found.copy(
-        folders = emptyList(),
-        entries = found.entries.filter { it is LibraryEntry.Audio && it.track.source == TrackSource.YOUTUBE },
-    )
-    LibrarySourceFilter.LOCAL -> found.copy(
-        folders = found.folders.filter { it.isOrdinaryFolder() },
-        entries = found.entries.filter { it is LibraryEntry.File || (it is LibraryEntry.Audio && it.track.source == TrackSource.LOCAL) },
-    )
-}
-
-private fun filteredListing(
-    filter: LibrarySourceFilter,
-    sort: LibrarySort,
-    folders: List<FolderEntity>,
-    tracks: List<TrackEntity>,
-): LibraryListing = when (filter) {
-    LibrarySourceFilter.BILIBILI -> LibraryListing(
-        folders = folders.filter { it.biliBvid != null }.sortedForLibrary(sort),
-        entries = mixedEntries(tracks.filter { it.source == TrackSource.BILIBILI &&
-            workRootOf(it.folderId, folders.associateBy { folder -> folder.id })?.biliBvid == null }, emptyList(), sort),
-        browsing = false,
-    )
-    LibrarySourceFilter.YOUTUBE -> LibraryListing(
-        folders = emptyList(),
-        entries = mixedEntries(tracks.filter { it.source == TrackSource.YOUTUBE }, emptyList(), sort),
-        browsing = false,
-    )
-    LibrarySourceFilter.ASMR -> LibraryListing(
-        folders = folders.filter { it.asmrSourceId != null }.sortedForLibrary(sort),
-        entries = emptyList(),
-        browsing = false,
-    )
-    LibrarySourceFilter.LOCAL,
-    LibrarySourceFilter.ALL,
-    -> LibraryListing(emptyList(), emptyList(), browsing = false)
-}
-
-internal fun mixedEntries(
-    tracks: List<TrackEntity>,
-    files: List<LibraryFileEntity>,
-    sort: LibrarySort,
-    subtitlePool: List<LibraryFileEntity> = files,
-    showSubtitleFiles: Boolean = false,
-    subtitleTrackIds: Set<Long>? = null,
-): List<LibraryEntry> {
-    val visibleFiles = if (showSubtitleFiles) files else files.filter { !isSubtitleFile(it.name) }
-    val rows = buildList {
-        tracks.forEach { track ->
-            val hasSubtitle = subtitleTrackIds?.contains(track.id) ?: hasSubtitle(track, subtitlePool)
-            add(LibraryEntry.Audio(track, hasSubtitle))
-        }
-        visibleFiles.forEach { add(LibraryEntry.File(it)) }
-    }
-    return when (sort) {
-        LibrarySort.NAME -> rows.sortedBy { it.name.lowercase() }
-        LibrarySort.ADDED -> rows.sortedByDescending { it.addedAt }
-    }
-}
-
-private fun hasSubtitle(track: TrackEntity, files: List<LibraryFileEntity>): Boolean {
-    val names = files.filter { it.folderId == track.folderId }.map { it.name }
-    return pickSubtitleName(track.title, names) != null
-}
-
-private fun FolderEntity.matchesRj(digits: String): Boolean {
-    val sourceId = asmrSourceId ?: return false
-    return rjNumber(sourceId) == rjNumber(digits)
-}
-
-private fun rjNumber(raw: String): String =
-    raw.uppercase().removePrefix("RJ").removePrefix("VJ").filter { it.isDigit() }.trimStart('0').ifEmpty { "0" }
-
-internal val LocalRemovalPlan.hasTargets: Boolean
-    get() = audioDownloads.isNotEmpty() ||
-        audioAssociations.isNotEmpty() ||
-        subtitleFiles.isNotEmpty() ||
-        otherFiles.isNotEmpty()
-
-@get:StringRes
-internal val LocalRemovalPlan.labelRes: Int
-    get() {
-        val hasDeletes = audioDownloads.isNotEmpty() || subtitleFiles.isNotEmpty() || otherFiles.isNotEmpty()
-        val hasAssociations = audioAssociations.isNotEmpty()
-        return when {
-            hasDeletes && hasAssociations -> R.string.library_action_delete_and_unlink
-            hasDeletes -> R.string.library_action_delete_downloads
-            else -> R.string.library_action_unlink
-        }
-    }
-
-internal fun deleteDownloadedNotice(result: DeleteResult): TextRef {
-    val parts = buildList {
-        if (result.deleted > 0) add(TextRef.Res(R.string.library_deleted_downloads, listOf(result.deleted)))
-        if (result.deletedFiles > 0) add(TextRef.Res(R.string.library_deleted_files, listOf(result.deletedFiles)))
-        if (result.unlinked > 0) add(TextRef.Res(R.string.library_unlinked_tracks, listOf(result.unlinked)))
-        if (result.changed > 0) add(TextRef.Res(R.string.library_skipped_changed, listOf(result.changed)))
-    }
-    return if (parts.isEmpty()) TextRef.Res(R.string.library_nothing_to_delete)
-    else TextRef.Joined(parts, separator = "。")
 }

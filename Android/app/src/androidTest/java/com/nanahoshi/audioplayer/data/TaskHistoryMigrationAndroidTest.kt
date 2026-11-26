@@ -24,18 +24,13 @@ class TaskHistoryMigrationAndroidTest {
         val whisper = seed.whisper().insert(whisper(DownloadStatus.DONE))
         val translation = seed.translations().insert(translation(DownloadStatus.DONE))
         seed.close()
-        // 删除 v23、v24 新增结构，重建 v22 schema 后执行迁移。
+        // 用重建旧表替代 DROP COLUMN，兼容 API 24–33。
         SQLiteDatabase.openDatabase(context.getDatabasePath(name).path, null, SQLiteDatabase.OPEN_READWRITE).use { old ->
-            old.removeV24SchemaChanges()
-            old.execSQL("ALTER TABLE downloads DROP COLUMN dismissedAt")
-            old.execSQL("ALTER TABLE whisper_jobs DROP COLUMN createdAt")
-            old.execSQL("ALTER TABLE whisper_jobs DROP COLUMN dismissedAt")
-            old.execSQL("ALTER TABLE translation_jobs DROP COLUMN createdAt")
-            old.execSQL("ALTER TABLE translation_jobs DROP COLUMN dismissedAt")
+            old.downgradeTo22()
             old.version = 22
         }
         val migrated = Room.databaseBuilder(context, AppDatabase::class.java, name)
-            .addMigrations(AppDatabase.MIGRATION_22_23, AppDatabase.MIGRATION_23_24).build()
+            .addMigrations(*AppDatabase.ALL_MIGRATIONS).build()
         val fresh = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
         try {
             val downloadRow = migrated.downloads().get(download)!!

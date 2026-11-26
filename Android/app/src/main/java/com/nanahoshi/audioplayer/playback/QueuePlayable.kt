@@ -29,5 +29,3 @@ internal fun QueuePlayable.mediaItem(id: Long, cached: PlaybackTarget) = when (t
     is QueuePlayable.Saved -> track.toPlayableItem(id, cached)
     is QueuePlayable.Remote -> item.toMediaItem(id)
 }
-
-internal suspend fun QueuePlayable.mediaItem(id: Long, context: Context) = mediaItem(id, playbackTarget(context))

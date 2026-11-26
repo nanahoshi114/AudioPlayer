@@ -25,9 +25,12 @@ import com.nanahoshi.audioplayer.data.db.WhisperJobEntity
 import com.nanahoshi.audioplayer.japaneseasmr.jaIdentity
 import com.nanahoshi.audioplayer.playback.LoadedSubtitles
 import com.nanahoshi.audioplayer.playback.SubtitleCue
+import com.nanahoshi.audioplayer.playback.SubtitleLanguageDelete
+import com.nanahoshi.audioplayer.playback.SubtitleLanguageDeleteResult
 import com.nanahoshi.audioplayer.playback.SubtitleOrigin
 import com.nanahoshi.audioplayer.playback.SubtitleSource
 import com.nanahoshi.audioplayer.playback.encodeGeneratedCues
+import com.nanahoshi.audioplayer.playback.hasTranslation
 import com.nanahoshi.audioplayer.playback.overlayFileName
 import com.nanahoshi.audioplayer.playback.parseGeneratedSubtitles
 import com.nanahoshi.audioplayer.playback.subtitleSourceFingerprint
@@ -638,6 +641,80 @@ class StoredCatalogOverlayAndroidTest {
         Unit
     }
 
+    @Test fun largeStagedPublicationsRecoverThroughChunksAndFileMarkers() = runBlocking {
+        val root = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+            "publication-large-${UUID.randomUUID()}").apply { mkdirs() }
+        val context = testContext(root)
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        try {
+            val subtitles = SubtitleSource(context, db, BilibiliClient(CredentialStore(context)), AsmrClient())
+            // 超过 256K 的内联 payload 不能整段读回（避免 CursorWindow 限制），须按块拼接。
+            val inline = "あ".repeat(300_000)
+            val inlineName = "huge.json"
+            db.translations().stagePublication(
+                SubtitlePublicationEntity(inlineName, inline, null, null, 1L),
+            )
+            // 生产写路径用 @file: 标记把大 payload 放到暂存文件，恢复时也须识别。
+            val markerName = "marked.json"
+            val markerPayload = "い".repeat(300_000)
+            val staging = File(root, "subtitle-publications").apply { mkdirs() }
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(markerName.toByteArray())
+                .joinToString("") { "%02x".format(it) }
+            File(staging, "$digest.json").writeText(markerPayload)
+            db.translations().stagePublication(
+                SubtitlePublicationEntity(markerName, "@file:$digest.json", null, null, 2L),
+            )
+
+            subtitles.recoverPublications()
+
+            assertEquals(inline.length, File(root, "subtitles/$inlineName").readText().length)
+            assertEquals(markerPayload.length, File(root, "subtitles/$markerName").readText().length)
+            assertTrue(db.translations().pendingPublications().isEmpty())
+            assertTrue(staging.listFiles().orEmpty().isEmpty())
+        } finally {
+            db.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test fun listSkipsUncommittedOriginalFilesAndAudioDeleteKeepsSiblingJson() = runBlocking {
+        val root = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+            "stored-original-scan-${UUID.randomUUID()}").apply { mkdirs() }
+        val context = testContext(root)
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        try {
+            val audio = File(root, "dlsite/RJ001/bilibili/disc/voice.wav").apply {
+                parentFile?.mkdirs()
+                writeText("audio")
+            }
+            val sibling = File(audio.parentFile, "voice.json").apply { writeText("{\"body\":[]}") }
+            val uncommitted = File(root, "dlsite/RJ001/original/uncommitted.wav").apply {
+                parentFile?.mkdirs()
+                writeText("not published")
+            }
+            db.tracks().insert(TrackEntity(
+                source = TrackSource.DLSITE, title = "voice.wav", artist = null, durationMs = 1000,
+                coverUri = null, localUri = audio.absolutePath, bvid = null, cid = null, page = null,
+                addedAt = 0,
+            ))
+            val subtitles = SubtitleSource(context, db, BilibiliClient(CredentialStore(context)), AsmrClient())
+            val catalog = StoredCatalog(context, db, subtitles)
+
+            val listed = catalog.list()
+            assertTrue("未提交到清单的 original/ 文件不能出现在下载管理", listed.none { it.path == uncommitted.absolutePath })
+            val item = listed.single { it.path == audio.absolutePath && it.kind == StoredKind.AUDIO }
+            catalog.delete(listOf(item), deleteSubtitles = true)
+
+            assertFalse(audio.exists())
+            assertTrue("删除音频副本不能连带删除同目录字幕文件", sibling.isFile)
+            assertTrue(uncommitted.isFile)
+        } finally {
+            db.close()
+            root.deleteRecursively()
+        }
+    }
+
     @Test fun deletingStoredBiliAudioRemovesBiliNamedOverlayAndTerminalHistory() = runBlocking {
         val root = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
             "stored-bili-overlay-${UUID.randomUUID()}").apply { mkdirs() }
@@ -664,5 +741,112 @@ class StoredCatalogOverlayAndroidTest {
             db.close()
             root.deleteRecursively()
         }
+    }
+
+    @Test fun singleLanguageDeleteSupportsChineseOriginalAndBusyGuards() = runBlocking {
+        val root = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+            "single-lang-delete-${UUID.randomUUID()}").apply { mkdirs() }
+        val context = testContext(root)
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        var translatorToClose: TranslateCenter? = null
+        try {
+            val credentials = CredentialStore(context)
+            credentials.saveTranslate(TranslatePlatform.QWEN, "sk-test", "")
+            val subtitles = SubtitleSource(context, db, BilibiliClient(credentials), AsmrClient())
+            val requests = SubtitleTaskRequests { false }
+            val recovery = kotlinx.coroutines.Job().apply { complete() }
+            val translate = TranslateCenter(context, db, credentials, subtitles, requests, recovery)
+            translatorToClose = translate
+            val catalog = StoredCatalog(context, db, subtitles)
+
+            val audio = File(root, "asmr/RJ001/track.mp3").apply { parentFile?.mkdirs(); writeText("audio") }
+            val trackId = db.tracks().insert(TrackEntity(
+                source = TrackSource.ASMR, title = "track", artist = null, durationMs = 2000,
+                coverUri = null, localUri = audio.absolutePath, bvid = null, cid = null, page = null, addedAt = 0,
+            ))
+            val row = queueRow(trackId).copy(localUri = audio.absolutePath)
+            val original = listOf(SubtitleCue(0, 900, "今日は"), SubtitleCue(1000, 1900, "晴れ"))
+            val revised = listOf(SubtitleCue(0, 1900, "今日は晴れ。", "今天晴天。", sourceCount = 2))
+            val origin = SubtitleOrigin(PARAKEET_MODEL, null)
+            val fingerprint = "abcdef123456"
+            val generatedFile = subtitles.generatedFile(fingerprint).apply {
+                parentFile?.mkdirs()
+                writeText(encodeGeneratedCues(original, origin, revisedCues = revised))
+            }
+            val summary = TaskProgressSummary(
+                mapOf(
+                    ProgressPart.TRANSCRIPTION to TaskSegmentSummary(result = ProgressResult.COMPLETED),
+                    ProgressPart.TRANSLATION to TaskSegmentSummary(result = ProgressResult.COMPLETED),
+                ),
+            ).encode()
+            val whisperId = db.whisper().insert(WhisperJobEntity(
+                title = "track.mp3", fingerprint = fingerprint, trackId = trackId,
+                localPath = audio.absolutePath, remoteJobId = null, status = DownloadStatus.DONE,
+                progress = 1f, error = null, awaitRemoteUrl = null, translatedAt = 999L,
+                translateStatus = TranslateMark.DONE, model = PARAKEET_MODEL, progressSummary = summary,
+            ))
+            val doneTranslationId = db.translations().insert(TranslationJobEntity(
+                title = "track", trackId = trackId, remoteUrl = null, queueItemId = row.queueItemId,
+                status = DownloadStatus.DONE, error = null, generatedFingerprint = fingerprint,
+            ))
+
+            // 待发布记录或进行中任务存在时阻止单语删除。
+            db.translations().stagePublication(SubtitlePublicationEntity(generatedFile.name, "{}", whisperId, null, 1L))
+            assertEquals(SubtitleLanguageDeleteResult.BUSY, subtitles.deleteGeneratedLanguage(fingerprint, SubtitleLanguageDelete.CHINESE))
+            db.translations().clearPublication(generatedFile.name)
+
+            // 1. 删除中文：恢复听写原文、清理翻译状态与译文分段、允许重新翻译。
+            val item = catalog.list().single { it.path == generatedFile.absolutePath }
+            assertEquals(SubtitleLanguageDeleteResult.DELETED, catalog.deleteGeneratedLanguage(item, SubtitleLanguageDelete.CHINESE))
+            val afterChineseDelete = subtitles.load(row)
+            assertEquals(original, afterChineseDelete.cues)
+            assertFalse(afterChineseDelete.cues.hasTranslation())
+            assertTrue(afterChineseDelete.canTranslate)
+            assertTrue(translate.readyToTranslate(fingerprint))
+            val whisperAfter = checkNotNull(db.whisper().get(whisperId))
+            assertEquals(DownloadStatus.DONE, whisperAfter.status)
+            assertNull(whisperAfter.translateStatus)
+            assertNull(whisperAfter.translatedAt)
+            val summaryAfter = decodeProgressSummary(whisperAfter.progressSummary)
+            assertNotNull(summaryAfter.parts[ProgressPart.TRANSCRIPTION])
+            assertNull(summaryAfter.parts[ProgressPart.TRANSLATION])
+            assertNull(db.translations().get(doneTranslationId))
+
+            // 2. 删除原文：保留纯中文并标 zh-Hans，阻止再翻。
+            generatedFile.writeText(encodeGeneratedCues(
+                listOf(SubtitleCue(0, 1000, "はい")), origin,
+                revisedCues = listOf(SubtitleCue(0, 1000, "はい。", "好")),
+            ))
+            assertEquals(SubtitleLanguageDeleteResult.DELETED, catalog.deleteGeneratedLanguage(item, SubtitleLanguageDelete.ORIGINAL))
+            val afterOriginalDelete = subtitles.load(row)
+            assertEquals(listOf(SubtitleCue(0, 1000, "好")), afterOriginalDelete.cues)
+            assertEquals("zh-Hans", afterOriginalDelete.language)
+            assertFalse(afterOriginalDelete.cues.hasTranslation())
+            assertFalse(afterOriginalDelete.canTranslate)
+            assertFalse(translate.readyToTranslate(fingerprint))
+
+            // 3. 外挂覆盖单删中文：校验路径安全、运行中保护并清理终态任务。
+            val overlayName = checkNotNull(overlayFileName(trackId, null, null, null))
+            val overlay = File(root, "subtitles/$overlayName").apply {
+                writeText(encodeGeneratedCues(listOf(SubtitleCue(0, 1000, "はい", "好"))))
+            }
+            val activeOverlayJob = db.translations().insert(TranslationJobEntity(
+                title = "track", trackId = trackId, remoteUrl = null, queueItemId = row.queueItemId,
+                status = DownloadStatus.RUNNING, error = null, outputFilename = overlayName,
+            ))
+            assertEquals(SubtitleLanguageDeleteResult.BUSY, subtitles.deleteTranslationOverlayByName(overlayName))
+            db.translations().failIfActive(activeOverlayJob, "已中止")
+
+            val overlayItem = catalog.list().single { it.path == overlay.absolutePath }
+            assertEquals(SubtitleLanguageDeleteResult.DELETED, catalog.deleteTranslationOverlay(overlayItem))
+            assertFalse(overlay.exists())
+            assertNull(db.translations().get(activeOverlayJob))
+            assertEquals(SubtitleLanguageDeleteResult.NOT_APPLICABLE, subtitles.deleteTranslationOverlayByName("../escape.json"))
+        } finally {
+            translatorToClose?.close()
+            db.close()
+            root.deleteRecursively()
+        }
+        Unit
     }
 }

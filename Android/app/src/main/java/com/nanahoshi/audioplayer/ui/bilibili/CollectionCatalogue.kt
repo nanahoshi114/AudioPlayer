@@ -13,17 +13,23 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.nanahoshi.audioplayer.bilibili.BiliCollection
-import com.nanahoshi.audioplayer.ui.CoverImage
+import com.nanahoshi.audioplayer.ui.components.CoverImage
 import com.nanahoshi.audioplayer.ui.components.EmptyState
+import com.nanahoshi.audioplayer.ui.components.ErrorState
+import com.nanahoshi.audioplayer.ui.components.LoadMoreOnScrollEnd
 
 @Composable
 internal fun CollectionCatalogue(model: BiliBrowserViewModel, open: (BiliCollection) -> Unit,
                                  state: LazyListState, modifier: Modifier = Modifier) {
     val page = model.collections
-    LaunchedEffect(state, page.items.size, page.loading, page.hasMore, page.error, page.paused) {
-        snapshotFlow { state.layoutInfo.visibleItemsInfo.lastOrNull()?.index?.let { it >= page.items.size - 3 } == true }
-            .collect { if (it && page.hasMore && !page.loading && page.error == null && !page.paused) page.loadMore() }
-    }
+    LoadMoreOnScrollEnd(
+        state = state,
+        itemCount = page.items.size,
+        canLoadMore = page.hasMore && !page.paused,
+        loading = page.loading,
+        hasError = page.error != null,
+        onLoadMore = page::loadMore,
+    )
     Column(modifier) {
         if (page.loading) Row(Modifier.fillMaxWidth()) {
             Text(stringResource(R.string.bilibili_reading_collections), Modifier.weight(1f).padding(16.dp))
@@ -42,10 +48,14 @@ internal fun CollectionCatalogue(model: BiliBrowserViewModel, open: (BiliCollect
                     supportingContent = { Text(stringResource(R.string.bilibili_collection_summary, stringResource(collection.kind.labelRes), collection.total)) },
                     leadingContent = { CoverImage(collection.coverUrl) }, modifier = Modifier.clickable { open(collection) })
             }
-            page.error?.let { message -> item(key = "error") {
-                Text(LocalContext.current.resolveNoUrl(message, R.string.bilibili_error_page_network), Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error)
-                TextButton(onClick = page::loadMore) { Text(stringResource(R.string.bilibili_retry_page)) }
-            } }
+            page.error?.let { message ->
+                item(key = "error") {
+                    ErrorState(
+                        message = LocalContext.current.resolveNoUrl(message, R.string.bilibili_error_page_network),
+                        onRetry = page::loadMore,
+                    )
+                }
+            }
             if (page.hasMore && !page.loading && page.error == null) item(key = "more") {
                 TextButton(onClick = page::loadMore, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.bilibili_load_more)) }
             }

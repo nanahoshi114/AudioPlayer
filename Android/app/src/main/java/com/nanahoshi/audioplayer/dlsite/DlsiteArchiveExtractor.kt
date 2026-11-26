@@ -36,6 +36,10 @@ internal fun extractDownloadArchive(
 object DlsiteArchiveExtractor {
     private const val MAX_ENTRIES = 100_000
     private const val MAX_DICTIONARY = 64L * 1024 * 1024
+    private const val COPY_BUFFER = 64 * 1024
+    private val SPLIT_ZIP_PART = Regex("""(?i).*\.zip\.\d{3}""")
+    private val zipCharset: Charset =
+        if (Charset.isSupported("MS932")) Charset.forName("MS932") else Charset.forName("Shift_JIS")
 
     fun extract(
         archives: List<File>,
@@ -61,10 +65,12 @@ object DlsiteArchiveExtractor {
         val state = Extraction(root, checkCancelled, onProgress, normalize, pathKey)
         try {
             checkCancelled()
-            if (archives.size == 1 && archives.first().extension.equals("zip", true)) {
-                extractZip(archives.first(), state)
-            } else {
-                extractRar(archives, state)
+            when {
+                archives.size == 1 && archives.first().name.endsWith(".zip", ignoreCase = true) ->
+                    extractZip(archives.first(), state)
+                archives.all { SPLIT_ZIP_PART.matches(it.name) } ->
+                    extractSplitZip(archives, state)
+                else -> extractRar(archives, state)
             }
             checkCancelled()
             val entries = root.walkTopDown().drop(1).map { file ->
@@ -90,7 +96,7 @@ object DlsiteArchiveExtractor {
     }
 
     private fun extractZip(archive: File, state: Extraction) {
-        ZipFile.builder().setFile(archive).setCharset(Charset.forName("MS932"))
+        ZipFile.builder().setFile(archive).setCharset(zipCharset)
             .setUseUnicodeExtraFields(true).get().use { zip ->
                 val entries = zip.entries
                 while (entries.hasMoreElements()) {
@@ -118,6 +124,29 @@ object DlsiteArchiveExtractor {
                     }
                 }
             }
+    }
+
+    /**
+     * `.zip.001`、`.zip.002` 等分卷 ZIP 在磁盘上就是后续分卷依次接续的字节流，
+     * 中央目录位于最后一段。commons-compress 的 `ZipFile` 只接受单个文件，
+     * 因此在归档所在目录拼出一份临时副本再按普通 ZIP 解析，结束/失败后删除。
+     */
+    private fun extractSplitZip(archives: List<File>, state: Extraction) {
+        val ordered = archives.sortedBy { it.name.substringAfterLast('.').toIntOrNull() ?: Int.MAX_VALUE }
+        val parent = ordered.first().absoluteFile.parentFile
+            ?: throw DlsiteArchiveException(TextRef.Res(R.string.dlsite_archive_error_extract_stopped))
+        val merged = File.createTempFile("dlsite-split", ".zip", parent)
+        try {
+            merged.outputStream().buffered().use { output ->
+                for (part in ordered) {
+                    state.checked()
+                    part.inputStream().buffered().use { it.copyTo(output, COPY_BUFFER) }
+                }
+            }
+            extractZip(merged, state)
+        } finally {
+            merged.delete()
+        }
     }
 
     private fun extractRar(archives: List<File>, state: Extraction) {
@@ -211,12 +240,14 @@ object DlsiteArchiveExtractor {
         }
 
         fun output(file: File?, expected: Long): CheckedOutput {
+            val tracked = file != null
             val stream = file?.outputStream() ?: object : OutputStream() {
                 override fun write(value: Int) = Unit
                 override fun write(bytes: ByteArray, offset: Int, count: Int) = Unit
             }
-            return CheckedOutput(stream, expected, root, checked,
-                { count -> bytes += count; progress(files, bytes) }, { files++; progress(files, bytes) })
+            return CheckedOutput(stream, expected, root, checked, tracked,
+                { count -> if (tracked) { bytes += count; progress(files, bytes) } },
+                { if (tracked) { files++; progress(files, bytes) } })
         }
     }
 
@@ -225,6 +256,8 @@ object DlsiteArchiveExtractor {
         private val expected: Long,
         private val root: File,
         private val checked: () -> Unit,
+        /** 被规范化跳过的条目仍要消费解压字节（solid RAR 依赖顺序），但不计入文件数、进度与空间检查。 */
+        private val tracked: Boolean,
         private val progress: (Int) -> Unit,
         private val completed: () -> Unit,
     ) : FilterOutputStream(stream) {
@@ -238,6 +271,11 @@ object DlsiteArchiveExtractor {
         override fun write(bytes: ByteArray, offset: Int, count: Int) {
             checked()
             if (count <= 0) return
+            if (!tracked) {
+                out.write(bytes, offset, count)
+                crc.update(bytes, offset, count)
+                return
+            }
             written += count
             if (expected >= 0 && written > expected) throw DlsiteArchiveIntegrityException(TextRef.Res(R.string.dlsite_archive_error_integrity))
             if (untilSpaceCheck <= 0) {
@@ -250,6 +288,7 @@ object DlsiteArchiveExtractor {
             crc.update(bytes, offset, count)
         }
         fun verifySize() {
+            if (!tracked) return
             if (expected >= 0 && written != expected) throw DlsiteArchiveIntegrityException(TextRef.Res(R.string.dlsite_archive_error_retrieve_incomplete))
             completed()
         }

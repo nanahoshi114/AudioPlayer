@@ -67,8 +67,12 @@ fun deleteBiliSubtitle(filesDir: File, bvid: String?, cid: Long?) {
 }
 
 /** 删下载管理里的 B 站音轨时，顺便删掉同目录下同名的字幕。 */
-fun deleteBiliSubtitleBeside(audio: File) {
-    val dir = audio.parentFile ?: return
-    if (dir.parentFile?.name != "bilibili") return
-    File(dir, audio.nameWithoutExtension + ".json").delete()
+fun deleteBiliSubtitleBeside(filesDir: File, audio: File) {
+    val canonicalAudio = runCatching { audio.canonicalFile }.getOrNull() ?: return
+    if (!canonicalAudio.name.endsWith(".m4s")) return
+    val bvid = canonicalAudio.parentFile?.name ?: return
+    val cid = canonicalAudio.name.removeSuffix(".m4s").toLongOrNull() ?: return
+    val expectedAudio = runCatching { biliAudioFile(filesDir, bvid, cid)?.canonicalFile }.getOrNull() ?: return
+    if (canonicalAudio != expectedAudio) return
+    biliSubtitleFile(filesDir, bvid, cid)?.delete()
 }

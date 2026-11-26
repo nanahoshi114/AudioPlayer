@@ -7,7 +7,6 @@ import com.nanahoshi.audioplayer.text.UserFacingError
 import kotlinx.serialization.Serializable
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.jsoup.Jsoup
-import java.security.MessageDigest
 
 internal fun com.nanahoshi.audioplayer.data.db.QueuedTrack.jaAudioIdentity(): String? = when {
     remoteUrl?.startsWith("japaneseasmr://file?") == true -> remoteUrl
@@ -86,11 +85,12 @@ internal class JapaneseAsmrException(
 internal fun jaIdentity(postId: String, mediaKey: String): String =
     "japaneseasmr://audio?post=$postId&media=$mediaKey"
 
-internal fun jaHash(value: String): String = MessageDigest.getInstance("SHA-256")
-    .digest(value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+internal fun jaHash(value: String): String = com.nanahoshi.audioplayer.data.sha256Hex(value)
 
 private val rjPattern = Regex("""(?<![A-Za-z0-9])RJ[0-9]+(?![A-Za-z0-9])""", RegexOption.IGNORE_CASE)
 private val whitespace = Regex("""[\s\p{Z}]+""")
+private val postPath = Regex("""/([0-9]+)/?""")
+private val actorPrefix = Regex("^CV:\\s*", RegexOption.IGNORE_CASE)
 private fun String.normalized() = trim().replace(whitespace, " ")
 private fun String.rj() = rjPattern.findAll(this).map { it.value.uppercase() }
     .filter { it.drop(2).any { digit -> digit != '0' } }.distinct().singleOrNull()
@@ -106,7 +106,7 @@ internal fun isJaBrowserPage(url: String): Boolean {
 internal fun jaPostId(url: String): String? {
     val parsed = url.toHttpUrlOrNull() ?: return null
     if (parsed.host !in setOf("japaneseasmr.com", "www.japaneseasmr.com")) return null
-    return Regex("""/([0-9]+)/?""").matchEntire(parsed.encodedPath)?.groupValues?.get(1)
+    return postPath.matchEntire(parsed.encodedPath)?.groupValues?.get(1)
 }
 
 internal fun parseJaSearch(html: String, url: String): JaPage {
@@ -146,7 +146,7 @@ internal fun parseJaArticle(
         ?: throw JapaneseAsmrException(JaFailure.IDENTITY)
     val image = page.selectFirst("meta[property=og:image]")?.absUrl("content")?.httpUrl()
         ?: page.selectFirst(".entry-content img[data-src]")?.absUrl("data-src")?.httpUrl()
-    val actors = page.selectFirst("#voice_actors")?.text()?.replace(Regex("^CV:\\s*", RegexOption.IGNORE_CASE), "")
+    val actors = page.selectFirst("#voice_actors")?.text()?.replace(actorPrefix, "")
         ?.split('、', ',', '／')?.map { it.trim() }?.filter { it.isNotBlank() }.orEmpty()
     val post = JaPostRef(postId, rj, heading.ifBlank { rj }, page.selectFirst("time[datetime]")?.attr("datetime"), url, image)
     val players = page.select(".cleanPlayer video, .cleanPlayer audio")

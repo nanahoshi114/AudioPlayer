@@ -17,6 +17,7 @@ import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import com.nanahoshi.audioplayer.AudioPlayerApplication
 import com.nanahoshi.audioplayer.data.db.PlaybackStateEntity
+import com.nanahoshi.audioplayer.data.db.QueuedTrack
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -39,6 +40,20 @@ import kotlinx.coroutines.withContext
 
 internal const val SEEK_STEP_MS = 10_000L
 
+/**
+ * 恢复时选中的队列位置。找不到上次播放项（队列被改写或清空）时回到首项并把进度归零，
+ * 不能把旧位置套到另一首曲目上。
+ */
+internal data class RestoredQueueSelection(val index: Int, val positionMs: Long)
+
+internal fun restoredQueueSelection(rows: List<QueuedTrack>, state: PlaybackStateEntity?): RestoredQueueSelection {
+    val matched = state?.queueItemId?.let { id -> rows.indexOfFirst { it.queueItemId == id } } ?: -1
+    return RestoredQueueSelection(
+        index = matched.coerceAtLeast(0),
+        positionMs = if (matched >= 0) (state?.positionMs ?: 0L).coerceAtLeast(0L) else 0L,
+    )
+}
+
 class PlaybackService : MediaSessionService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var player: ExoPlayer? = null
@@ -58,7 +73,7 @@ class PlaybackService : MediaSessionService() {
         val exoPlayer = ExoPlayer.Builder(this)
             .setMediaSourceFactory(
                 DefaultMediaSourceFactory(
-                    BiliPlaybackDataSource.Factory(this, graph.bilibili, graph.asmr, graph.dlsite, graph.db, graph.youtube, graph.japaneseAsmr),
+                    BiliPlaybackDataSource.Factory(this, graph.bilibili, graph.asmr, graph.dlsite, graph.db, graph.youtube, graph.japaneseAsmr, httpRoot = graph.httpRoot),
                 ).setLoadErrorHandlingPolicy(object : DefaultLoadErrorHandlingPolicy() {
                     override fun getRetryDelayMsFor(loadErrorInfo: LoadErrorHandlingPolicy.LoadErrorInfo): Long =
                         if (loadErrorInfo.exception.isJapaneseTerminalError()) C.TIME_UNSET
@@ -106,17 +121,21 @@ class PlaybackService : MediaSessionService() {
                     val postId = uri?.getQueryParameter("post")?.takeIf { it.isNotEmpty() && it.all { char -> char in '0'..'9' } }
                     graph.player.reportJaPlaybackFailure(JaPlaybackFailure(queueId, reason, postId, uri?.getQueryParameter("media")))
                 }
-                if (item.mediaMetadata.extras?.getBoolean(EXTRA_JA_LOCAL_COPY) == true &&
+                val isJaLocal = item.mediaMetadata.extras?.getBoolean(EXTRA_JA_LOCAL_COPY) == true
+                val isBiliLocal = item.mediaMetadata.extras?.getBoolean(EXTRA_BILI_LOCAL_COPY) == true
+                if ((isJaLocal || isBiliLocal) &&
                     generateSequence<Throwable>(error) { it.cause }.any { it is JaLocalCopyLost }
                 ) {
                     if (retriedMediaId == item.mediaId) {
-                        reportJaFailure(JaFailure.MEDIA)
+                        if (isJaLocal) reportJaFailure(JaFailure.MEDIA) else graph.messages.value = playbackErrorMessage(error)
                     } else {
                         retriedMediaId = item.mediaId
                         scope.launch {
-                            if (!graph.player.recoverJaLocalCopy(exoPlayer, item) &&
+                            if (!graph.player.recoverLocalCopy(exoPlayer, item) &&
                                 exoPlayer.currentMediaItem?.let { it.mediaId == item.mediaId && it.localConfiguration?.uri == uri } == true
-                            ) reportJaFailure(JaFailure.MEDIA)
+                            ) {
+                                if (isJaLocal) reportJaFailure(JaFailure.MEDIA) else graph.messages.value = playbackErrorMessage(error)
+                            }
                         }
                     }
                     return
@@ -150,7 +169,6 @@ class PlaybackService : MediaSessionService() {
                     val position = exoPlayer.currentPosition.coerceAtLeast(0L)
                     exoPlayer.seekTo(index, position)
                     exoPlayer.prepare()
-                    exoPlayer.playWhenReady = true
                 } else if (scheme == "japaneseasmr" || invalid != null) {
                     reportJaFailure(invalid ?: JaFailure.MEDIA)
                 } else {
@@ -185,12 +203,18 @@ class PlaybackService : MediaSessionService() {
             try {
                 graph.player.withQueueLock {
                     if (!restorePending) return@withQueueLock
-                    if (exoPlayer.mediaItemCount > 0) {
-                        // 客户端已抢先填充播放器，用户操作优先。
+                    val fresh = graph.db.queue().snapshot()
+                    if (fresh.isEmpty()) {
                         restorePending = false
                         return@withQueueLock
                     }
-                    val fresh = graph.db.queue().snapshot()
+                    val currentIds = (0 until exoPlayer.mediaItemCount).map { exoPlayer.getMediaItemAt(it).mediaId }
+                    val freshIds = fresh.map { it.queueItemId.toString() }
+                    if (currentIds == freshIds) {
+                        // 全队列替换或重建已同步完整数据库队列，用户操作优先。
+                        restorePending = false
+                        return@withQueueLock
+                    }
                     val unchanged = fresh == rows
                     val applyRows = if (unchanged) rows else fresh
                     val applyItems = if (unchanged) items else withContext(Dispatchers.IO) {
@@ -198,10 +222,20 @@ class PlaybackService : MediaSessionService() {
                     }
                     // 先解除进度保存抑制再应用：setMediaItems 同步触发的过渡回调要能记录恢复态。
                     restorePending = false
-                    val index = applyRows.indexOfFirst { it.queueItemId == state?.queueItemId }.coerceAtLeast(0)
-                    exoPlayer.setMediaItems(applyItems, index, state?.positionMs ?: 0L)
-                    if (applyItems.isNotEmpty()) exoPlayer.prepare()
-                    exoPlayer.playWhenReady = false
+                    val activeId = exoPlayer.currentMediaItem?.mediaId
+                    val activeIndex = if (exoPlayer.mediaItemCount > 0 && exoPlayer.playWhenReady && activeId != null) {
+                        applyRows.indexOfFirst { it.queueItemId.toString() == activeId }
+                    } else -1
+                    if (activeIndex >= 0) {
+                        exoPlayer.setMediaItems(applyItems, activeIndex, exoPlayer.currentPosition.coerceAtLeast(0L))
+                        exoPlayer.prepare()
+                        exoPlayer.playWhenReady = true
+                    } else {
+                        val selection = restoredQueueSelection(applyRows, state)
+                        exoPlayer.setMediaItems(applyItems, selection.index, selection.positionMs)
+                        if (applyItems.isNotEmpty()) exoPlayer.prepare()
+                        exoPlayer.playWhenReady = false
+                    }
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -213,7 +247,7 @@ class PlaybackService : MediaSessionService() {
         scope.launch {
             combine(graph.db.queue().observe(), graph.downloads.observe()) { rows, _ ->
                 withContext(Dispatchers.IO) {
-                    rows.filter { it.source == TrackSource.JAPANESE_ASMR }
+                    rows.filter { it.source == TrackSource.JAPANESE_ASMR || it.source == TrackSource.BILIBILI }
                         .associate { it.queueItemId to it.toMediaItem(this@PlaybackService) }
                 }
             }.distinctUntilChanged().collect { replacements ->

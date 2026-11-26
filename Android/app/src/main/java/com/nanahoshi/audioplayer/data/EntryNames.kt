@@ -58,11 +58,15 @@ fun previewKind(name: String): FileKind = when (fileExtension(name)) {
     else -> FileKind.OTHER
 }
 
+private val invalidNameChars = Regex("""[\\/:*?"<>|]""")
+private val whitespaceRun = Regex("\\s+")
+
 fun sanitizeEntryName(name: String): String =
-    name.replace(Regex("""[\\/:*?"<>|]"""), "_")
-        .replace(Regex("\\s+"), " ")
+    name.replace(invalidNameChars, "_")
+        .replace(whitespaceRun, " ")
         .trim()
         .take(120)
+        .let { if (it == "." || it == "..") "_" else it }
         .ifBlank { "未命名" }
 
 /** 下载文件按稳定曲目身份分目录，保留文件名并避免同名曲目覆盖。 */
@@ -70,11 +74,7 @@ internal fun trackDownloadRelativePath(source: TrackSource, trackId: Long, filen
     "${source.name.lowercase()}-$trackId/$filename"
 
 /** fileKey 的 8 位短哈希，用于把撞名的文件分到不同子目录。 */
-internal fun shortKeyHash(raw: String): String =
-    java.security.MessageDigest.getInstance("SHA-256")
-        .digest(raw.toByteArray())
-        .take(4)
-        .joinToString("") { "%02x".format(it) }
+internal fun shortKeyHash(raw: String): String = sha256Hex(raw).take(8)
 
 /** 只有与别的 fileKey 撞名时才加哈希子目录，文件名本身保持可读。 */
 internal fun remoteRelativePath(name: String, fileKey: String?, occupied: Boolean): String =

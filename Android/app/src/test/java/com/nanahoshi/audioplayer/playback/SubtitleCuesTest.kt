@@ -172,4 +172,57 @@ class SubtitleCuesTest {
         assertEquals("こんにちは", cues.textAt(1200, chinese = false))
         assertEquals("只今日文", SubtitleCue(1, 2, "只今日文").line(chinese = true))
     }
+
+    @Test
+    fun languageMetadataAndSingleLanguageRemovalHelpersWork() {
+        val original = listOf(
+            SubtitleCue(0, 900, "今日は"),
+            SubtitleCue(1000, 1900, "いい天気"),
+        )
+        val revised = listOf(
+            SubtitleCue(0, 1900, "今日はいい天気。", "今天天气不错。", sourceCount = 2),
+        )
+        val origin = SubtitleOrigin("parakeet-tdt-ctc-0.6b-ja", null)
+        val doc = checkNotNull(parseGeneratedSubtitles(encodeGeneratedCues(original, origin, revisedCues = revised)))
+        assertNull(doc.language)
+
+        val noChinese = checkNotNull(doc.withoutChinese())
+        assertEquals(original, noChinese.cues)
+        assertNull(noChinese.revisedCues)
+        assertNull(noChinese.language)
+        assertTrue(canGenerateTranslation(noChinese.displayCues, noChinese.language))
+        assertNull(noChinese.withoutChinese())
+        assertNull(noChinese.withoutOriginal())
+
+        val noOriginal = checkNotNull(doc.withoutOriginal())
+        assertEquals(listOf(SubtitleCue(0, 1900, "今天天气不错。")), noOriginal.cues)
+        assertEquals(origin, noOriginal.origin)
+        assertEquals("zh-Hans", noOriginal.language)
+        assertEquals(false, canGenerateTranslation(noOriginal.displayCues, noOriginal.language))
+
+        val shortDoc = GeneratedSubtitles(
+            listOf(SubtitleCue(0, 1000, "はい", "好")),
+            origin,
+        )
+        val shortChineseOnly = checkNotNull(shortDoc.withoutOriginal())
+        assertEquals("zh-Hans", shortChineseOnly.language)
+        assertEquals(false, canGenerateTranslation(shortChineseOnly.displayCues, shortChineseOnly.language))
+        val roundTripped = checkNotNull(parseGeneratedSubtitles(
+            encodeGeneratedCues(shortChineseOnly.cues, shortChineseOnly.origin, language = shortChineseOnly.language),
+        ))
+        assertEquals("zh-Hans", roundTripped.language)
+        assertEquals(shortChineseOnly.cues, roundTripped.cues)
+    }
+
+    @Test
+    fun parsesLrcContainingTimedBlockArrowInLyrics() {
+        val lrc = parseSubtitleDocument(
+            """
+            [00:01.00]A --> B
+            [00:02.50]次の行
+            """.trimIndent(),
+        )
+        assertEquals(listOf(1000L, 2500L), lrc.map { it.startMs })
+        assertEquals(listOf("A --> B", "次の行"), lrc.map { it.text })
+    }
 }

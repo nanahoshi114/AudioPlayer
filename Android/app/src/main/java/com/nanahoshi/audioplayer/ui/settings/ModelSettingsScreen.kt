@@ -11,38 +11,21 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.HelpOutline
-import androidx.compose.material.icons.filled.Visibility
-import androidx.compose.material.icons.filled.VisibilityOff
 import com.nanahoshi.audioplayer.ui.components.AppTopBar
 import com.nanahoshi.audioplayer.ui.components.ConfirmActionDialog
-import androidx.compose.material3.AlertDialog
+import com.nanahoshi.audioplayer.ui.components.RoundedProgress
+import com.nanahoshi.audioplayer.ui.components.SecretTextField
 import androidx.compose.material3.Button
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExposedDropdownMenuAnchorType
-import androidx.compose.material3.ExposedDropdownMenuBox
-import androidx.compose.material3.ExposedDropdownMenuDefaults
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -55,8 +38,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -75,7 +56,6 @@ import com.nanahoshi.audioplayer.data.isCloudWhisperModel
 import com.nanahoshi.audioplayer.data.isOnDeviceWhisperModel
 import com.nanahoshi.audioplayer.data.whisperModelLabel
 import com.nanahoshi.audioplayer.graph
-import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -142,15 +122,12 @@ fun ModelSettingsScreen(
                                 modifier = Modifier.fillMaxWidth(),
                             )
                         }
-                        OutlinedTextField(
+                        SecretTextField(
                             value = viewModel.whisperToken,
                             onValueChange = { viewModel.whisperToken = it },
-                            label = { Text(stringResource(R.string.settings_api_key_label)) },
-                            singleLine = true,
-                            visualTransformation = if (showWhisperToken) VisualTransformation.None else PasswordVisualTransformation(),
-                            trailingIcon = {
-                                SecretVisibilityIcon(visible = showWhisperToken, onToggle = { showWhisperToken = !showWhisperToken })
-                            },
+                            label = stringResource(R.string.settings_api_key_label),
+                            visible = showWhisperToken,
+                            onToggleVisible = { showWhisperToken = !showWhisperToken },
                             modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                         )
                         FlowRow(
@@ -174,15 +151,12 @@ fun ModelSettingsScreen(
                         platform = viewModel.translatePlatform,
                         onPlatform = viewModel::selectTranslatePlatform,
                     )
-                    OutlinedTextField(
+                    SecretTextField(
                         value = viewModel.translateToken,
                         onValueChange = { viewModel.translateToken = it },
-                        label = { Text(stringResource(R.string.settings_api_key_label)) },
-                        singleLine = true,
-                        visualTransformation = if (showTranslateToken) VisualTransformation.None else PasswordVisualTransformation(),
-                        trailingIcon = {
-                            SecretVisibilityIcon(visible = showTranslateToken, onToggle = { showTranslateToken = !showTranslateToken })
-                        },
+                        label = stringResource(R.string.settings_api_key_label),
+                        visible = showTranslateToken,
+                        onToggleVisible = { showTranslateToken = !showTranslateToken },
                         modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                     )
                     OutlinedTextField(
@@ -214,24 +188,11 @@ fun ModelSettingsScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 4.dp),
                     )
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 48.dp)
-                            .toggleable(
-                                value = viewModel.translateThinking,
-                                role = Role.Switch,
-                                onValueChange = viewModel::setThinking,
-                            )
-                            .padding(top = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(stringResource(R.string.settings_deep_thinking), modifier = Modifier.weight(1f))
-                        Switch(
-                            checked = viewModel.translateThinking,
-                            onCheckedChange = null,
-                        )
-                    }
+                    SettingsInlineSwitchRow(
+                        title = stringResource(R.string.settings_deep_thinking),
+                        checked = viewModel.translateThinking,
+                        onCheckedChange = viewModel::setThinking,
+                    )
                     if (viewModel.translateThinking) {
                         Text(stringResource(R.string.settings_thinking_effort), modifier = Modifier.padding(top = 4.dp))
                         viewModel.activeTranslatePlatform.efforts.forEach { effort ->
@@ -255,47 +216,32 @@ fun ModelSettingsScreen(
                             }
                         }
                     }
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 48.dp)
-                            .toggleable(
-                                value = viewModel.translateAutoPolish,
-                                role = Role.Switch,
-                                onValueChange = viewModel::setAutoPolish,
-                            )
-                            .padding(top = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(stringResource(R.string.settings_auto_polish), modifier = Modifier.weight(1f))
-                        Switch(
-                            checked = viewModel.translateAutoPolish,
-                            onCheckedChange = null,
-                        )
-                    }
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 48.dp)
-                            .toggleable(
-                                value = viewModel.translateAutoCorrect,
-                                role = Role.Switch,
-                                onValueChange = viewModel::setAutoCorrect,
-                            )
-                            .padding(top = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(stringResource(R.string.settings_translate_tuning), modifier = Modifier.weight(1f))
-                        Switch(
-                            checked = viewModel.translateAutoCorrect,
-                            onCheckedChange = null,
-                        )
-                    }
-                    Text(
-                        stringResource(R.string.settings_translate_tuning_help),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    SettingsInlineSwitchRow(
+                        title = stringResource(R.string.settings_auto_polish),
+                        checked = viewModel.translateAutoPolish,
+                        onCheckedChange = viewModel::setAutoPolish,
                     )
+                    SettingsInlineSwitchRow(
+                        title = stringResource(R.string.settings_japanese_proofread),
+                        checked = viewModel.translateJapaneseProofread,
+                        onCheckedChange = viewModel::setJapaneseProofread,
+                        supportingText = stringResource(R.string.settings_japanese_proofread_help),
+                    )
+                    SettingsInlineSwitchRow(
+                        title = stringResource(R.string.settings_japanese_merge),
+                        checked = viewModel.translateJapaneseMerge,
+                        onCheckedChange = viewModel::setJapaneseMerge,
+                        supportingText = stringResource(R.string.settings_japanese_merge_help),
+                    )
+                    if (viewModel.translateJapaneseMerge) {
+                        SettingsInlineSwitchRow(
+                            title = stringResource(R.string.settings_translate_tuning),
+                            checked = viewModel.translateAutoCorrect,
+                            onCheckedChange = viewModel::setAutoCorrect,
+                            supportingText = stringResource(R.string.settings_translate_tuning_help),
+                            modifier = Modifier.padding(start = 16.dp),
+                        )
+                    }
                 }
             }
         }
@@ -337,48 +283,6 @@ fun ModelSettingsScreen(
 }
 
 @Composable
-private fun SettingsCard(
-    title: String,
-    helpDescription: String? = null,
-    onHelp: (() -> Unit)? = null,
-    content: @Composable ColumnScope.() -> Unit,
-) {
-    Surface(
-        shape = MaterialTheme.shapes.large,
-        color = MaterialTheme.colorScheme.surfaceContainer,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(Modifier.padding(16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    title,
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.weight(1f),
-                )
-                if (onHelp != null && helpDescription != null) {
-                    IconButton(onClick = onHelp) {
-                        Icon(Icons.AutoMirrored.Outlined.HelpOutline, contentDescription = helpDescription)
-                    }
-                }
-            }
-            content()
-        }
-    }
-}
-
-@Composable
-private fun SecretVisibilityIcon(visible: Boolean, onToggle: () -> Unit) {
-    IconButton(onClick = onToggle) {
-        Icon(
-            if (visible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-            contentDescription = stringResource(
-                if (visible) R.string.a11y_hide_password else R.string.a11y_show_password,
-            ),
-        )
-    }
-}
-
-@Composable
 private fun SaveStatus(modified: Boolean, configured: Boolean) {
     Text(
         when {
@@ -414,6 +318,10 @@ class ModelSettingsViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var translateAutoPolish by mutableStateOf(graph.credentials.translateAutoPolish())
         private set
+    var translateJapaneseProofread by mutableStateOf(graph.credentials.translateJapaneseProofread())
+        private set
+    var translateJapaneseMerge by mutableStateOf(graph.credentials.translateJapaneseMerge())
+        private set
     var translateAutoCorrect by mutableStateOf(graph.credentials.translateAutoCorrect())
         private set
 
@@ -422,8 +330,8 @@ class ModelSettingsViewModel(app: Application) : AndroidViewModel(app) {
     private data class WhisperDraft(val base: String, val token: String)
     private data class TranslateDraft(val token: String, val model: String)
     // 切换模型/平台但尚未保存时保留各自的编辑内容，避免下一次切换丢失输入。
-    private val whisperDrafts = mutableMapOf<String, WhisperDraft>()
-    private val translateDrafts = mutableMapOf<TranslatePlatform, TranslateDraft>()
+    private val whisperDrafts = KeyedDraft<String, WhisperDraft>()
+    private val translateDrafts = KeyedDraft<TranslatePlatform, TranslateDraft>()
     val whisperModified: Boolean
         get() = whisperBaseline.isModified(whisperModel, whisperBase, whisperToken)
     val translateModified: Boolean
@@ -447,33 +355,31 @@ class ModelSettingsViewModel(app: Application) : AndroidViewModel(app) {
 
     fun selectWhisperModel(id: String) {
         if (id == whisperModel) return
-        whisperDrafts[whisperModel] = WhisperDraft(whisperBase, whisperToken)
+        whisperDrafts.stash(whisperModel, WhisperDraft(whisperBase, whisperToken))
         applyWhisperModel(id)
     }
 
     private fun applyWhisperModel(id: String) {
         whisperModel = id
-        val draft = whisperDrafts[id]
-        whisperBase = draft?.base ?: storedWhisperBase(id)
-        whisperToken = draft?.token ?: storedWhisperToken(id)
+        val draft = whisperDrafts.restoreOr(id) {
+            WhisperDraft(storedWhisperBase(id), storedWhisperToken(id))
+        }
+        whisperBase = draft.base
+        whisperToken = draft.token
         whisperSaved = credentials.hasWhisper(id)
         whisperBaseline = SettingsInputBaseline(id, storedWhisperBase(id), storedWhisperToken(id))
     }
 
     fun saveWhisper() {
         credentials.saveWhisper(whisperBase, whisperToken, whisperModel)
-        whisperDrafts.remove(whisperModel)
+        whisperDrafts.clear(whisperModel)
         applyWhisperModel(credentials.resolvedWhisperModel())
     }
 
     internal fun deleteOfflineModel(model: OfflineWhisperModel) {
-        viewModelScope.launch {
-            try {
-                if (!graph.whisper.deleteOfflineModel(model)) {
-                    graph.show(R.string.settings_model_in_use, whisperModelLabel(getApplication<Application>(), model.id))
-                }
-            } catch (error: com.nanahoshi.audioplayer.data.WhisperException) {
-                graph.show(error.userText)
+        graph.launchGuarded(viewModelScope, R.string.settings_model_error_delete) {
+            if (!graph.whisper.deleteOfflineModel(model)) {
+                graph.show(R.string.settings_model_in_use, whisperModelLabel(getApplication<Application>(), model.id))
             }
         }
     }
@@ -486,22 +392,24 @@ class ModelSettingsViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearWhisper() {
         credentials.clearWhisper(whisperModel)
-        whisperDrafts.remove(whisperModel)
+        whisperDrafts.clear(whisperModel)
         applyWhisperModel(whisperModel)
     }
 
     fun selectTranslatePlatform(platform: TranslatePlatform) {
         if (platform == translatePlatform) return
-        translateDrafts[translatePlatform] = TranslateDraft(translateToken, translateModel)
+        translateDrafts.stash(translatePlatform, TranslateDraft(translateToken, translateModel))
         applyTranslatePlatform(platform)
     }
 
     private fun applyTranslatePlatform(platform: TranslatePlatform) {
         translatePlatform = platform
-        val draft = translateDrafts[platform]
-        translateToken = draft?.token ?: credentials.translateToken(platform).orEmpty()
-        translateModel = draft?.model ?: credentials.translateModelInput(platform)
-        translateSaved = translateToken.isNotEmpty()
+        val draft = translateDrafts.restoreOr(platform) {
+            TranslateDraft(credentials.translateToken(platform).orEmpty(), credentials.translateModelInput(platform))
+        }
+        translateToken = draft.token
+        translateModel = draft.model
+        translateSaved = credentials.translateToken(platform).orEmpty().isNotEmpty()
         translateBaseline = SettingsInputBaseline(
             platform.name, credentials.translateToken(platform).orEmpty(), credentials.translateModelInput(platform),
         )
@@ -515,7 +423,7 @@ class ModelSettingsViewModel(app: Application) : AndroidViewModel(app) {
 
     fun saveTranslate() {
         credentials.saveTranslate(translatePlatform, translateToken, translateModel)
-        translateDrafts.remove(translatePlatform)
+        translateDrafts.clear(translatePlatform)
         applyTranslatePlatform(credentials.translatePlatform())
         activeTranslatePlatform = credentials.translatePlatform()
         translateEffort = credentials.translateEffort(activeTranslatePlatform)
@@ -523,7 +431,7 @@ class ModelSettingsViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearTranslate() {
         credentials.clearTranslate(translatePlatform)
-        translateDrafts.remove(translatePlatform)
+        translateDrafts.clear(translatePlatform)
         applyTranslatePlatform(translatePlatform)
     }
 
@@ -546,81 +454,43 @@ class ModelSettingsViewModel(app: Application) : AndroidViewModel(app) {
         graph.credentials.saveTranslateAutoCorrect(enabled)
         translateAutoCorrect = graph.credentials.translateAutoCorrect()
     }
+
+    fun setJapaneseProofread(enabled: Boolean) {
+        graph.credentials.saveTranslateJapaneseProofread(enabled)
+        translateJapaneseProofread = graph.credentials.translateJapaneseProofread()
+    }
+
+    fun setJapaneseMerge(enabled: Boolean) {
+        graph.credentials.saveTranslateJapaneseMerge(enabled)
+        translateJapaneseMerge = graph.credentials.translateJapaneseMerge()
+    }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun WhisperModelField(model: String, onModel: (String) -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    ExposedDropdownMenuBox(
-        expanded = expanded,
-        onExpandedChange = { expanded = it },
-        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-    ) {
-        OutlinedTextField(
-            value = stringResource(whisperModelLabelRes(model) ?: R.string.settings_model_sensevoice),
-            onValueChange = {},
-            readOnly = true,
-            label = { Text(stringResource(R.string.settings_model_label)) },
-            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-            modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable).fillMaxWidth(),
-        )
-        ExposedDropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { expanded = false },
-        ) {
-            listOf(
-                WHISPER_MODEL_QWEN,
-                WHISPER_MODEL_QWEN3,
-                SENSE_VOICE_MODEL,
-                PARAKEET_MODEL,
-            ).forEach { id ->
-                DropdownMenuItem(
-                    text = { Text(stringResource(whisperModelLabelRes(id) ?: R.string.settings_model_sensevoice)) },
-                    onClick = {
-                        onModel(id)
-                        expanded = false
-                    },
-                    contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding,
-                )
-            }
-        }
-    }
+    SettingsOptionDropdown(
+        label = stringResource(R.string.settings_model_label),
+        valueText = stringResource(whisperModelLabelRes(model) ?: R.string.settings_model_sensevoice),
+        options = listOf(
+            WHISPER_MODEL_QWEN,
+            WHISPER_MODEL_QWEN3,
+            SENSE_VOICE_MODEL,
+            PARAKEET_MODEL,
+        ),
+        optionText = { id -> stringResource(whisperModelLabelRes(id) ?: R.string.settings_model_sensevoice) },
+        onSelect = onModel,
+    )
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TranslatePlatformField(platform: TranslatePlatform, onPlatform: (TranslatePlatform) -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    ExposedDropdownMenuBox(
-        expanded = expanded,
-        onExpandedChange = { expanded = it },
-        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-    ) {
-        OutlinedTextField(
-            value = stringResource(platform.labelRes),
-            onValueChange = {},
-            readOnly = true,
-            label = { Text(stringResource(R.string.settings_platform_label)) },
-            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-            modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable).fillMaxWidth(),
-        )
-        ExposedDropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { expanded = false },
-        ) {
-            TranslatePlatform.entries.forEach { item ->
-                DropdownMenuItem(
-                    text = { Text(stringResource(item.labelRes)) },
-                    onClick = {
-                        onPlatform(item)
-                        expanded = false
-                    },
-                    contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding,
-                )
-            }
-        }
-    }
+    SettingsOptionDropdown(
+        label = stringResource(R.string.settings_platform_label),
+        valueText = stringResource(platform.labelRes),
+        options = TranslatePlatform.entries,
+        optionText = { item -> stringResource(item.labelRes) },
+        onSelect = onPlatform,
+    )
 }
 
 private fun whisperAddressHint(model: String): (@Composable () -> Unit)? = when (model) {
@@ -666,9 +536,9 @@ private fun OfflineModelPanel(
             } else {
                 0f
             }
-            LinearProgressIndicator(
-                progress = { fraction },
-                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            RoundedProgress(
+                progress = fraction,
+                modifier = Modifier.padding(top = 8.dp),
             )
             Text(
                 "${state.source.label} · ${(fraction * 100).toInt()}% · ${state.bytesDone / 1024 / 1024} / ${state.bytesTotal / 1024 / 1024} MiB",
@@ -724,89 +594,46 @@ private fun ModelDownloadDialog(
     onDownload: (ModelDownloadSource) -> Unit,
 ) {
     var source by rememberSaveable(model.id) { mutableStateOf(ModelDownloadSource.GitHub) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.settings_choose_model_source)) },
-        text = {
-            Column {
-                ModelDownloadSource.entries.forEach { option ->
-                    Row(
-                        Modifier.fillMaxWidth().selectable(
-                            selected = source == option,
-                            onClick = { source = option },
-                            role = Role.RadioButton,
-                        ).padding(vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        RadioButton(selected = source == option, onClick = null)
-                        Column(Modifier.padding(start = 12.dp)) {
-                            Text(option.label)
-                            Text(
-                                stringResource(R.string.settings_model_size_summary, model.downloadMiB(option), model.installedMiB),
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                        }
-                    }
-                }
-            }
+    SettingsRadioDialog(
+        title = stringResource(R.string.settings_choose_model_source),
+        options = ModelDownloadSource.entries,
+        selected = source,
+        optionTitle = { it.label },
+        optionSummary = { option ->
+            stringResource(R.string.settings_model_size_summary, model.downloadMiB(option), model.installedMiB)
         },
-        confirmButton = { TextButton(onClick = { onDownload(source) }) { Text(stringResource(R.string.common_download)) } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) } },
+        onSelect = { source = it },
+        onDismiss = onDismiss,
+        confirmLabel = stringResource(R.string.common_download),
+        onConfirm = { onDownload(source) },
     )
 }
 
 @Composable
 private fun WhisperHelpDialog(onDismiss: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.settings_whisper_section)) },
-        text = {
-            Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
-                Text(stringResource(R.string.settings_whisper_help_intro))
-                Text(
-                    stringResource(R.string.settings_whisper_help_qwen_audio),
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-                Text(
-                    stringResource(R.string.settings_whisper_help_qwen3),
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-                Text(
-                    stringResource(R.string.settings_whisper_help_offline),
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-                Text(
-                    stringResource(R.string.settings_whisper_help_usage),
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_close)) }
-        },
+    SettingsHelpDialog(
+        title = stringResource(R.string.settings_whisper_section),
+        paragraphs = listOf(
+            stringResource(R.string.settings_whisper_help_intro),
+            stringResource(R.string.settings_whisper_help_qwen_audio),
+            stringResource(R.string.settings_whisper_help_qwen3),
+            stringResource(R.string.settings_whisper_help_offline),
+            stringResource(R.string.settings_whisper_help_usage),
+        ),
+        onDismiss = onDismiss,
     )
 }
 
 @Composable
 private fun TranslateHelpDialog(onDismiss: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.settings_translate_section)) },
-        text = {
-            Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
-                Text(stringResource(R.string.settings_translate_help_intro))
-                Text(
-                    stringResource(R.string.settings_translate_help_thinking),
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-                Text(
-                    stringResource(R.string.settings_translate_help_usage),
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_close)) }
-        },
+    SettingsHelpDialog(
+        title = stringResource(R.string.settings_translate_section),
+        paragraphs = listOf(
+            stringResource(R.string.settings_translate_help_intro),
+            stringResource(R.string.settings_translate_help_thinking),
+            stringResource(R.string.settings_translate_help_japanese),
+            stringResource(R.string.settings_translate_help_usage),
+        ),
+        onDismiss = onDismiss,
     )
 }

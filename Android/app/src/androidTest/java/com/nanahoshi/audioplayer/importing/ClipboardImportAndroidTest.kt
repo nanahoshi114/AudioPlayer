@@ -1,55 +1,35 @@
 package com.nanahoshi.audioplayer.importing
 
-import android.content.ClipData
-import android.content.ClipDescription
-import android.content.Intent
-import android.net.Uri
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.runtime.*
-import androidx.compose.ui.test.*
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.bilibili.BiliPart
-import com.nanahoshi.audioplayer.data.*
+import com.nanahoshi.audioplayer.data.ClipboardImportPreview
+import com.nanahoshi.audioplayer.data.ClipboardImportState
+import com.nanahoshi.audioplayer.data.ClipboardSource
+import com.nanahoshi.audioplayer.data.ClipboardTarget
+import com.nanahoshi.audioplayer.data.ClipboardDlsiteWork
 import com.nanahoshi.audioplayer.dlsite.DlsiteShowcase
 import com.nanahoshi.audioplayer.ui.importing.ClipboardImportDialog
-import com.nanahoshi.audioplayer.ui.importing.importCandidate
-import org.junit.Assert.*
+import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
-class ClipboardImportAdapterAndroidTest {
-    @Test fun adapterAcceptsTextAndWebUrisWithoutOpeningContentOrIntents() {
-        val target = ClipboardTarget(ClipboardSource.BILIBILI, "BV1234567890")
-        val clip = ClipData.newPlainText("fixture", "ordinary text")
-        clip.addItem(ClipData.Item(target.id))
-        assertEquals(target, importCandidate(clip)!!.target)
-        fun uriClip(value: String) = ClipData(ClipDescription("fixture", arrayOf("text/uri-list")), ClipData.Item(Uri.parse(value)))
-        assertEquals(ClipboardSource.YOUTUBE, importCandidate(uriClip("https://youtu.be/jNQXAC9IVRw"))!!.target.source)
-        assertEquals(
-            ClipboardTarget(ClipboardSource.JAPANESE_ASMR, "135575"),
-            importCandidate(uriClip("https://www.japaneseasmr.com/135575/?share=1"))?.target,
-        )
-        val combined = ClipData(ClipDescription("fixture", arrayOf("text/plain")),
-            ClipData.Item("description", null, null, Uri.parse("https://youtu.be/jNQXAC9IVRw")))
-        assertEquals(ClipboardSource.YOUTUBE, importCandidate(combined)!!.target.source)
-        assertNull(importCandidate(uriClip("content://example.org/RJ123456")))
-        assertNull(importCandidate(ClipData.newIntent("fixture", Intent(Intent.ACTION_VIEW, Uri.parse("https://youtu.be/jNQXAC9IVRw")))))
-        val bare = ClipData.newPlainText("fixture", "参考 123456")
-        assertEquals("RJ123456", importCandidate(bare)?.target?.id)
-        assertTrue(checkNotNull(importCandidate(bare)).requiresLookupConfirmation)
-        bare.addItem(ClipData.Item("作品 RJ01234567"))
-        assertEquals("RJ01234567", importCandidate(bare)?.target?.id)
-        assertFalse(checkNotNull(importCandidate(bare)).requiresLookupConfirmation)
-        assertNull(importCandidate(uriClip("https://example.org/123456")))
-    }
-}
-
-@RunWith(AndroidJUnit4::class)
 class ClipboardImportAndroidTest {
     @get:Rule val compose = createComposeRule()
+    private val strings = InstrumentationRegistry.getInstrumentation().targetContext
     private val target = ClipboardTarget(ClipboardSource.BILIBILI, "BV1234567890")
 
     @Test fun readyPreviewShowsTitleAndCoverBeforeConfirmation() {
@@ -60,18 +40,18 @@ class ClipboardImportAndroidTest {
         compose.setContent { MaterialTheme {
             ClipboardImportDialog(state, {}, { imports++ }, {})
         } }
-        compose.onNodeWithText("导入这个内容？").assertIsDisplayed()
+        compose.onNodeWithText(strings.getString(R.string.import_confirm_title)).assertIsDisplayed()
         compose.onNodeWithText("视频标题").assertIsDisplayed()
-        compose.onNodeWithContentDescription("导入内容封面").assertExists()
+        compose.onNodeWithContentDescription(strings.getString(R.string.a11y_import_cover)).assertExists()
         compose.runOnIdle { assertEquals(0, imports) }
-        compose.onNodeWithText("选择导入方式").assertDoesNotExist()
-        compose.onNodeWithText("导入").assertIsEnabled().performClick()
+        compose.onNodeWithText(strings.getString(R.string.import_choose_mode)).assertDoesNotExist()
+        compose.onNodeWithText(strings.getString(R.string.import_action)).assertIsEnabled().performClick()
         compose.runOnIdle { assertEquals(1, imports) }
         compose.runOnIdle { state = state.copy(preview = state.preview.copy(alreadySaved = true)) }
-        compose.onNodeWithText("已在音频库").assertIsDisplayed()
-        compose.onNodeWithText("导入").assertDoesNotExist()
-        compose.onNodeWithText("关闭").assertIsEnabled()
-        compose.onNodeWithText("选择导入方式").assertDoesNotExist()
+        compose.onNodeWithText(strings.getString(R.string.import_already_saved)).assertIsDisplayed()
+        compose.onNodeWithText(strings.getString(R.string.import_action)).assertDoesNotExist()
+        compose.onNodeWithText(strings.getString(R.string.common_close)).assertIsEnabled()
+        compose.onNodeWithText(strings.getString(R.string.import_choose_mode)).assertDoesNotExist()
     }
 
     @Test fun multiPartPreviewDefersSelectionToTheSharedImportDialog() {
@@ -80,7 +60,7 @@ class ClipboardImportAndroidTest {
         var choices = 0
         compose.setContent { MaterialTheme { ClipboardImportDialog(state, {}, { choices++ }, {}) } }
         compose.onNodeWithText("P2 · two").assertDoesNotExist()
-        compose.onNodeWithText("选择导入方式").assertIsEnabled().performClick()
+        compose.onNodeWithText(strings.getString(R.string.import_choose_mode)).assertIsEnabled().performClick()
         compose.runOnIdle { assertEquals(1, choices) }
     }
 
@@ -92,10 +72,10 @@ class ClipboardImportAndroidTest {
             ClipboardImportPreview(work, product.title, null, dlsiteWork = ClipboardDlsiteWork(product, purchased = false)))
         var opened: String? = null
         compose.setContent { MaterialTheme { ClipboardImportDialog(state, {}, { error("Unexpected import") }) { opened = it } } }
-        compose.onNodeWithText("没有有效来源，无法加入音频库").assertIsDisplayed()
-        compose.onNodeWithText("导入").assertDoesNotExist()
-        compose.onNodeWithText("重试").assertDoesNotExist()
-        compose.onNodeWithText("查看详情页").performClick()
+        compose.onNodeWithText(strings.getString(R.string.import_no_source)).assertIsDisplayed()
+        compose.onNodeWithText(strings.getString(R.string.import_action)).assertDoesNotExist()
+        compose.onNodeWithText(strings.getString(R.string.common_retry)).assertDoesNotExist()
+        compose.onNodeWithText(strings.getString(R.string.import_view_details)).performClick()
         compose.runOnIdle { assertEquals(work.id, opened) }
     }
 }

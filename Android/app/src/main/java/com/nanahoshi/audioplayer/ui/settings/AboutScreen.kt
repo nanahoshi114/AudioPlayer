@@ -27,6 +27,7 @@ import com.nanahoshi.audioplayer.text.TextRef
 import com.nanahoshi.audioplayer.text.asString
 import com.nanahoshi.audioplayer.text.userTextOr
 import com.nanahoshi.audioplayer.ui.components.AppTopBar
+import com.nanahoshi.audioplayer.ui.components.RoundedProgress
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
@@ -83,18 +84,18 @@ internal fun AboutContent(current: InstalledAppVersion, status: UpdateStatus, on
     Column(Modifier.fillMaxSize()) {
         AppTopBar(title = stringResource(R.string.about_title), onBack = onBack)
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.fillMaxWidth()) {
+            SettingsGroup {
                 Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(stringResource(R.string.about_app_name), style = MaterialTheme.typography.headlineSmall)
+                    Text(stringResource(R.string.about_app_name), style = MaterialTheme.typography.titleLarge)
                     Text(stringResource(R.string.about_version, current.display.ifBlank { stringResource(R.string.about_unknown_version) }, current.code), style = MaterialTheme.typography.bodyLarge)
                 }
             }
-            Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.fillMaxWidth()) {
+            SettingsGroup {
                 Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(stringResource(R.string.about_update_section), style = MaterialTheme.typography.titleMedium)
                     when (status) {
                         UpdateStatus.Idle -> Text(stringResource(R.string.about_update_idle))
-                        UpdateStatus.Checking -> { Text(stringResource(R.string.about_checking)); LinearProgressIndicator(Modifier.fillMaxWidth()) }
+                        UpdateStatus.Checking -> { Text(stringResource(R.string.about_checking)); RoundedProgress(progress = null) }
                         is UpdateStatus.Failed -> Text(status.message.asString(), color = MaterialTheme.colorScheme.error)
                         is UpdateStatus.Ready -> {
                             Text(when (status.relation) {

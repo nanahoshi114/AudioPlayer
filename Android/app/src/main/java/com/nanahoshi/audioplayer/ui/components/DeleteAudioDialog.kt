@@ -1,6 +1,7 @@
 package com.nanahoshi.audioplayer.ui.components
 
 import com.nanahoshi.audioplayer.R
+import androidx.annotation.StringRes
 import androidx.compose.ui.res.stringResource
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.heightIn
@@ -14,6 +15,66 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 
+/** 删除确认框的纯逻辑决定，不依赖 Compose，便于 JVM 单测覆盖混合选择与仅字幕分支。 */
+internal data class DeleteAudioDialogSpec(
+    @StringRes val titleRes: Int,
+    @StringRes val confirmRes: Int,
+    val subtitleFilesOnly: Boolean,
+    val hasGeneratedSubtitles: Boolean,
+    val hasWorkOrCustomSubtitles: Boolean,
+    val hasAnySubtitles: Boolean,
+    val hasDeletes: Boolean,
+    val mixed: Boolean,
+    val handledGeneratedWithFiles: Boolean,
+    val showKeepSubtitles: Boolean,
+)
+
+internal fun deleteAudioDialogSpec(
+    itemCount: Int,
+    subtitleCount: Int,
+    associationCount: Int = 0,
+    otherFileCount: Int = 0,
+    workSubtitleCount: Int = 0,
+    customSubtitleCount: Int = 0,
+): DeleteAudioDialogSpec {
+    val hasGeneratedSubtitles = subtitleCount > 0
+    val hasWorkOrCustomSubtitles = workSubtitleCount > 0 || customSubtitleCount > 0
+    val hasAnySubtitles = hasGeneratedSubtitles || hasWorkOrCustomSubtitles
+    val hasDeletes = itemCount > 0 || otherFileCount > 0
+    val mixed = associationCount > 0
+    val subtitleFilesOnly = itemCount == 0 && otherFileCount == 0 && associationCount == 0 && hasWorkOrCustomSubtitles
+    val handledGeneratedWithFiles = itemCount > 0 && otherFileCount == 0 && !mixed &&
+        hasGeneratedSubtitles && !hasWorkOrCustomSubtitles
+    val titleRes = when {
+        subtitleFilesOnly -> R.string.delete_dialog_title_subtitles_only
+        hasAnySubtitles && (otherFileCount > 0 || workSubtitleCount > 0) -> R.string.delete_dialog_title_files_and_subtitles
+        hasAnySubtitles && mixed -> R.string.delete_dialog_title_mixed
+        hasAnySubtitles -> R.string.delete_dialog_title_subtitles
+        mixed && hasDeletes -> R.string.delete_dialog_title_mixed
+        mixed -> R.string.delete_dialog_title_unlink
+        else -> R.string.delete_dialog_title_files
+    }
+    val confirmRes = when {
+        subtitleFilesOnly -> R.string.delete_dialog_confirm_delete
+        hasAnySubtitles -> R.string.delete_dialog_confirm_all
+        mixed && hasDeletes -> R.string.delete_dialog_confirm_copy
+        mixed -> R.string.library_action_unlink
+        else -> R.string.delete_dialog_confirm_delete
+    }
+    return DeleteAudioDialogSpec(
+        titleRes = titleRes,
+        confirmRes = confirmRes,
+        subtitleFilesOnly = subtitleFilesOnly,
+        hasGeneratedSubtitles = hasGeneratedSubtitles,
+        hasWorkOrCustomSubtitles = hasWorkOrCustomSubtitles,
+        hasAnySubtitles = hasAnySubtitles,
+        hasDeletes = hasDeletes,
+        mixed = mixed,
+        handledGeneratedWithFiles = handledGeneratedWithFiles,
+        showKeepSubtitles = !subtitleFilesOnly && hasAnySubtitles,
+    )
+}
+
 /** 删除音频或附属文件前的确认；带字幕时让用户决定是否一并删除或保留。 */
 @Composable
 internal fun DeleteAudioDialog(
@@ -26,12 +87,20 @@ internal fun DeleteAudioDialog(
     workSubtitleCount: Int = 0,
     customSubtitleCount: Int = 0,
 ) {
-    val hasGeneratedSubtitles = subtitleCount > 0
-    val hasWorkOrCustomSubtitles = workSubtitleCount > 0 || customSubtitleCount > 0
-    val hasAnySubtitles = hasGeneratedSubtitles || hasWorkOrCustomSubtitles
-    val hasDeletes = itemCount > 0 || otherFileCount > 0
-    val mixed = associationCount > 0
-    val subtitleFilesOnly = itemCount == 0 && otherFileCount == 0 && associationCount == 0 && hasWorkOrCustomSubtitles
+    val spec = deleteAudioDialogSpec(
+        itemCount = itemCount,
+        subtitleCount = subtitleCount,
+        associationCount = associationCount,
+        otherFileCount = otherFileCount,
+        workSubtitleCount = workSubtitleCount,
+        customSubtitleCount = customSubtitleCount,
+    )
+    val subtitleFilesOnly = spec.subtitleFilesOnly
+    val hasGeneratedSubtitles = spec.hasGeneratedSubtitles
+    val hasWorkOrCustomSubtitles = spec.hasWorkOrCustomSubtitles
+    val hasAnySubtitles = spec.hasAnySubtitles
+    val mixed = spec.mixed
+    val handledGeneratedWithFiles = spec.handledGeneratedWithFiles
 
     val message = if (subtitleFilesOnly) {
         buildList {
@@ -81,27 +150,9 @@ internal fun DeleteAudioDialog(
         }.joinToString("\n\n")
     }
 
-    val titleRes = when {
-        subtitleFilesOnly -> R.string.delete_dialog_title_subtitles_only
-        hasAnySubtitles && (otherFileCount > 0 || workSubtitleCount > 0) -> R.string.delete_dialog_title_files_and_subtitles
-        hasAnySubtitles && mixed -> R.string.delete_dialog_title_mixed
-        hasAnySubtitles -> R.string.delete_dialog_title_subtitles
-        mixed && hasDeletes -> R.string.delete_dialog_title_mixed
-        mixed -> R.string.delete_dialog_title_unlink
-        else -> R.string.delete_dialog_title_files
-    }
-
-    val confirmRes = when {
-        subtitleFilesOnly -> R.string.delete_dialog_confirm_delete
-        hasAnySubtitles -> R.string.delete_dialog_confirm_all
-        mixed && hasDeletes -> R.string.delete_dialog_confirm_copy
-        mixed -> R.string.library_action_unlink
-        else -> R.string.delete_dialog_confirm_delete
-    }
-
     AlertDialog(
         onDismissRequest = onCancel,
-        title = { Text(stringResource(titleRes)) },
+        title = { Text(stringResource(spec.titleRes)) },
         text = {
             Text(
                 message,
@@ -110,12 +161,12 @@ internal fun DeleteAudioDialog(
         },
         confirmButton = {
             TextButton(onClick = { onConfirm(true) }) {
-                Text(stringResource(confirmRes), color = MaterialTheme.colorScheme.error)
+                Text(stringResource(spec.confirmRes), color = MaterialTheme.colorScheme.error)
             }
         },
         dismissButton = {
             Row {
-                if (!subtitleFilesOnly && hasAnySubtitles) {
+                if (spec.showKeepSubtitles) {
                     TextButton(onClick = { onConfirm(false) }) {
                         Text(stringResource(R.string.delete_dialog_keep_subtitles))
                     }

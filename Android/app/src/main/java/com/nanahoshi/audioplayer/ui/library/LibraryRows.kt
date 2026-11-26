@@ -2,17 +2,10 @@ package com.nanahoshi.audioplayer.ui.library
 
 import com.nanahoshi.audioplayer.R
 import androidx.compose.ui.res.stringResource
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.EnterTransition
-import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
@@ -25,7 +18,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyItemScope
@@ -39,12 +31,10 @@ import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
@@ -78,16 +68,20 @@ import com.nanahoshi.audioplayer.data.db.FolderEntity
 import com.nanahoshi.audioplayer.data.db.LibraryFileEntity
 import com.nanahoshi.audioplayer.data.db.PlaylistEntity
 import com.nanahoshi.audioplayer.data.db.TrackEntity
-import com.nanahoshi.audioplayer.ui.CoverImage
 import com.nanahoshi.audioplayer.ui.components.BadgeItem
-import com.nanahoshi.audioplayer.ui.components.BadgeLine
+import com.nanahoshi.audioplayer.ui.components.ConfirmActionDialog
+import com.nanahoshi.audioplayer.ui.components.CoverImage
 import com.nanahoshi.audioplayer.ui.components.LabelBadge
+import com.nanahoshi.audioplayer.ui.components.MediaPreviewCard
+import com.nanahoshi.audioplayer.ui.components.RoundedProgress
+import com.nanahoshi.audioplayer.ui.components.SelectableLeading
 import com.nanahoshi.audioplayer.ui.components.SourceBadge
-import com.nanahoshi.audioplayer.ui.formatDuration
+import com.nanahoshi.audioplayer.ui.components.WorkCard
+import com.nanahoshi.audioplayer.ui.components.formatDuration
+import com.nanahoshi.audioplayer.ui.components.toWorkFacts
 import com.nanahoshi.audioplayer.ui.theme.LocalReduceMotion
 import com.nanahoshi.audioplayer.ui.theme.LocalSourceColors
 import com.nanahoshi.audioplayer.ui.theme.Motion
-import com.nanahoshi.audioplayer.asmr.WorkFacts
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
@@ -242,16 +236,12 @@ internal fun ConfirmRemoveDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.library_remove_from_library)) },
-        text = { Text(message) },
-        confirmButton = {
-            TextButton(onClick = onConfirm) {
-                Text(stringResource(R.string.common_remove), color = MaterialTheme.colorScheme.error)
-            }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) } },
+    ConfirmActionDialog(
+        title = stringResource(R.string.library_remove_from_library),
+        message = message,
+        confirmLabel = stringResource(R.string.common_remove),
+        onConfirm = onConfirm,
+        onDismiss = onDismiss,
     )
 }
 
@@ -310,19 +300,13 @@ internal fun FolderRow(
         headlineContent = { ItemName(folder.name, selected) },
         supportingContent = { Text(stringResource(R.string.library_folder)) },
         leadingContent = {
-            AnimatedContent(
-                targetState = selecting,
-                transitionSpec = {
-                    if (reduce) EnterTransition.None togetherWith ExitTransition.None
-                    else fadeIn(tween(Motion.short)) togetherWith fadeOut(tween(Motion.short))
-                },
+            SelectableLeading(
+                selecting = selecting,
+                selected = selected,
+                onToggle = onClick,
                 label = "folderLead",
-            ) { on ->
-                if (on) {
-                    Checkbox(checked = selected, onCheckedChange = { onClick() })
-                } else {
-                    Icon(Icons.Default.Folder, contentDescription = null)
-                }
+            ) {
+                Icon(Icons.Default.Folder, contentDescription = null)
             }
         },
         trailingContent = {
@@ -346,8 +330,7 @@ internal fun FolderRow(
     )
 }
 
-/** BadgeLine uses BoxWithConstraints, so this card must not use ListItem's intrinsic slots. */
-@OptIn(ExperimentalFoundationApi::class)
+/** BadgeLine uses BoxWithConstraints, so this card delegates to [MediaPreviewCard]. */
 @Composable
 private fun BiliVideoPreviewRow(
     folder: FolderEntity,
@@ -360,59 +343,45 @@ private fun BiliVideoPreviewRow(
     modifier: Modifier = Modifier,
 ) {
     var menu by remember { mutableStateOf(false) }
-    val reduce = LocalReduceMotion.current
-    val container by animateColorAsState(
-        if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
-        animationSpec = if (reduce) snap() else tween(Motion.short),
-        label = "biliVideoSelected",
+    val bvid = folder.biliBvid?.takeIf { it.isNotBlank() }
+    MediaPreviewCard(
+        title = folder.name,
+        secondary = artist?.ifBlank { null } ?: stringResource(R.string.library_uploader_unknown),
+        coverUrl = folder.coverUri,
+        leadingBadges = listOf(
+            BadgeItem(stringResource(R.string.library_badge_bilibili), LocalSourceColors.current.bilibili),
+            BadgeItem(stringResource(R.string.library_badge_multi_part), MaterialTheme.colorScheme.secondary),
+        ),
+        tagBadges = if (bvid != null) {
+            listOf(BadgeItem(bvid, MaterialTheme.colorScheme.onSurfaceVariant))
+        } else {
+            emptyList()
+        },
+        modifier = modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+        selected = selected,
+        selecting = selecting,
+        onClick = onClick,
+        onLongClick = onLongClick,
+        trailing = if (!selecting && onDelete != null) {
+            {
+                Box {
+                    IconButton(onClick = { menu = true }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.a11y_video_actions))
+                    }
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.library_remove_from_library)) },
+                            onClick = { menu = false; onDelete() },
+                        )
+                    }
+                }
+            }
+        } else {
+            null
+        },
     )
-    Row(
-        modifier
-            .fillMaxWidth()
-            .background(container)
-            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.Top,
-    ) {
-        Box(Modifier.size(64.dp), contentAlignment = Alignment.Center) {
-            if (selecting) {
-                Checkbox(checked = selected, onCheckedChange = { onClick() })
-            } else {
-                CoverImage(folder.coverUri, size = 64.dp, shape = MaterialTheme.shapes.small)
-            }
-        }
-        Column(Modifier.padding(start = 16.dp).weight(1f)) {
-            Text(
-                folder.name,
-                style = MaterialTheme.typography.titleMedium,
-                maxLines = if (selected) Int.MAX_VALUE else 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                artist?.ifBlank { null } ?: stringResource(R.string.library_uploader_unknown),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(top = 2.dp),
-            )
-            BadgeLine(
-                leading = listOf(BadgeItem(stringResource(R.string.library_badge_bilibili), LocalSourceColors.current.bilibili),
-                    BadgeItem(stringResource(R.string.library_badge_multi_part), MaterialTheme.colorScheme.secondary)),
-                tags = listOf(BadgeItem(folder.biliBvid.orEmpty(), MaterialTheme.colorScheme.onSurfaceVariant)),
-                modifier = Modifier.padding(top = 6.dp),
-            )
-        }
-        if (!selecting && onDelete != null) Box {
-            IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.a11y_video_actions)) }
-            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                DropdownMenuItem(text = { Text(stringResource(R.string.library_remove_from_library)) }, onClick = { menu = false; onDelete() })
-            }
-        }
-    }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun WorkPreviewRow(
     folder: FolderEntity,
@@ -426,92 +395,89 @@ private fun WorkPreviewRow(
     onDelete: (() -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
-    val facts = WorkFacts.fromJson(folder.workMeta) ?: WorkFacts(
-        title = folder.name,
-        circle = "",
-        vas = emptyList(),
-        tags = emptyList(),
-        release = "",
-        sourceId = folder.asmrSourceId.orEmpty(),
-    )
-    val reduce = LocalReduceMotion.current
-    val container by animateColorAsState(
-        if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
-        animationSpec = if (reduce) snap() else tween(Motion.short),
-        label = "workSelected",
-    )
-    Row(
-        modifier
-            .fillMaxWidth()
-            .background(container)
-            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.Top,
-    ) {
-        Box(Modifier.size(64.dp), contentAlignment = Alignment.Center) {
-            AnimatedContent(
-                targetState = selecting,
-                transitionSpec = {
-                    if (reduce) EnterTransition.None togetherWith ExitTransition.None
-                    else fadeIn(tween(Motion.short)) togetherWith fadeOut(tween(Motion.short))
-                },
-                label = "workLead",
-            ) { on ->
-                if (on) {
-                    Checkbox(checked = selected, onCheckedChange = { onClick() })
-                } else {
-                    CoverImage(folder.coverUri, size = 64.dp, shape = MaterialTheme.shapes.small)
+    val facts = remember(folder.workMeta, folder.name, folder.asmrSourceId) { folder.toWorkFacts() }
+    val hasMenuActions = onCache != null || onDelete != null
+    WorkCard(
+        facts = facts,
+        coverUrl = folder.coverUri,
+        modifier = modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+        onClick = onClick,
+        selected = selected,
+        selecting = selecting,
+        onLongClick = onLongClick,
+        emptySecondaryFallback = "—",
+        trailing = if (!selecting && hasMenuActions) {
+            {
+                Box {
+                    IconButton(onClick = { onMenu(true) }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.a11y_work_actions))
+                    }
+                    DropdownMenu(expanded = menu, onDismissRequest = { onMenu(false) }) {
+                        if (onCache != null) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.library_download_whole_work)) },
+                                onClick = { onMenu(false); onCache() },
+                            )
+                        }
+                        if (onDelete != null) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.library_remove_from_library)) },
+                                onClick = { onMenu(false); onDelete() },
+                            )
+                        }
+                    }
                 }
             }
-        }
-        Column(Modifier.padding(start = 16.dp).weight(1f)) {
-            Text(
-                facts.title.ifBlank { facts.sourceId },
-                style = MaterialTheme.typography.titleMedium,
-                maxLines = if (selected) Int.MAX_VALUE else 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                listOf(facts.circle, facts.vas.joinToString("、")).filter { it.isNotBlank() }.joinToString(" · ").ifBlank { "—" },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(top = 2.dp),
-            )
-            BadgeLine(
-                leading = buildList {
-                    if (facts.sourceId.isNotBlank()) {
-                        add(BadgeItem(facts.sourceId, MaterialTheme.colorScheme.primary))
-                    }
-                },
-                tags = facts.tags.take(8).map {
-                    BadgeItem(it, MaterialTheme.colorScheme.onSurfaceVariant)
-                },
-                totalTags = facts.tags.size,
-                modifier = Modifier.padding(top = 6.dp),
-            )
-        }
-        if (!selecting) {
-            Box {
-                IconButton(onClick = { onMenu(true) }) {
-                    Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.a11y_work_actions))
-                }
-                DropdownMenu(expanded = menu, onDismissRequest = { onMenu(false) }) {
-                    if (onCache != null) {
-                        DropdownMenuItem(text = { Text(stringResource(R.string.library_download_whole_work)) }, onClick = { onMenu(false); onCache() })
-                    }
-                    if (onDelete != null) DropdownMenuItem(text = { Text(stringResource(R.string.library_remove_from_library)) }, onClick = { onMenu(false); onDelete() })
-                }
-            }
-        }
-    }
+        } else {
+            null
+        },
+    )
 }
 
 /** App 自己下载到 filesDir 的副本；关联的用户文件是 content: / file: URI。 */
 internal fun TrackEntity.isAppCopy(): Boolean = localUri?.startsWith("/") == true
 
-@OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun TrackMetaRow(
+    artist: String?,
+    durationMs: Long?,
+    source: TrackSource,
+    downloaded: Boolean,
+    hasSubtitle: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val cleanArtist = artist?.takeIf { it.isNotBlank() }
+    Column(modifier) {
+        if (cleanArtist != null) {
+            Text(cleanArtist, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+            itemVerticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (durationMs != null) {
+                Text(
+                    formatDuration(durationMs),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    softWrap = false,
+                )
+            }
+            SourceBadge(source)
+            if (downloaded) {
+                LabelBadge(stringResource(R.string.library_badge_downloaded), MaterialTheme.colorScheme.tertiary)
+            }
+            if (hasSubtitle) {
+                LabelBadge(stringResource(R.string.library_badge_has_subtitle), MaterialTheme.colorScheme.primary)
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun TrackRow(
     track: TrackEntity,
@@ -529,52 +495,37 @@ internal fun TrackRow(
     onBindSubtitle: (() -> Unit)? = null,
 ) {
     var menu by remember { mutableStateOf(false) }
-    val reduce = LocalReduceMotion.current
-    val downloaded = when (track.source) {
-        TrackSource.BILIBILI, TrackSource.YOUTUBE -> track.localUri?.startsWith("/") == true &&
-            java.io.File(track.localUri).isFile
-        TrackSource.ASMR, TrackSource.DLSITE, TrackSource.JAPANESE_ASMR ->
-            com.nanahoshi.audioplayer.data.LocalAudio.hasStoredCopy(track.localUri)
-        else -> false
+    val downloaded by produceState(initialValue = false, key1 = track.id, key2 = track.localUri, key3 = track.source) {
+        value = withContext(Dispatchers.IO) {
+            when (track.source) {
+                TrackSource.BILIBILI, TrackSource.YOUTUBE -> track.localUri?.startsWith("/") == true &&
+                    java.io.File(track.localUri).isFile
+                TrackSource.ASMR, TrackSource.DLSITE, TrackSource.JAPANESE_ASMR ->
+                    com.nanahoshi.audioplayer.data.LocalAudio.hasStoredCopy(track.localUri)
+                else -> false
+            }
+        }
     }
     val appCopy = track.isAppCopy()
     ListItem(
         headlineContent = { ItemName(track.title, selected) },
         supportingContent = {
-            val artist = track.artist?.takeIf { it.isNotBlank() }
-            Column {
-                if (artist != null) {
-                    Text(artist, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    SourceBadge(track.source)
-                    Text(formatDuration(track.durationMs), style = MaterialTheme.typography.labelMedium)
-                    if (downloaded) {
-                        LabelBadge(stringResource(R.string.library_badge_downloaded), MaterialTheme.colorScheme.tertiary)
-                    }
-                    if (hasSubtitle) {
-                        LabelBadge(stringResource(R.string.library_badge_has_subtitle), MaterialTheme.colorScheme.primary)
-                    }
-                }
-            }
+            TrackMetaRow(
+                artist = track.artist,
+                durationMs = track.durationMs,
+                source = track.source,
+                downloaded = downloaded,
+                hasSubtitle = hasSubtitle,
+            )
         },
         leadingContent = {
-            AnimatedContent(
-                targetState = selecting,
-                transitionSpec = {
-                    if (reduce) EnterTransition.None togetherWith ExitTransition.None
-                    else fadeIn(tween(Motion.short)) togetherWith fadeOut(tween(Motion.short))
-                },
+            SelectableLeading(
+                selecting = selecting,
+                selected = selected,
+                onToggle = onClick,
                 label = "trackLead",
-            ) { on ->
-                if (on) {
-                    Checkbox(checked = selected, onCheckedChange = { onClick() })
-                } else {
-                    CoverImage(track.coverUri)
-                }
+            ) {
+                CoverImage(track.coverUri)
             }
         },
         trailingContent = {
@@ -658,19 +609,13 @@ internal fun FileRow(
             }
         },
         leadingContent = {
-            AnimatedContent(
-                targetState = selecting,
-                transitionSpec = {
-                    if (reduce) EnterTransition.None togetherWith ExitTransition.None
-                    else fadeIn(tween(Motion.short)) togetherWith fadeOut(tween(Motion.short))
-                },
+            SelectableLeading(
+                selecting = selecting,
+                selected = selected,
+                onToggle = onClick,
                 label = "fileLead",
-            ) { on ->
-                if (on) {
-                    Checkbox(checked = selected, onCheckedChange = { onClick() })
-                } else {
-                    Icon(icon, contentDescription = null)
-                }
+            ) {
+                Icon(icon, contentDescription = null)
             }
         },
         trailingContent = {
@@ -763,7 +708,7 @@ internal fun CachePromptDialog(
         is CachePrompt.JapaneseWaiting -> AlertDialog(
             onDismissRequest = { onCancelWaiting(prompt) },
             title = { Text(prompt.title) },
-            text = { LinearProgressIndicator(Modifier.fillMaxWidth()) },
+            text = { RoundedProgress(progress = null) },
             confirmButton = { TextButton(onClick = { onCancelWaiting(prompt) }) { Text(stringResource(R.string.common_cancel)) } },
         )
         is CachePrompt.Format -> CachePickDialog(

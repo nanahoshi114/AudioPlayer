@@ -4,7 +4,6 @@ import com.nanahoshi.audioplayer.text.UserFacingException
 import com.nanahoshi.audioplayer.text.UserFacingIOException
 import com.nanahoshi.audioplayer.text.TextRef
 import com.nanahoshi.audioplayer.R
-import android.media.MediaMetadataRetriever
 import androidx.annotation.OptIn
 import androidx.media3.common.C
 import androidx.media3.common.DataReader
@@ -31,11 +30,11 @@ import com.nanahoshi.audioplayer.data.TaskReporter
 import com.nanahoshi.audioplayer.data.taskProgress
 import com.nanahoshi.audioplayer.data.withResponse
 import com.nanahoshi.audioplayer.japaneseasmr.JapaneseAsmrClient.Companion.isChallenge
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import okhttp3.OkHttpClient
 import okhttp3.Response
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
@@ -78,19 +77,20 @@ internal class JapaneseAsmrHlsDownload(private val http: OkHttpClient) {
             report.units((index + 1).toLong(), total.toLong(), detail = TextRef.Res(R.string.progress_detail_segments, listOf(index + 1, total)))
         }
         report.phase(ProgressPhase.MUXING)
-        muxJaSegments(files, destination)
-        val reader = MediaMetadataRetriever()
         try {
-            reader.setDataSource(destination.absolutePath)
-            val audio = reader.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO)
-            val duration = reader.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
-            if (audio != "yes" || duration == null || abs(duration - manifest.durationMs) > 2_000) {
-                throw UserFacingException(TextRef.Res(R.string.ja_error_hls_output_incomplete))
-            }
-            if (!downloadedSegment) report.reusedIfNoTransfer()
-            return duration
-        } finally {
-            reader.release()
+            muxJaSegments(files, destination)
+            val probe = com.nanahoshi.audioplayer.data.LocalAudio.probeAudio(destination.absolutePath)
+                val duration = probe?.durationMs
+                if (probe?.hasAudio != true || duration == null || abs(duration - manifest.durationMs) > 2_000) {
+                    throw UserFacingException(TextRef.Res(R.string.ja_error_hls_output_incomplete))
+                }
+                if (!downloadedSegment) report.reusedIfNoTransfer()
+                return duration
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            staging.deleteRecursively()
+            throw error
         }
     }
 
@@ -106,7 +106,7 @@ internal class JapaneseAsmrHlsDownload(private val http: OkHttpClient) {
                         .header("Accept-Encoding", "identity").taskProgress(report).build()).withResponse { response ->
                         if (response.expired()) return@withResponse false
                         val body = response.body ?: throw UserFacingIOException(TextRef.Res(R.string.ja_error_hls_segment_missing))
-                        val total = response.header("Content-Range")?.substringAfterLast('/')?.toLongOrNull()
+                        val total = com.nanahoshi.audioplayer.data.HttpByteRange.parse(response.header("Content-Range"))?.total
                             ?: body.contentLength().takeIf { it >= 0 }
                         body.byteStream().use { input ->
                             part.outputStream().use { output ->
@@ -235,7 +235,10 @@ private suspend fun muxJaSegments(segments: List<File>, output: File) {
 
 @OptIn(UnstableApi::class)
 private class AacTrack(private val muxer: Mp4Muxer) : TrackOutput {
-    private val pending = ByteArrayOutputStream()
+    // 复用一块可增长的待写缓冲：采样帧约 43 帧/秒，逐帧分配与 BAOS 扩容
+    // 都会在长音频上产生可观的临时垃圾。
+    private var pending = ByteArray(INITIAL_SAMPLE_BUFFER)
+    private var pendingSize = 0
     private var trackId: Int? = null
     private var firstTime: Long? = null
     private var previousTime = -1L
@@ -249,22 +252,21 @@ private class AacTrack(private val muxer: Mp4Muxer) : TrackOutput {
     }
 
     override fun sampleData(input: DataReader, length: Int, allowEndOfInput: Boolean, sampleDataPart: Int): Int {
-        val bytes = ByteArray(length)
-        val count = input.read(bytes, 0, length)
+        ensureCapacity(pendingSize + length)
+        val count = input.read(pending, pendingSize, length)
         if (count == C.RESULT_END_OF_INPUT && !allowEndOfInput) throw java.io.EOFException()
-        if (count > 0) pending.write(bytes, 0, count)
+        if (count > 0) pendingSize += count
         return count
     }
 
     override fun sampleData(data: ParsableByteArray, length: Int, sampleDataPart: Int) {
-        val bytes = ByteArray(length)
-        data.readBytes(bytes, 0, length)
-        pending.write(bytes)
+        ensureCapacity(pendingSize + length)
+        data.readBytes(pending, pendingSize, length)
+        pendingSize += length
     }
 
     override fun sampleMetadata(timeUs: Long, flags: Int, size: Int, offset: Int, cryptoData: TrackOutput.CryptoData?) {
-        val bytes = pending.toByteArray()
-        val start = bytes.size - offset - size
+        val start = pendingSize - offset - size
         if (start < 0 || size <= 0 || cryptoData != null) {
             throw UserFacingException(TextRef.Res(R.string.ja_error_hls_sample_read))
         }
@@ -273,10 +275,22 @@ private class AacTrack(private val muxer: Mp4Muxer) : TrackOutput {
         if (time <= previousTime) {
             throw UserFacingException(TextRef.Res(R.string.ja_error_hls_discontinuous))
         }
-        val data = ByteBuffer.wrap(bytes, start, size).slice()
+        val data = ByteBuffer.wrap(pending, start, size).slice()
         muxer.writeSampleData(requireNotNull(trackId), data, BufferInfo(time, size, flags))
         previousTime = time
-        pending.reset()
-        if (offset > 0) pending.write(bytes, bytes.size - offset, offset)
+        // 末尾多余的 offset 字节属于下一帧；先搬回缓冲头部再继续累积。
+        if (offset > 0) System.arraycopy(pending, start + size, pending, 0, offset)
+        pendingSize = offset
+    }
+
+    private fun ensureCapacity(required: Int) {
+        if (required <= pending.size) return
+        var size = pending.size
+        while (size < required) size = if (size > Int.MAX_VALUE / 2) required else size shl 1
+        pending = pending.copyOf(size)
+    }
+
+    private companion object {
+        const val INITIAL_SAMPLE_BUFFER = 64 * 1024
     }
 }

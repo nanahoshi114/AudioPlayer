@@ -80,7 +80,12 @@
     <string name="player_regenerate_subtitle">重新生成字幕</string>
     <string name="player_clear_subtitle_binding">解除字幕关联</string>
     <string name="player_delete_generated_subtitle">删除生成字幕</string>
+    <string name="player_delete_chinese_subtitle">删除中文字幕</string>
+    <string name="player_delete_original_subtitle">删除原文字幕</string>
     <string name="player_delete_generated_subtitle_confirm">删除这首的生成字幕文件？不会影响曲目的手动字幕关联，之后仍可重新生成。</string>
+    <string name="player_delete_chinese_generated_confirm">删除这首的中文字幕？将保留原文字幕，之后仍可重新翻译。</string>
+    <string name="player_delete_chinese_overlay_confirm">删除这首的中文字幕？原字幕文件会保留，之后仍可重新翻译。</string>
+    <string name="player_delete_original_generated_confirm">删除这首的原文字幕？将仅保留中文字幕，如需原文可重新生成字幕。</string>
     <string name="subtitle_picker_title">选择字幕</string>
     <string name="subtitle_picker_library_required">未加入音频库的曲目暂不支持手动关联字幕，请先加入音频库后再设置。</string>
     <string name="subtitle_picker_auto">自动匹配</string>

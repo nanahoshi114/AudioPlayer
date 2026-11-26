@@ -28,10 +28,6 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -53,6 +49,7 @@ import com.nanahoshi.audioplayer.data.ThemeMode
 import com.nanahoshi.audioplayer.graph
 import com.nanahoshi.audioplayer.ui.components.AppTopBar
 import com.nanahoshi.audioplayer.ui.components.SectionHeader
+import com.nanahoshi.audioplayer.ui.components.SegmentedTabBar
 import com.nanahoshi.audioplayer.ui.theme.AccentPresets
 import com.nanahoshi.audioplayer.ui.theme.accentPreset
 
@@ -81,42 +78,33 @@ fun AppearanceScreen(
         AppTopBar(title = stringResource(R.string.appearance_title), onBack = onBack)
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
             SectionHeader(stringResource(R.string.appearance_theme_mode))
-            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-                val modes = ThemeMode.entries
-                modes.forEachIndexed { index, mode ->
-                    SegmentedButton(
-                        selected = appearance.themeMode == mode,
-                        onClick = { viewModel.setThemeMode(mode) },
-                        shape = SegmentedButtonDefaults.itemShape(index = index, count = modes.size),
-                    ) { Text(stringResource(mode.labelRes), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
-                }
-            }
+            SegmentedTabBar(
+                options = ThemeMode.entries,
+                selected = appearance.themeMode,
+                label = { stringResource(it.labelRes) },
+                onSelect = viewModel::setThemeMode,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            )
             SectionHeader(stringResource(R.string.appearance_theme_color))
-            Surface(
-                shape = MaterialTheme.shapes.large,
-                color = MaterialTheme.colorScheme.surfaceContainer,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-            ) {
-                Column {
-                    AccentRow(
-                        title = stringResource(R.string.appearance_system_accent),
-                        summary = stringResource(
-                            if (supportsSystemAccent) R.string.appearance_system_accent_supported
-                            else R.string.appearance_system_accent_unsupported,
-                        ),
-                        selected = appearance.accentMode == AccentMode.SYSTEM,
-                        enabled = supportsSystemAccent,
-                        onClick = viewModel::useSystemAccent,
-                    )
-                    HorizontalDivider()
-                    AccentRow(
-                        title = stringResource(R.string.appearance_cover_accent),
-                        summary = stringResource(R.string.appearance_cover_accent_summary),
-                        selected = appearance.accentMode == AccentMode.COVER,
-                        enabled = true,
-                        onClick = viewModel::useCoverAccent,
-                    )
-                }
+            SettingsGroup(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                AccentRow(
+                    title = stringResource(R.string.appearance_system_accent),
+                    summary = stringResource(
+                        if (supportsSystemAccent) R.string.appearance_system_accent_supported
+                        else R.string.appearance_system_accent_unsupported,
+                    ),
+                    selected = appearance.accentMode == AccentMode.SYSTEM,
+                    enabled = supportsSystemAccent,
+                    onClick = viewModel::useSystemAccent,
+                )
+                HorizontalDivider()
+                AccentRow(
+                    title = stringResource(R.string.appearance_cover_accent),
+                    summary = stringResource(R.string.appearance_cover_accent_summary),
+                    selected = appearance.accentMode == AccentMode.COVER,
+                    enabled = true,
+                    onClick = viewModel::useCoverAccent,
+                )
             }
             Text(
                 stringResource(R.string.appearance_custom_color),

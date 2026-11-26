@@ -1,8 +1,19 @@
 package com.nanahoshi.audioplayer.bilibili
 
 import com.nanahoshi.audioplayer.R
+import com.nanahoshi.audioplayer.data.BiliSessionSnapshot
 import com.nanahoshi.audioplayer.data.CredentialStore
+import com.nanahoshi.audioplayer.data.jsonArray
+import com.nanahoshi.audioplayer.data.jsonBool
+import com.nanahoshi.audioplayer.data.jsonInt
+import com.nanahoshi.audioplayer.data.jsonLong
+import com.nanahoshi.audioplayer.data.jsonObject
+import com.nanahoshi.audioplayer.data.jsonObjects
+import com.nanahoshi.audioplayer.data.jsonString
+import com.nanahoshi.audioplayer.data.jsonStringOrEmpty
+import com.nanahoshi.audioplayer.data.parseJsonObjectOrNull
 import com.nanahoshi.audioplayer.data.toHttps
+import com.nanahoshi.audioplayer.data.toHex
 import com.nanahoshi.audioplayer.data.withResponse
 import com.nanahoshi.audioplayer.text.TextRef
 import com.nanahoshi.audioplayer.text.UserFacingError
@@ -13,15 +24,14 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 import android.util.Log
 import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import org.json.JSONArray
-import org.json.JSONObject
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
@@ -30,8 +40,6 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 import java.util.concurrent.TimeUnit
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
 
 @Serializable
 data class BiliPart(
@@ -105,8 +113,9 @@ data class BiliAudio(
 
 class BilibiliClient(
     private val credentials: CredentialStore,
+    client: OkHttpClient? = null,
 ) {
-    private val http = OkHttpClient.Builder()
+    private val http = (client ?: com.nanahoshi.audioplayer.data.HttpRoots.shared).newBuilder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
         .followRedirects(false)
@@ -123,11 +132,7 @@ class BilibiliClient(
     @Volatile private var mixinFetchedAt: Long = 0
     private val sessionRefreshLock = kotlinx.coroutines.sync.Mutex()
     private val searchApi = BiliSearchApi { path, params, referer, refresh ->
-        val signed = WbiSigner.sign(params, mixin(refresh))
-        val url = "https://api.bilibili.com$path".toHttpUrl().newBuilder().apply {
-            signed.forEach { (key, value) -> addQueryParameter(key, value) }
-        }.build()
-        browseGet(url.toString(), referer)
+        browseGet(wbiUrl(path, params, refresh), referer)
     }
 
     val videoCollections = BiliVideoCollectionCache()
@@ -144,32 +149,20 @@ class BilibiliClient(
     /** 浏览请求可以随查询取消；不把服务端正文或带参数的网址放进异常。 */
     private suspend fun browseGet(url: String, referer: String): String = withContext(Dispatchers.IO) {
         prepareIdentity()
-        val request = Request.Builder().url(url).header("User-Agent", USER_AGENT)
-            .header("Referer", referer).header("Origin", originOf(referer))
-            .header("Accept", "application/json, text/plain, */*")
-            .apply { credentials.cookieHeader().takeIf { it.isNotBlank() }?.let { header("Cookie", it) } }.build()
-        suspendCancellableCoroutine { continuation ->
-            val call = http.newCall(request)
-            continuation.invokeOnCancellation { call.cancel() }
-            call.enqueue(object : okhttp3.Callback {
-                override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
-                    if (continuation.isActive) continuation.resumeWithException(BilibiliException(0, TextRef.Res(R.string.bilibili_error_connection)))
-                }
-                override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
-                    try {
-                        val raw = response.use {
-                            if (!it.isSuccessful) throw BilibiliException(it.code, biliSearchError(it.code))
-                            val body = it.body?.string().orEmpty()
-                            if (body.trimStart().startsWith('<')) throw BilibiliException(-412, biliSearchError(-412))
-                            body
-                        }
-                        if (continuation.isActive) continuation.resume(raw)
-                    } catch (error: Exception) {
-                        if (continuation.isActive) continuation.resumeWithException(
-                            if (error is BilibiliException) error else BilibiliException(0, TextRef.Res(R.string.bilibili_error_read_failed)))
-                    }
-                }
-            })
+        val request = buildRequest(Request.Builder().url(url).get(), referer, guestOnly = false)
+        try {
+            http.newCall(request).withResponse { response ->
+                if (!response.isSuccessful) throw BilibiliException(response.code, biliSearchError(response.code))
+                val body = response.body?.string().orEmpty()
+                if (body.trimStart().startsWith('<')) throw BilibiliException(-412, biliSearchError(-412))
+                body
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: BilibiliException) {
+            throw error
+        } catch (_: java.io.IOException) {
+            throw BilibiliException(0, TextRef.Res(R.string.bilibili_error_connection))
         }
     }
 
@@ -282,22 +275,22 @@ class BilibiliClient(
     private suspend fun fetchSubtitle(bvid: String, cid: Long): BiliSubtitle {
         return try {
             val root = playerInfo(bvid, cid)
-            val code = root.optInt("code")
+            val code = root.jsonInt("code") ?: 0
             if (code != 0) {
                 Log.w(TAG, "subtitle skipped code=$code bvid=$bvid cid=$cid")
                 BiliSubtitle.Failed
             } else {
-                val data = root.optJSONObject("data") ?: return BiliSubtitle.Failed
-                val returnedBvid = data.optString("bvid").orEmpty()
-                val returnedCid = data.optLong("cid")
+                val data = root.jsonObject("data") ?: return BiliSubtitle.Failed
+                val returnedBvid = data.jsonStringOrEmpty("bvid")
+                val returnedCid = data.jsonLong("cid") ?: 0L
                 if ((returnedBvid.isNotBlank() && returnedBvid != bvid) || (returnedCid != 0L && returnedCid != cid)) {
                     Log.w(TAG, "subtitle skipped mismatched bvid=$returnedBvid cid=$returnedCid")
                     return BiliSubtitle.Failed
                 }
-                val list = data.optJSONObject("subtitle")?.optJSONArray("subtitles")
-                val count = list?.length() ?: 0
-                val needLogin = data.optBoolean("need_login_subtitle")
-                val loginMid = data.optLong("login_mid")
+                val list = data.jsonObject("subtitle")?.jsonArray("subtitles")
+                val count = list?.size ?: 0
+                val needLogin = data.jsonBool("need_login_subtitle") ?: false
+                val loginMid = data.jsonLong("login_mid") ?: 0L
                 if (count == 0) {
                     Log.w(TAG, "subtitle empty bvid=$bvid cid=$cid needLogin=$needLogin loginMid=$loginMid")
                     return if (biliNeedsLogin(!credentials.cookie().isNullOrBlank(), loginMid)) {
@@ -314,7 +307,7 @@ class BilibiliClient(
                 // 字幕正文在 CDN 上，不需要登录态，不带 SESSDATA。
                 val document = get(selected.first, referer = "https://www.bilibili.com/video/$bvid", guestOnly = true)
                 val body = try {
-                    JSONObject(document).optJSONArray("body")?.length() ?: 0
+                    parseJsonObjectOrNull(document)?.jsonArray("body")?.size ?: 0
                 } catch (_: Exception) {
                     0
                 }
@@ -329,48 +322,37 @@ class BilibiliClient(
         }
     }
 
-    private suspend fun playerInfo(bvid: String, cid: Long): JSONObject {
-        var root = requestPlayerInfo(bvid, cid, refreshKey = false)
-        val code = root.optInt("code")
-        if (code == -403 || code == -400 || code == -412) {
-            root = requestPlayerInfo(bvid, cid, refreshKey = true)
+    private suspend fun playerInfo(bvid: String, cid: Long): JsonObject {
+        val first = try {
+            requestPlayerInfo(bvid, cid, refreshKey = false)
+        } catch (error: BilibiliException) {
+            if (error.code !in RETRYABLE_WBI_CODES) throw error
+            null
         }
-        return root
+        if (first != null && (first.jsonInt("code") ?: 0) !in RETRYABLE_WBI_CODES) return first
+        return requestPlayerInfo(bvid, cid, refreshKey = true)
     }
 
-    private suspend fun requestPlayerInfo(bvid: String, cid: Long, refreshKey: Boolean): JSONObject {
-        val signed = WbiSigner.sign(
-            mapOf(
-                "bvid" to bvid,
-                "cid" to cid.toString(),
-            ),
-            mixin(refreshKey),
+    private suspend fun requestPlayerInfo(bvid: String, cid: Long, refreshKey: Boolean): JsonObject {
+        val url = wbiUrl(
+            "/x/player/wbi/v2",
+            mapOf("bvid" to bvid, "cid" to cid.toString()),
+            refreshKey,
         )
-        val url = "https://api.bilibili.com/x/player/wbi/v2".toHttpUrl().newBuilder().apply {
-            signed.forEach { (key, value) -> addQueryParameter(key, value) }
-        }.build()
-        return JSONObject(get(url.toString(), referer = "https://www.bilibili.com/video/$bvid"))
+        return parseJsonObjectOrNull(browseGet(url, "https://www.bilibili.com/video/$bvid"))
+            ?: throw BilibiliException(-1, TextRef.Res(R.string.bilibili_error_read_failed))
     }
 
-    private fun pickSubtitle(list: JSONArray?): Pair<String, String?>? {
-        if (list == null || list.length() == 0) return null
+    private fun pickSubtitle(list: JsonArray?): Pair<String, String?>? {
         var chosen: Pair<String, String?>? = null
         var chosenRank = Int.MAX_VALUE
-        for (index in 0 until list.length()) {
-            val item = list.optJSONObject(index) ?: continue
-            val url = item.optString("subtitle_url").let { raw ->
-                when {
-                    raw.startsWith("//") -> "https:$raw"
-                    raw.startsWith("http://") -> raw.replaceFirst("http://", "https://")
-                    raw.startsWith("https://") -> raw
-                    else -> ""
-                }
-            }
+        for (item in list.jsonObjects()) {
+            val url = item.jsonStringOrEmpty("subtitle_url").toHttps().takeIf { it.startsWith("https://") }.orEmpty()
             if (url.isBlank()) continue
-            val rank = subtitleLanguageRank(item.optString("lan"))
+            val rank = subtitleLanguageRank(item.jsonStringOrEmpty("lan"))
             if (rank < chosenRank) {
                 chosenRank = rank
-                chosen = url to item.optString("lan").takeIf { it.isNotBlank() }
+                chosen = url to item.jsonStringOrEmpty("lan").takeIf { it.isNotBlank() }
             }
         }
         return chosen
@@ -423,7 +405,7 @@ class BilibiliClient(
         return try {
             requestAudio(bvid, cid, refreshKey = false)
         } catch (error: BilibiliException) {
-            if (error.code == -403 || error.code == -400 || error.code == -412) {
+            if (error.code in RETRYABLE_WBI_CODES) {
                 credentials.clearTicket()
                 requestAudio(bvid, cid, refreshKey = true)
             } else {
@@ -433,7 +415,8 @@ class BilibiliClient(
     }
 
     private suspend fun requestAudio(bvid: String, cid: Long, refreshKey: Boolean): BiliAudio {
-        val signed = WbiSigner.sign(
+        val url = wbiUrl(
+            "/x/player/wbi/playurl",
             mapOf(
                 "bvid" to bvid,
                 "cid" to cid.toString(),
@@ -443,12 +426,9 @@ class BilibiliClient(
                 "fourk" to "1",
                 "platform" to "pc",
             ),
-            mixin(refreshKey),
+            refreshKey,
         )
-        val url = "https://api.bilibili.com/x/player/wbi/playurl".toHttpUrl().newBuilder().apply {
-            signed.forEach { (key, value) -> addQueryParameter(key, value) }
-        }.build()
-        val body = get(url.toString(), referer = "https://www.bilibili.com/video/$bvid")
+        val body = browseGet(url, "https://www.bilibili.com/video/$bvid")
         val response = json.decodeFromString<ApiResponse<PlayData>>(body)
         val data = response.data
         if (response.code != 0 || data == null) {
@@ -512,6 +492,14 @@ class BilibiliClient(
             http.newCall(request).withResponse { readExchange(it, allowHtml = false).body }
         }
 
+    /** 所有 WBI 端点共用同一套签名与查询参数拼装。 */
+    private suspend fun wbiUrl(path: String, params: Map<String, String>, refreshKey: Boolean): String {
+        val signed = WbiSigner.sign(params, mixin(refreshKey))
+        return "https://api.bilibili.com$path".toHttpUrl().newBuilder().apply {
+            signed.forEach { (key, value) -> addQueryParameter(key, value) }
+        }.build().toString()
+    }
+
     private suspend fun prepareIdentity() {
         if (credentials.needsSpiBuvid()) {
             try {
@@ -544,49 +532,69 @@ class BilibiliClient(
         maybeRefreshSession()
     }
 
-    private suspend fun maybeRefreshSession() {
-        if (!credentials.hasBiliRefresh() || !credentials.biliRefreshDue()) return
+    internal suspend fun maybeRefreshSession() {
+        val pendingRevoke = credentials.pendingBiliRevokeToken() != null
+        val refreshDue = credentials.hasBiliRefresh() && credentials.biliRefreshDue()
+        if (!pendingRevoke && !refreshDue) return
         sessionRefreshLock.withLock {
-            val token = credentials.biliRefreshToken() ?: return
-            if (!credentials.biliRefreshDue()) return
+            confirmPendingRevocation()
+            if (!credentials.hasBiliRefresh() || !credentials.biliRefreshDue()) return
+            val snapshot = credentials.biliSessionSnapshot()
+            val token = snapshot.refreshToken.takeIf { it.isNotBlank() } ?: return
             val info = try {
-                val csrf = cookieField(credentials.cookie().orEmpty(), "bili_jct").orEmpty()
+                val csrf = cookieField(snapshot.cookie, "bili_jct").orEmpty()
                 val url = "https://passport.bilibili.com/x/passport-login/web/cookie/info".toHttpUrl()
                     .newBuilder()
                     .apply { if (csrf.isNotBlank()) addQueryParameter("csrf", csrf) }
                     .build()
-                val body = execute(Request.Builder().url(url).get(), "https://www.bilibili.com")
+                val body = execute(
+                    Request.Builder().url(url).get(),
+                    "https://www.bilibili.com",
+                    cookieOverride = snapshot.cookie,
+                )
                 json.decodeFromString<ApiResponse<CookieInfoData>>(body)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
                 Log.w(TAG, "session check skipped: ${error.javaClass.simpleName}")
-                credentials.markBiliRefreshFailed()
+                credentials.markBiliRefreshFailed(snapshot.generation)
                 return
             }
+            val checkedOk = info.code == 0 && info.data?.refresh == false
             val needsRefresh = info.code == -101 || info.data?.refresh == true
             try {
-                if (!needsRefresh || refreshSession(token, info.data?.timestamp ?: 0L)) {
-                    credentials.markBiliRefreshChecked()
-                } else {
-                    credentials.markBiliRefreshFailed()
+                when {
+                    checkedOk -> credentials.markBiliRefreshChecked(snapshot.generation)
+                    needsRefresh -> {
+                        if (refreshSession(snapshot, info.data?.timestamp ?: 0L)) {
+                            credentials.markBiliRefreshChecked(snapshot.generation)
+                        } else {
+                            credentials.markBiliRefreshFailed(snapshot.generation)
+                        }
+                    }
+                    else -> {
+                        Log.w(TAG, "session check rejected code=${info.code}")
+                        credentials.markBiliRefreshFailed(snapshot.generation)
+                    }
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
                 Log.w(TAG, "session refresh skipped: ${error.javaClass.simpleName}")
-                credentials.markBiliRefreshFailed()
+                credentials.markBiliRefreshFailed(snapshot.generation)
             }
         }
     }
 
-    private suspend fun refreshSession(oldToken: String, timestamp: Long): Boolean {
-        val csrf = cookieField(credentials.cookie().orEmpty(), "bili_jct") ?: return false
+    private suspend fun refreshSession(snapshot: BiliSessionSnapshot, timestamp: Long): Boolean {
+        val oldToken = snapshot.refreshToken
+        val csrf = cookieField(snapshot.cookie, "bili_jct") ?: return false
         val stamp = timestamp.takeIf { it > 0L } ?: System.currentTimeMillis()
         val page = exchange(
             Request.Builder().url("https://www.bilibili.com/correspond/1/${correspondPath(stamp)}").get(),
             "https://www.bilibili.com",
             allowHtml = true,
+            cookieOverride = snapshot.cookie,
         )
         val refreshCsrf = refreshCsrf(page.body) ?: return false
         val refreshed = exchange(
@@ -601,34 +609,54 @@ class BilibiliClient(
                         .build(),
                 ),
             "https://www.bilibili.com",
+            cookieOverride = snapshot.cookie,
         )
         val response = json.decodeFromString<ApiResponse<RefreshTokenData>>(refreshed.body)
         val newToken = response.data?.refreshToken.orEmpty()
         val newCookie = combineSessionCookies(
             sessionCookiesFromSetCookie(refreshed.setCookies),
-            credentials.cookie().orEmpty(),
+            snapshot.cookie,
         )
         if (response.code != 0 || newToken.isBlank() || cookieField(newCookie, "SESSDATA") == null) {
             Log.w(TAG, "session refresh rejected code=${response.code}")
             return false
         }
-        credentials.saveBiliSession(newCookie, newToken)
-        // 新会话已保存即视为续期成功；作废旧 token 只是尽力而为。
-        val newCsrf = cookieField(newCookie, "bili_jct") ?: return true
-        val confirmed = execute(
-            Request.Builder()
-                .url("https://passport.bilibili.com/x/passport-login/web/confirm/refresh")
-                .post(
-                    FormBody.Builder()
-                        .add("csrf", newCsrf)
-                        .add("refresh_token", oldToken)
-                        .build(),
-                ),
-            "https://www.bilibili.com",
-        )
-        val confirmCode = JSONObject(confirmed).optInt("code", -1)
-        if (confirmCode != 0) Log.w(TAG, "session confirm code=$confirmCode")
+        if (!credentials.commitRefreshedBiliSession(snapshot.generation, newCookie, newToken, oldToken)) {
+            return false
+        }
+        confirmPendingRevocation(expectedGeneration = snapshot.generation)
         return true
+    }
+
+    private suspend fun confirmPendingRevocation(expectedGeneration: Long? = null) {
+        val snapshot = credentials.biliSessionSnapshot()
+        if (expectedGeneration != null && snapshot.generation != expectedGeneration) return
+        val oldToken = snapshot.pendingRevokeToken ?: return
+        val csrf = cookieField(snapshot.cookie, "bili_jct") ?: return
+        try {
+            val confirmed = execute(
+                Request.Builder()
+                    .url("https://passport.bilibili.com/x/passport-login/web/confirm/refresh")
+                    .post(
+                        FormBody.Builder()
+                            .add("csrf", csrf)
+                            .add("refresh_token", oldToken)
+                            .build(),
+                    ),
+                "https://www.bilibili.com",
+                cookieOverride = snapshot.cookie,
+            )
+            val confirmCode = parseJsonObjectOrNull(confirmed)?.jsonInt("code") ?: -1
+            if (confirmCode == 0) {
+                credentials.clearPendingBiliRevocation(snapshot.generation, oldToken)
+            } else {
+                Log.w(TAG, "session confirm code=$confirmCode")
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            Log.w(TAG, "session confirm skipped: ${error.javaClass.simpleName}")
+        }
     }
 
     private suspend fun fetchTicket() {
@@ -660,8 +688,7 @@ class BilibiliClient(
     private fun hmacSha256(key: String, message: String): String {
         val mac = Mac.getInstance("HmacSHA256")
         mac.init(SecretKeySpec(key.toByteArray(Charsets.UTF_8), "HmacSHA256"))
-        return mac.doFinal(message.toByteArray(Charsets.UTF_8))
-            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        return mac.doFinal(message.toByteArray(Charsets.UTF_8)).toHex()
     }
 
     private suspend fun execute(
@@ -669,19 +696,30 @@ class BilibiliClient(
         referer: String,
         guestOnly: Boolean = false,
         allowHtml: Boolean = false,
-    ): String = exchange(builder, referer, guestOnly, allowHtml).body
+        cookieOverride: String? = null,
+    ): String = exchange(builder, referer, guestOnly, allowHtml, cookieOverride).body
 
     private suspend fun exchange(
         builder: Request.Builder,
         referer: String,
         guestOnly: Boolean = false,
         allowHtml: Boolean = false,
-    ): Exchange = http.newCall(buildRequest(builder, referer, guestOnly)).withResponse {
+        cookieOverride: String? = null,
+    ): Exchange = http.newCall(buildRequest(builder, referer, guestOnly, cookieOverride)).withResponse {
         readExchange(it, allowHtml)
     }
 
-    private fun buildRequest(builder: Request.Builder, referer: String, guestOnly: Boolean): Request {
-        val cookie = if (guestOnly) credentials.guestCookieHeader() else credentials.cookieHeader()
+    private fun buildRequest(
+        builder: Request.Builder,
+        referer: String,
+        guestOnly: Boolean,
+        cookieOverride: String? = null,
+    ): Request {
+        val cookie = when {
+            guestOnly -> credentials.guestCookieHeader()
+            cookieOverride != null -> credentials.cookieHeader(cookieOverride)
+            else -> credentials.cookieHeader()
+        }
         if (cookie.isNotBlank()) builder.header("Cookie", cookie)
         return builder
             .header("User-Agent", USER_AGENT)
@@ -718,6 +756,7 @@ class BilibiliClient(
         private const val TAG = "BilibiliClient"
         private val BV_REGEX = Regex("BV[0-9A-Za-z]{10}")
         private const val KEY_TTL_MS = 30 * 60 * 1000L
+        private val RETRYABLE_WBI_CODES = setOf(-403, -400, -412)
         private const val DEFAULT_TICKET_TTL_SEC = 259200L
         private const val PAGE_SIZE = 20
         private const val SUBTITLE_RETRY_DELAY_MS = 500L
@@ -749,7 +788,6 @@ private data class ApiResponse<T>(
 
 @Serializable
 private data class NavData(
-    @SerialName("isLogin") val isLogin: Boolean = false,
     val mid: Long = 0,
     @SerialName("wbi_img") val wbiImg: WbiImg? = null,
 )

@@ -51,4 +51,12 @@ class PlaybackSeekTest {
         assertEquals(10_000L, playbackSeekPosition(0.25f, 40_000L))
         assertEquals(40_000L, playbackSeekPosition(1.5f, 40_000L))
     }
+
+    @Test
+    fun parsesUnsatisfiedContentRangeTotal() {
+        assertEquals(12345L, parseUnsatisfiedContentRangeTotal("bytes */12345"))
+        assertEquals(0L, parseUnsatisfiedContentRangeTotal("Bytes */0"))
+        assertNull(parseUnsatisfiedContentRangeTotal("bytes 0-9/10"))
+        assertNull(parseUnsatisfiedContentRangeTotal(null))
+    }
 }

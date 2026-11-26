@@ -127,6 +127,8 @@
     <string name="bilibili_no_parts">这个视频没有可播放的分 P</string>
     <string name="bilibili_part_read_failed_short">分 P 读取失败</string>
     <string name="bilibili_choose_import_mode">请先选择导入方式</string>
+    <string name="bilibili_import_mode_changed">这个视频的导入方式已经改变，请重新导入并确认。</string>
+    <string name="bilibili_import_group_not_empty">这个分组里还有其他视频，无法直接更改导入方式</string>
     <string name="bilibili_reading_collections">正在读取合集…</string>
     <string name="bilibili_collection_summary">%1$s · %2$d 个视频</string>
     <string name="bilibili_error_uploader_hint">请输入昵称、UID 或主页链接</string>
@@ -187,4 +189,6 @@
     <string name="bilibili_collection_empty_series">这个系列暂时没有视频</string>
     <string name="bilibili_collection_empty_online">这个在线列表暂时没有视频</string>
     <string name="bilibili_refresh_catalogue">刷新目录</string>
+    <string name="bilibili_parts_duration_summary">%1$d P · %2$s</string>
+    <string name="a11y_search_uploader">搜索 UP 主：%1$s</string>
 </resources>

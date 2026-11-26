@@ -3,6 +3,17 @@ package com.nanahoshi.audioplayer.dlsite
 import com.nanahoshi.audioplayer.data.RemoteTextPreview
 import com.nanahoshi.audioplayer.data.ExternalFileDownloader
 import com.nanahoshi.audioplayer.R
+import com.nanahoshi.audioplayer.data.jsonArray
+import com.nanahoshi.audioplayer.data.jsonBool
+import com.nanahoshi.audioplayer.data.jsonDouble
+import com.nanahoshi.audioplayer.data.jsonInt
+import com.nanahoshi.audioplayer.data.jsonObject
+import com.nanahoshi.audioplayer.data.jsonObjects
+import com.nanahoshi.audioplayer.data.jsonString
+import com.nanahoshi.audioplayer.data.jsonStringOrEmpty
+import com.nanahoshi.audioplayer.data.jsonTextOrNull
+import com.nanahoshi.audioplayer.data.parseJsonArrayOrNull
+import com.nanahoshi.audioplayer.data.parseJsonObjectOrNull
 import com.nanahoshi.audioplayer.data.withResponse
 
 import com.nanahoshi.audioplayer.asmr.WorkFacts
@@ -25,8 +36,12 @@ import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
-import org.json.JSONObject
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import org.jsoup.Jsoup
+import org.jsoup.nodes.Element
 import java.io.IOException
 import java.net.URLEncoder
 import com.nanahoshi.audioplayer.text.TextRef
@@ -40,9 +55,7 @@ class DlsiteException(
     internal val statusCode: Int? = null,
     internal val kind: DlsiteFailureKind = if (statusCode == 401) DlsiteFailureKind.AUTH else DlsiteFailureKind.OTHER,
     cause: Throwable? = null,
-) : Exception(userText.debugString(), cause), UserFacingError {
-    constructor(message: String, statusCode: Int? = null) : this(TextRef.Raw(message), statusCode)
-}
+) : Exception(userText.debugString(), cause), UserFacingError
 
 data class DlsiteHit(
     val workno: String,
@@ -95,8 +108,11 @@ data class DlsitePurchase(
     val release: String,
 )
 
-class DlsiteClient(private val credentials: CredentialStore) {
-    private val client = OkHttpClient.Builder()
+class DlsiteClient(
+    private val credentials: CredentialStore,
+    root: OkHttpClient = com.nanahoshi.audioplayer.data.HttpRoots.shared,
+) {
+    private val client = root.newBuilder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .followRedirects(true)
@@ -132,9 +148,10 @@ class DlsiteClient(private val credentials: CredentialStore) {
         parts += "page" to page.toString()
         val path = parts.joinToString("/") { (key, value) -> "$key/${encode(value)}" }
         val body = get("https://www.dlsite.com/maniax/fsr/ajax/=/$path", STORE_REFERER, acceptJson = true)
-        val root = JSONObject(body)
-        val html = root.optString("search_result")
-        val total = root.optJSONObject("page_info")?.optInt("count") ?: 0
+        val root = parseJsonObjectOrNull(body)
+            ?: throw DlsiteException(TextRef.Res(R.string.dlsite_error_connection))
+        val html = root.jsonStringOrEmpty("search_result")
+        val total = root.jsonObject("page_info")?.jsonInt("count") ?: 0
         val parsed = parseHits(html)
         val works = fillFromProducts(parsed.works)
         DlsitePage(works, total, parsed.fetched)
@@ -163,22 +180,24 @@ class DlsiteClient(private val credentials: CredentialStore) {
         }
     }
 
-    private suspend fun productCards(worknos: List<String>): List<DlsiteHit> = coroutineScope {
-        val ids = worknos.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
-        ids.map { id ->
-            async {
-                try {
-                    resolveCard(id)
-                } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                    throw cancelled
-                } catch (_: Exception) {
-                    null
-                }
-            }
-        }.awaitAll().filterNotNull()
+    /**
+     * 先用一次 `product.json` 批量请求补齐整页作品，只对批次里缺失的编号
+     * 逐个回退到候选编号与作品页，避免把可批量的查询拆成整页阻塞扇出。
+     */
+    private suspend fun productCards(worknos: List<String>): List<DlsiteHit> = withContext(Dispatchers.IO) {
+        resolveProductCards(
+            worknos = worknos,
+            fetchBatch = { ids -> loadProductCards(ids) },
+            fetchSingle = { id -> resolveCard(id) },
+            // 批量结果只有明确标注类型或字段可读时才采用；其余仍走候选编号与作品页，
+            // 与单 ID 解析的判定保持一致。
+            acceptBatchHit = { hit ->
+                (hit.workType.isNotBlank() && hit.workType != "SOU") || readable(hit)
+            },
+        )
     }
 
-    private fun resolveCard(workno: String): DlsiteHit? {
+    private suspend fun resolveCard(workno: String): DlsiteHit? {
         var blank: DlsiteHit? = null
         for (id in worknoCandidates(workno)) {
             val hit = try {
@@ -200,7 +219,7 @@ class DlsiteClient(private val credentials: CredentialStore) {
         return !titleIsId || hit.circle.isNotBlank()
     }
 
-    private fun pageCard(workno: String): DlsiteHit? {
+    private suspend fun pageCard(workno: String): DlsiteHit? {
         for (id in worknoCandidates(workno)) {
             val html = workHtml("maniax", id)
             if (html.isBlank()) continue
@@ -218,7 +237,7 @@ class DlsiteClient(private val credentials: CredentialStore) {
         return null
     }
 
-    private fun loadProductCards(worknos: List<String>): List<DlsiteHit> {
+    private suspend fun loadProductCards(worknos: List<String>): List<DlsiteHit> {
         val joined = worknos.joinToString(",") { encode(it) }
         val body = get(
             "https://www.dlsite.com/maniax/api/=/product.json?workno=$joined&locale=zh_CN",
@@ -296,24 +315,19 @@ class DlsiteClient(private val credentials: CredentialStore) {
 
     suspend fun purchases(): List<DlsitePurchase> = withContext(Dispatchers.IO) {
         if (!hasSession()) return@withContext emptyList()
-        val count = JSONObject(playGet("https://play.dlsite.com/api/v3/content/count?last=0"))
-        if (count.optInt("user") < 1) return@withContext emptyList()
-        val sales = JSONArray(playGet("https://play.dlsite.com/api/v3/content/sales?last=0"))
-        val order = buildList {
-            for (index in 0 until sales.length()) {
-                val workno = sales.optJSONObject(index)?.optString("workno").orEmpty()
-                if (workno.isNotBlank()) add(workno)
-            }
-        }
+        val count = parseJsonObjectOrNull(playGet("https://play.dlsite.com/api/v3/content/count?last=0"))
+            ?: throw DlsiteException(TextRef.Res(R.string.dlsite_error_connection))
+        if ((count.jsonInt("user") ?: 0) < 1) return@withContext emptyList()
+        val sales = parseJsonArrayOrNull(playGet("https://play.dlsite.com/api/v3/content/sales?last=0"))
+            ?: throw DlsiteException(TextRef.Res(R.string.dlsite_error_connection))
+        val order = sales.jsonObjects().mapNotNull { it.jsonString("workno")?.takeIf(String::isNotBlank) }
         owned = order.map(::canonicalWorkno).toSet()
         buildList {
             order.chunked(100).forEach { batch ->
-                val body = JSONArray(batch).toString()
-                val root = JSONObject(playPost("https://play.dlsite.com/api/v3/content/works", body))
-                val works = root.optJSONArray("works") ?: return@forEach
-                for (index in 0 until works.length()) {
-                    parsePurchase(works.optJSONObject(index))?.let { add(it) }
-                }
+                val body = JsonArray(batch.map { JsonPrimitive(it) }).toString()
+                val root = parseJsonObjectOrNull(playPost("https://play.dlsite.com/api/v3/content/works", body))
+                    ?: return@forEach
+                root.jsonObjects("works").forEach { parsePurchase(it)?.let { purchase -> add(purchase) } }
             }
         }
     }
@@ -340,25 +354,18 @@ class DlsiteClient(private val credentials: CredentialStore) {
         withContext(Dispatchers.IO) {
             val workno = worknoOf(input)
             val token = sign(workno)
-            val tree = JSONObject(
+            val tree = parseJsonObjectOrNull(
                 get(
                     token.url + "ziptree.json",
                     PLAY_REFERER,
                     acceptJson = false,
                     cookieOverride = token.cookie,
                 ),
-            )
-            val files = tree.optJSONObject("playfile") ?: JSONObject()
-            val nodes = tree.optJSONArray("tree") ?: JSONArray()
-            buildList {
-                for (index in 0 until nodes.length()) {
-                    parsePlayNode(nodes.optJSONObject(index), files, token.url, workno, artist, coverUrl)?.let { add(it) }
-                }
-            }
+            ) ?: throw DlsiteException(TextRef.Res(R.string.dlsite_error_connection))
+            val files = tree.jsonObject("playfile") ?: JsonObject(emptyMap())
+            val nodes = tree.jsonArray("tree") ?: JsonArray(emptyList())
+            nodes.jsonObjects().mapNotNull { parsePlayNode(it, files, token.url, workno, artist, coverUrl) }
         }
-
-    fun fileUrlBlocking(workno: String, optimizedName: String): String =
-        signedPlayFileBlocking(workno, optimizedName).url
 
     fun signedPlayFileBlocking(workno: String, optimizedName: String): SignedPlayFile {
         return kotlinx.coroutines.runBlocking { signedPlayFile(workno, optimizedName) }
@@ -377,21 +384,24 @@ class DlsiteClient(private val credentials: CredentialStore) {
     internal suspend fun readText(preview: RemotePreview, limit: Int = TEXT_LIMIT): RemoteTextPreview =
         withContext(Dispatchers.IO) { externalFiles.readText(preview, limit) }
 
+    internal suspend fun readFullText(
+        preview: RemotePreview,
+        maxBytes: Int = com.nanahoshi.audioplayer.data.MAX_SUBTITLE_TEXT_BYTES,
+    ): String = withContext(Dispatchers.IO) { externalFiles.readFullText(preview, maxBytes) }
+
     fun cookieHeader(): String? {
         val cookie = credentials.dlsiteCookie() ?: return null
         val merged = mergeDlsiteCookies(cookie)
         return if (merged.isBlank()) null else withAdult(merged)
     }
 
-    private fun salesIds(): Set<String> {
+    private suspend fun salesIds(): Set<String> {
         owned?.let { return it }
-        val sales = JSONArray(playGet("https://play.dlsite.com/api/v3/content/sales?last=0"))
-        val ids = buildSet {
-            for (index in 0 until sales.length()) {
-                val workno = sales.optJSONObject(index)?.optString("workno").orEmpty()
-                if (workno.isNotBlank()) add(canonicalWorkno(workno))
-            }
-        }
+        val sales = parseJsonArrayOrNull(playGet("https://play.dlsite.com/api/v3/content/sales?last=0"))
+            ?: throw DlsiteException(TextRef.Res(R.string.dlsite_error_connection))
+        val ids = sales.jsonObjects()
+            .mapNotNull { it.jsonString("workno")?.takeIf(String::isNotBlank) }
+            .mapTo(mutableSetOf(), ::canonicalWorkno)
         owned = ids
         return ids
     }
@@ -420,15 +430,16 @@ class DlsiteClient(private val credentials: CredentialStore) {
             val body = response.body?.string().orEmpty()
             if (response.code == 401) throw DlsiteException(TextRef.Res(R.string.dlsite_error_login_expired), statusCode = 401)
             if (!response.isSuccessful) throw DlsiteException(TextRef.Res(R.string.dlsite_error_connection))
-            val root = JSONObject(body)
-            val signedUrl = root.optString("url").toHttpUrlOrNull()
+            val root = parseJsonObjectOrNull(body)
+                ?: throw DlsiteException(TextRef.Res(R.string.dlsite_error_connection))
+            val signedUrl = root.jsonStringOrEmpty("url").toHttpUrlOrNull()
             if (signedUrl == null || signedUrl.scheme != "https" || signedUrl.port != 443 ||
                 signedUrl.username.isNotEmpty() || signedUrl.password.isNotEmpty() || !isTrustedDlsitePlayHost(signedUrl.host)
             ) throw DlsiteException(TextRef.Res(R.string.dlsite_error_no_play_url))
             val url = signedUrl.toString()
             val directory = if (url.endsWith("/")) url else "$url/"
             val extras = buildList {
-                add(cookiesOf(root.optJSONObject("cookies")))
+                add(cookiesOf(root.jsonObject("cookies")))
                 response.headers("Set-Cookie").forEach { add(it.substringBefore(';')) }
             }
             val cookie = playAccessCookie(cookieHeader(), extras)
@@ -437,44 +448,39 @@ class DlsiteClient(private val credentials: CredentialStore) {
         }
     }
 
-    private fun cookiesOf(obj: JSONObject?): String {
+    private fun cookiesOf(obj: JsonObject?): String {
         if (obj == null) return ""
-        return buildList {
-            val keys = obj.keys()
-            while (keys.hasNext()) {
-                val key = keys.next()
-                val value = obj.optString(key)
-                if (key.isNotBlank() && value.isNotBlank()) add("$key=$value")
-            }
+        return obj.entries.mapNotNull { (key, element) ->
+            val value = element.jsonTextOrNull().orEmpty()
+            if (key.isNotBlank() && value.isNotBlank()) "$key=$value" else null
         }.joinToString("; ")
     }
 
-    private fun product(workno: String): DlsiteShowcase? {
+    private suspend fun product(workno: String): DlsiteShowcase? {
         val body = get(
             "https://www.dlsite.com/maniax/api/=/product.json?workno=$workno&locale=zh_CN",
             STORE_REFERER,
             acceptJson = true,
         )
-        val array = JSONArray(body)
-        if (array.length() == 0) return null
-        val item = array.getJSONObject(0)
-        val makers = item.optJSONObject("creaters")
-        val gallery = sampleImages(item)
+        val array = parseJsonArrayOrNull(body)
+            ?: throw DlsiteException(TextRef.Res(R.string.dlsite_error_connection))
+        val item = array.firstOrNull() as? JsonObject ?: return null
+        val fields = productFields(item)
         return DlsiteShowcase(
-            workno = item.optString("workno").ifBlank { workno },
-            title = item.optString("work_name").ifBlank { workno },
-            circle = item.optString("maker_name"),
-            vas = makers?.names("voice_by").orEmpty(),
-            tags = item.names("genres"),
-            release = item.optString("regist_date").substringBefore(' '),
-            coverUrl = gallery.firstOrNull(),
-            siteId = item.optString("site_id").ifBlank { "maniax" },
-            gallery = gallery,
+            workno = fields.workno.ifBlank { workno },
+            title = fields.title.ifBlank { workno },
+            circle = fields.circle,
+            vas = fields.vas,
+            tags = fields.tags,
+            release = fields.release,
+            coverUrl = fields.gallery.firstOrNull(),
+            siteId = fields.siteId.ifBlank { "maniax" },
+            gallery = fields.gallery,
             trials = emptyList(),
         )
     }
 
-    private fun workHtml(site: String, workno: String): String {
+    private suspend fun workHtml(site: String, workno: String): String {
         val sites = listOf(site, "maniax", "home").distinct()
         for (name in sites) {
             val url = "https://www.dlsite.com/$name/work/=/product_id/$workno.html/?locale=zh_CN"
@@ -487,7 +493,7 @@ class DlsiteClient(private val credentials: CredentialStore) {
         return ""
     }
 
-    private fun chobitOf(workno: String, html: String, coverUrl: String?): List<RemotePlayable> {
+    private suspend fun chobitOf(workno: String, html: String, coverUrl: String?): List<RemotePlayable> {
         val embeds = (chobitEmbeds(workno) + CHOBIT_EMBED.findAll(html).map { it.value.toHttps() })
             .distinct()
             .take(4)
@@ -502,7 +508,7 @@ class DlsiteClient(private val credentials: CredentialStore) {
         }.toList()
     }
 
-    private fun chobitEmbeds(workno: String): List<String> {
+    private suspend fun chobitEmbeds(workno: String): List<String> {
         for (id in worknoCandidates(workno)) {
             val body = try {
                 get("https://chobit.cc/api/v1/dlsite/embed?workno=$id", "https://chobit.cc/",
@@ -520,9 +526,9 @@ class DlsiteClient(private val credentials: CredentialStore) {
         return emptyList()
     }
 
-    private fun playGet(url: String): String = get(url, PLAY_REFERER, acceptJson = true, authed = true)
+    private suspend fun playGet(url: String): String = get(url, PLAY_REFERER, acceptJson = true, authed = true)
 
-    private fun playPost(url: String, json: String): String {
+    private suspend fun playPost(url: String, json: String): String {
         val request = request(url, PLAY_REFERER, acceptJson = true, authed = true)
             .newBuilder()
             .post(json.toRequestBody(JSON_MEDIA))
@@ -530,7 +536,7 @@ class DlsiteClient(private val credentials: CredentialStore) {
         return execute(request)
     }
 
-    private fun get(
+    private suspend fun get(
         url: String,
         referer: String,
         acceptJson: Boolean,
@@ -559,14 +565,20 @@ class DlsiteClient(private val credentials: CredentialStore) {
         return builder.build()
     }
 
-    private fun execute(request: Request): String {
+    /**
+     * 商店与 Play 接口共用的正文读取：走 [withResponse] 以便协程取消时终止请求，
+     * 并保证响应体在成功、异常和取消路径上都关闭。
+     */
+    private suspend fun execute(request: Request): String {
         try {
-            client.newCall(request).execute().use { response ->
+            return client.newCall(request).withResponse { response ->
                 val body = response.body?.string().orEmpty()
                 if (response.code == 401) throw DlsiteException(TextRef.Res(R.string.dlsite_error_login_expired), response.code)
                 if (!response.isSuccessful) throw DlsiteException(TextRef.Res(R.string.dlsite_error_connection), response.code)
-                return body
+                body
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (error: DlsiteException) {
             throw error
         } catch (_: IOException) {
@@ -584,52 +596,26 @@ class DlsiteClient(private val credentials: CredentialStore) {
         private const val PAGE_SIZE = 20
         private const val TEXT_LIMIT = 512 * 1024
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
-        private val PRODUCT_ID = Regex("""data-(?:list_item_)?product_id="([^"]+)"""")
-        private val THUMB = Regex("""class="work_thumb[\s\S]*?(?:data-src|src)="([^"]+)"""")
         private val WORK_TYPE = Regex("""\btype_([A-Z]{2,4})\b""")
-        private val CLASS_NAME = { name: String -> Regex("""class="[^"]*\b$name\b[^"]*"""") }
-        private val ANCHOR = Regex("""<a\b([^>]*)>([\s\S]*?)</a>""")
-        private val TITLE_ATTR = Regex("""\btitle="([^"]*)"""")
         private val MEDIA = Regex("""(?i)(?:https?:)?//[^"'\\\s>]+\.(?:mp3|m4a|aac|wav|ogg)(?:\?[^"'\\\s]*)?""")
         private val CHOBIT_EMBED = Regex("""(?i)(?:https?:)?//chobit\.cc/embed/[0-9A-Za-z]+/[0-9A-Za-z]+""")
         private val AUDIO_EXT = setOf("mp3", "m4a", "aac", "wav", "ogg")
-        private val WORKNO = Regex("(?i)(?:RJ|VJ|BJ)\\d+")
 
-        fun worknoOf(input: String): String {
-            val match = WORKNO.find(input)
-            if (match != null) return match.value.uppercase()
-            val digits = input.filter { it.isDigit() }
-            if (digits.isNotEmpty()) return "RJ$digits"
-            throw DlsiteException(TextRef.Res(R.string.dlsite_error_work_id_missing))
-        }
+        fun worknoOf(input: String): String =
+            com.nanahoshi.audioplayer.data.WorkIds.fromInput(input)
+                ?: throw DlsiteException(TextRef.Res(R.string.dlsite_error_work_id_missing))
 
-        internal fun worknoCandidates(workno: String): List<String> {
-            val match = Regex("(?i)(RJ|VJ|BJ)0*(\\d+)").find(workno) ?: return listOf(workno.trim())
-            val prefix = match.groupValues[1].uppercase()
-            val digits = match.groupValues[2].trimStart('0').ifEmpty { "0" }
-            return listOf(
-                workno.trim().uppercase(),
-                prefix + digits.padStart(8, '0'),
-                prefix + digits.padStart(6, '0'),
-                prefix + digits,
-            ).distinct()
-        }
+        internal fun worknoCandidates(workno: String): List<String> =
+            com.nanahoshi.audioplayer.data.WorkIds.candidates(workno)
 
         internal fun embedUrls(json: String): List<String> {
-            val works = JSONObject(json).optJSONArray("works") ?: return emptyList()
-            return buildList {
-                for (index in 0 until works.length()) {
-                    val url = works.optJSONObject(index)?.optString("embed_url").orEmpty().toHttps()
-                    if (url.startsWith("https://")) add(url)
-                }
-            }
+            val works = parseJsonObjectOrNull(json)?.jsonArray("works") ?: return emptyList()
+            return works.jsonObjects()
+                .map { it.jsonStringOrEmpty("embed_url").toHttps() }
+                .filter { it.startsWith("https://") }
         }
 
-        fun canonicalWorkno(raw: String): String {
-            val match = Regex("(?i)(RJ|VJ|BJ)0*(\\d+)").find(raw) ?: return raw.trim().uppercase()
-            val digits = match.groupValues[2].trimStart('0').ifEmpty { "0" }
-            return match.groupValues[1].uppercase() + digits
-        }
+        fun canonicalWorkno(raw: String): String = com.nanahoshi.audioplayer.data.WorkIds.canonical(raw)
 
         private fun encode(value: String): String =
             URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
@@ -649,136 +635,144 @@ class DlsiteClient(private val credentials: CredentialStore) {
 
         internal fun parseSearchCards(html: String): List<DlsiteHit> = parseHits(html).works
 
+        private data class ProductFields(
+            val workno: String,
+            val title: String,
+            val circle: String,
+            val gallery: List<String>,
+            val vas: List<String>,
+            val tags: List<String>,
+            val release: String,
+            val workType: String,
+            val siteId: String,
+        )
+
+        /** `product()` 与批量 `product.json` 共用同一套字段提取，避免两套解析漂移。 */
+        private fun productFields(item: JsonObject): ProductFields {
+            val makers = item.jsonObject("creaters")
+            return ProductFields(
+                workno = item.jsonStringOrEmpty("workno").ifBlank { item.jsonStringOrEmpty("product_id") }.uppercase(),
+                title = localized(item["work_name"]),
+                circle = localized(item["maker_name"]),
+                gallery = sampleImages(item),
+                vas = makers?.jsonObjects("voice_by").orEmpty().mapNotNull { localized(it["name"]).ifBlank { null } },
+                tags = item.jsonObjects("genres").mapNotNull { localized(it["name"]).ifBlank { null } },
+                release = item.jsonStringOrEmpty("regist_date").substringBefore('T').substringBefore(' '),
+                workType = item.jsonStringOrEmpty("work_type"),
+                siteId = item.jsonStringOrEmpty("site_id"),
+            )
+        }
+
         internal fun parseProductCards(body: String): List<DlsiteHit> {
             val trimmed = body.trim()
             if (trimmed.isEmpty() || trimmed == "[]") return emptyList()
-            val array = JSONArray(trimmed)
-            return buildList {
-                for (index in 0 until array.length()) {
-                    val item = array.optJSONObject(index) ?: continue
-                    val workno = item.optString("workno").ifBlank { item.optString("product_id") }.uppercase()
-                    if (workno.isBlank()) continue
-                    val makers = item.optJSONObject("creaters")
-                    val gallery = sampleImages(item)
-                    add(
-                        DlsiteHit(
-                            workno = workno,
-                            title = localized(item.opt("work_name")).ifBlank { workno },
-                            circle = localized(item.opt("maker_name")),
-                            coverUrl = gallery.firstOrNull(),
-                            vas = people(makers?.optJSONArray("voice_by")),
-                            tags = people(item.optJSONArray("genres")),
-                            release = item.optString("regist_date").substringBefore('T').substringBefore(' '),
-                            workType = item.optString("work_type"),
-                        ),
-                    )
-                }
+            val array = parseJsonArrayOrNull(trimmed)
+                ?: throw DlsiteException(TextRef.Res(R.string.dlsite_error_connection))
+            return array.jsonObjects().mapNotNull { item ->
+                val fields = productFields(item)
+                if (fields.workno.isBlank()) return@mapNotNull null
+                DlsiteHit(
+                    workno = fields.workno,
+                    title = fields.title.ifBlank { fields.workno },
+                    circle = fields.circle,
+                    coverUrl = fields.gallery.firstOrNull(),
+                    vas = fields.vas,
+                    tags = fields.tags,
+                    release = fields.release,
+                    workType = fields.workType,
+                )
             }
         }
 
         private data class ParsedSearch(val works: List<DlsiteHit>, val fetched: Int)
 
         private fun parseHits(html: String): ParsedSearch {
-            val marks = PRODUCT_ID.findAll(html).toList()
-            val works = marks.mapIndexedNotNull { index, mark ->
-                val start = html.lastIndexOf('<', mark.range.first).let { if (it < 0) mark.range.first else it }
-                val next = marks.getOrNull(index + 1)?.range?.first
-                val end = if (next == null) {
-                    html.length
-                } else {
-                    html.lastIndexOf('<', next).let { if (it <= start) next else it }
-                }
-                val chunk = html.substring(start, end)
-                if (!isVoiceCard(chunk)) return@mapIndexedNotNull null
-                val workno = mark.groupValues[1].uppercase()
-                val title = cardTitle(chunk).ifBlank { workno }
-                val circle = cardText(chunk, "maker_name", listOf("author", "work_price", "work_genre", "work_text"))
-                val vas = cardTexts(chunk, "author", listOf("work_price", "work_genre", "work_text"))
-                val cover = THUMB.find(chunk)?.groupValues?.get(1).orEmpty().toHttps().ifBlank { null }
-                DlsiteHit(workno, title, circle, cover, vas)
+            val cards = Jsoup.parse(html).select("[data-list_item_product_id], [data-product_id]")
+            val works = cards.mapNotNull { card ->
+                val workno = card.attr("data-list_item_product_id")
+                    .ifBlank { card.attr("data-product_id") }
+                    .trim()
+                    .uppercase()
+                if (workno.isEmpty() || !isVoiceCard(card)) return@mapNotNull null
+                DlsiteHit(
+                    workno = workno,
+                    title = cardTitle(card).ifBlank { workno },
+                    circle = cardText(card, "maker_name"),
+                    coverUrl = cardCover(card),
+                    vas = cardTexts(card, "author"),
+                )
             }
-            return ParsedSearch(works, marks.size)
+            return ParsedSearch(works, cards.size)
         }
 
-        private fun isVoiceCard(chunk: String): Boolean {
-            val types = WORK_TYPE.findAll(chunk).map { it.groupValues[1] }.toSet()
-            if (types.isEmpty()) return true
-            return "SOU" in types
+        private fun isVoiceCard(card: Element): Boolean {
+            val types = card.allElements.flatMap { element ->
+                element.classNames().mapNotNull { name -> WORK_TYPE.find(name)?.groupValues?.get(1) }
+            }.toSet()
+            return types.isEmpty() || "SOU" in types
         }
 
-        private fun cardTitle(chunk: String): String {
-            val named = cardText(chunk, "work_name", listOf("maker_name", "author", "work_price", "work_text"))
-            if (named.isNotBlank()) return named
-            val alt = Regex("""<img\b[^>]*\balt="([^"]+)"""").find(chunk)?.groupValues?.get(1).orEmpty()
-            return unescape(alt)
-        }
-
-        private fun cardText(chunk: String, className: String, stops: List<String>): String =
-            classBlock(chunk, className, stops)?.let(::firstAnchor).orEmpty()
-
-        private fun cardTexts(chunk: String, className: String, stops: List<String>): List<String> =
-            classBlock(chunk, className, stops)?.let(::allAnchors).orEmpty()
-
-        private fun classBlock(chunk: String, className: String, stops: List<String>): String? {
-            val mark = CLASS_NAME(className).find(chunk) ?: return null
-            val start = chunk.lastIndexOf('<', mark.range.first).let { if (it < 0) mark.range.first else it }
-            var end = minOf(chunk.length, start + 2500)
-            for (stop in stops) {
-                val next = CLASS_NAME(stop).find(chunk, mark.range.last + 1) ?: continue
-                if (next.range.first in (start + 1) until end) end = next.range.first
+        private fun cardTitle(card: Element): String {
+            card.selectFirst(".work_name")?.let { name ->
+                anchorTitle(name).takeIf { it.isNotBlank() }?.let { return it }
             }
-            return chunk.substring(start, end)
+            return card.selectFirst("img[alt]")?.attr("alt").orEmpty().replace(' ', ' ').trim()
         }
 
-        private fun firstAnchor(window: String): String =
-            allAnchors(window).maxByOrNull { it.length }.orEmpty()
+        private fun cardText(card: Element, className: String): String =
+            card.selectFirst(".$className")?.let(::anchorTitle).orEmpty()
 
-        private fun allAnchors(window: String): List<String> = ANCHOR.findAll(window).map { anchor ->
-            val titled = TITLE_ATTR.find(anchor.groupValues[1])?.groupValues?.get(1).orEmpty()
-            val text = anchor.groupValues[2].replace(Regex("<[^>]+>"), "")
-            unescape(titled.ifBlank { text })
-        }.filter { it.isNotBlank() }.distinct().toList()
+        private fun cardTexts(card: Element, className: String): List<String> =
+            card.selectFirst(".$className")?.let(::anchors).orEmpty()
 
-        private fun sampleImages(item: JSONObject): List<String> {
+        private fun anchorTitle(scope: Element): String = anchors(scope).maxByOrNull(String::length).orEmpty()
+
+        private fun anchors(scope: Element): List<String> = scope.select("a").map { anchor ->
+            anchor.attr("title").ifBlank { anchor.text() }.replace(' ', ' ').trim()
+        }.filter(String::isNotBlank).distinct()
+
+        private fun cardCover(card: Element): String? {
+            val image = card.selectFirst("[class*=work_thumb] img")
+                ?: card.selectFirst("img[data-src], img[src]")
+                ?: return null
+            val raw = image.attr("data-src").ifBlank { image.attr("src") }.trim()
+            return raw.toHttps().ifBlank { null }
+        }
+
+        private fun sampleImages(item: JsonObject): List<String> {
             val urls = mutableListOf<String>()
             fun add(raw: String) {
                 val url = raw.toHttps()
                 if (url.startsWith("https://")) urls += url
             }
-            item.optJSONObject("image_main")?.optString("url")?.let(::add)
-            val samples = item.optJSONArray("image_samples")
-            if (samples != null) {
-                for (index in 0 until samples.length()) {
-                    when (val value = samples.opt(index)) {
-                        is JSONObject -> add(value.optString("url"))
-                        is String -> add(value)
-                    }
+            item.jsonObject("image_main")?.jsonString("url")?.let(::add)
+            item.jsonArray("image_samples")?.forEach { value ->
+                when (value) {
+                    is JsonPrimitive -> if (value.isString) add(value.content)
+                    is JsonObject -> add(value.jsonStringOrEmpty("url"))
+                    else -> Unit
                 }
             }
             return urls.distinct()
         }
 
         internal fun parseChobit(html: String, referer: String, coverUrl: String?): List<RemotePlayable> {
-            return Regex("""<li\b[^>]*>""", RegexOption.IGNORE_CASE).findAll(html).mapNotNull { match ->
-                val tag = match.value
-                val src = attr(tag, "data-src")?.toHttps() ?: return@mapNotNull null
+            return Jsoup.parse(html).select("li[data-src]").mapNotNull { item ->
+                val src = item.attr("data-src").trim().toHttps()
+                if (src.isBlank()) return@mapNotNull null
                 val extension = src.substringBefore('?').substringAfterLast('.').lowercase()
                 if (extension !in AUDIO_EXT) return@mapNotNull null
-                val title = unescape(attr(tag, "data-title").orEmpty()).ifBlank { "试听" }
                 RemotePlayable(
-                    title = title,
+                    title = item.attr("data-title").trim().ifBlank { "试听" },
                     artist = null,
                     coverUri = coverUrl,
                     remoteUrl = src,
                     source = TrackSource.DLSITE,
                     referer = referer,
-                    durationMs = playtimeMs(attr(tag, "data-playtime").orEmpty()),
+                    durationMs = playtimeMs(item.attr("data-playtime")),
                 )
             }.distinctBy { it.remoteUrl }.toList()
         }
-
-        private fun attr(tag: String, name: String): String? =
-            Regex("""\b$name="([^"]*)"""").find(tag)?.groupValues?.get(1)
 
         private fun playtimeMs(raw: String): Long {
             val parts = raw.trim().split(":").mapNotNull { it.toLongOrNull() }
@@ -790,21 +784,28 @@ class DlsiteClient(private val credentials: CredentialStore) {
             }
         }
 
-        private fun galleryOf(html: String): List<String> {
-            val start = html.indexOf("product-slider-data")
-            if (start < 0) return emptyList()
-            val end = html.indexOf("work_slider", start).takeIf { it > start } ?: minOf(html.length, start + 12000)
-            return Regex("""data-src="([^"]+)"""").findAll(html.substring(start, end))
-                .map { it.groupValues[1].toHttps() }
-                .filter { it.isNotBlank() }
-                .distinct()
-                .toList()
+        internal fun galleryOf(html: String): List<String> {
+            val document = Jsoup.parse(html)
+            val scope = document.selectFirst(".product-slider-data, [class*=product-slider-data], [id*=product-slider-data]")
+                ?: document.selectFirst("[class*=work_slider]")
+                ?: return emptyList()
+            return scope.allElements.mapNotNull { element ->
+                element.attr("data-src").trim().takeIf(String::isNotBlank)?.toHttps()
+            }.distinct()
         }
 
         private fun trialsOf(html: String, title: String, coverUrl: String?): List<RemotePlayable> {
-            val start = html.indexOf("trial_download")
-            val slice = if (start >= 0) html.substring(start, minOf(html.length, start + 20000)) else html
-            val urls = MEDIA.findAll(slice).map { it.value.toHttps() }.distinct().toList()
+            val document = Jsoup.parse(html)
+            val scope = document.selectFirst("[class*=trial_download], [id*=trial_download]") ?: document
+            val urls = linkedSetOf<String>()
+            fun absorb(raw: String) {
+                if (raw.isBlank()) return
+                MEDIA.findAll(raw).forEach { urls += it.value.toHttps() }
+            }
+            scope.allElements.forEach { element ->
+                element.attributes().forEach { absorb(it.value) }
+                if (element.tagName() == "script" || element.tagName() == "style") absorb(element.data())
+            }
             return urls.mapIndexed { index, url ->
                 val name = url.substringBefore('?').substringAfterLast('/').substringBefore('.')
                 RemotePlayable(
@@ -818,115 +819,80 @@ class DlsiteClient(private val credentials: CredentialStore) {
             }
         }
 
-        private fun titleOf(html: String): String {
-            val match = Regex("""id="work_name"[^>]*>([\s\S]*?)</h1>""").find(html) ?: return ""
-            return unescape(match.groupValues[1].replace(Regex("<[^>]+>"), "")).trim()
-        }
+        internal fun titleOf(html: String): String =
+            Jsoup.parse(html).getElementById("work_name")?.text()?.replace(' ', ' ')?.trim().orEmpty()
 
-        private fun circleOf(html: String): String {
-            val match = Regex("""id="work_maker"[\s\S]*?class="maker_name"[\s\S]*?<a[^>]*>([^<]*)</a>""")
-                .find(html) ?: return ""
-            return unescape(match.groupValues[1]).trim()
-        }
+        internal fun circleOf(html: String): String =
+            Jsoup.parse(html).getElementById("work_maker")?.selectFirst(".maker_name a")?.text()
+                ?.replace(' ', ' ')?.trim().orEmpty()
 
-        private fun unescape(raw: String): String = raw
-            .replace("&amp;", "&")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&quot;", "\"")
-            .replace("&#39;", "'")
-            .replace("&nbsp;", " ")
-            .trim()
-
-        private fun parsePurchase(item: JSONObject?): DlsitePurchase? {
+        private fun parsePurchase(item: JsonObject?): DlsitePurchase? {
             if (item == null) return null
-            val workno = item.optString("workno")
+            val workno = item.jsonStringOrEmpty("workno")
             if (workno.isBlank()) return null
-            val maker = item.optJSONObject("maker")
-            val files = item.optJSONObject("work_files")
-            val cover = files?.opt("main").asUrl()
-            val vas = buildList {
-                val tags = item.optJSONArray("tags") ?: return@buildList
-                for (index in 0 until tags.length()) {
-                    val tag = tags.optJSONObject(index) ?: continue
-                    if (tag.optString("class") == "voice_by") {
-                        val name = localized(tag.opt("name"))
-                        if (name.isNotBlank()) add(name)
-                    }
-                }
+            val maker = item.jsonObject("maker")
+            val files = item.jsonObject("work_files")
+            val cover = files?.get("main").asUrl()
+            val vas = item.jsonObjects("tags").mapNotNull { tag ->
+                if (tag.jsonString("class") == "voice_by") localized(tag["name"]).ifBlank { null } else null
             }
             return DlsitePurchase(
                 workno = workno,
-                title = localized(item.opt("name")).ifBlank { workno },
-                circle = localized(maker?.opt("name")),
+                title = localized(item["name"]).ifBlank { workno },
+                circle = localized(maker?.get("name")),
                 vas = vas,
                 coverUrl = cover,
-                release = item.optString("regist_date").substringBefore('T').substringBefore(' '),
+                release = item.jsonStringOrEmpty("regist_date").substringBefore('T').substringBefore(' '),
             )
         }
 
-        private fun people(array: JSONArray?): List<String> {
-            if (array == null) return emptyList()
-            return buildList {
-                for (index in 0 until array.length()) {
-                    val item = array.optJSONObject(index) ?: continue
-                    val name = localized(item.opt("name"))
-                    if (name.isNotBlank()) add(name)
-                }
-            }
-        }
-
-        private fun localized(value: Any?): String = when (value) {
-            is String -> value
-            is JSONObject -> value.optString("zh_CN").ifBlank {
-                value.optString("ja_JP").ifBlank {
-                    value.keys().asSequence().map { value.optString(it) }.firstOrNull { it.isNotBlank() }.orEmpty()
+        private fun localized(value: JsonElement?): String = when (value) {
+            is JsonPrimitive -> value.takeIf { it.isString }?.content.orEmpty()
+            is JsonObject -> value.jsonString("zh_CN").orEmpty().ifBlank {
+                value.jsonString("ja_JP").orEmpty().ifBlank {
+                    value.entries.mapNotNull { it.value.jsonTextOrNull()?.takeIf(String::isNotBlank) }.firstOrNull().orEmpty()
                 }
             }
             else -> ""
         }
 
-        private fun Any?.asUrl(): String? = when (this) {
-            is String -> toHttps().ifBlank { null }
-            is JSONObject -> optString("url").ifBlank { optString("path") }.toHttps().ifBlank { null }
+        private fun JsonElement?.asUrl(): String? = when (this) {
+            is JsonPrimitive -> takeIf { it.isString }?.content?.toHttps()?.ifBlank { null }
+            is JsonObject -> jsonString("url").orEmpty().ifBlank { jsonString("path").orEmpty() }.toHttps().ifBlank { null }
             else -> null
         }
 
         private fun parsePlayNode(
-            node: JSONObject?,
-            files: JSONObject,
+            node: JsonObject?,
+            files: JsonObject,
             directory: String,
             workno: String,
             artist: String?,
             coverUrl: String?,
         ): PlayEntry? {
             if (node == null) return null
-            when (node.optString("type")) {
+            when (node.jsonStringOrEmpty("type")) {
                 "hidden" -> return null
                 "folder" -> {
-                    val children = node.optJSONArray("children") ?: JSONArray()
-                    val nested = buildList {
-                        for (index in 0 until children.length()) {
-                            parsePlayNode(children.optJSONObject(index), files, directory, workno, artist, coverUrl)
-                                ?.let { add(it) }
-                        }
-                    }
+                    val children = node.jsonArray("children") ?: JsonArray(emptyList())
+                    val nested = children.jsonObjects()
+                        .mapNotNull { parsePlayNode(it, files, directory, workno, artist, coverUrl) }
                     if (nested.isEmpty()) return null
-                    return PlayEntry(node.optString("name").ifBlank { "文件夹" }, nested, null, null)
+                    return PlayEntry(node.jsonStringOrEmpty("name").ifBlank { "文件夹" }, nested, null, null)
                 }
                 "file" -> {
-                    val hash = node.optString("hashname")
-                    val info = files.optJSONObject(hash) ?: return null
-                    val type = info.optString("type")
-                    val optimized = info.optJSONObject(type)?.optJSONObject("optimized")
-                        ?: info.optJSONObject("optimized")
+                    val hash = node.jsonStringOrEmpty("hashname")
+                    val info = files.jsonObject(hash) ?: return null
+                    val type = info.jsonStringOrEmpty("type")
+                    val optimized = info.jsonObject(type)?.jsonObject("optimized")
+                        ?: info.jsonObject("optimized")
                         ?: return null
-                    if (optimized.optBoolean("crypt")) return null
-                    val fileName = optimized.optString("name")
+                    if (optimized.jsonBool("crypt") == true) return null
+                    val fileName = optimized.jsonStringOrEmpty("name")
                     if (fileName.isBlank() || fileName.endsWith(".m3u8", ignoreCase = true)) return null
                     val url = directory.trimEnd('/') + "/optimized/" + fileName
-                    val title = node.optString("name").ifBlank { fileName }
-                    val duration = (optimized.optDouble("duration", 0.0) * 1000).toLong().coerceAtLeast(0)
+                    val title = node.jsonStringOrEmpty("name").ifBlank { fileName }
+                    val duration = ((optimized.jsonDouble("duration") ?: 0.0) * 1000).toLong().coerceAtLeast(0)
                     val audio = isAsmrAudio(type, title) || isAsmrAudio(type, fileName)
                     return if (audio) {
                         PlayEntry(
@@ -965,12 +931,51 @@ class DlsiteClient(private val credentials: CredentialStore) {
     }
 }
 
-private fun JSONObject.names(key: String): List<String> {
-    val array = optJSONArray(key) ?: return emptyList()
-    return buildList {
-        for (index in 0 until array.length()) {
-            val name = array.optJSONObject(index)?.optString("name").orEmpty()
-            if (name.isNotBlank()) add(name)
+/**
+ * 批量解析作品卡片：先按 [batchSize] 分组请求 [fetchBatch]，只对批次未返回的编号
+ * 回退到 [fetchSingle]（候选编号与作品页），保持输入顺序并去重。
+ *
+ * 批次失败不会让整页结果失败；逐条回退本身也吞掉非取消异常，与旧的单 ID 扇出行为一致。
+ */
+internal suspend fun resolveProductCards(
+    worknos: List<String>,
+    fetchBatch: suspend (List<String>) -> List<DlsiteHit>,
+    fetchSingle: suspend (String) -> DlsiteHit?,
+    batchSize: Int = 20,
+    acceptBatchHit: (DlsiteHit) -> Boolean = { true },
+): List<DlsiteHit> = coroutineScope {
+    val ids = worknos.map(String::trim).filter(String::isNotEmpty).distinct()
+    if (ids.isEmpty()) return@coroutineScope emptyList()
+    val requested = ids.mapTo(HashSet()) { DlsiteClient.canonicalWorkno(it) }
+    val resolved = linkedMapOf<String, DlsiteHit>()
+    for (chunk in ids.chunked(batchSize)) {
+        val hits = try {
+            fetchBatch(chunk)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            emptyList()
+        }
+        for (hit in hits) {
+            val key = DlsiteClient.canonicalWorkno(hit.workno)
+            if (key in requested && acceptBatchHit(hit)) resolved.putIfAbsent(key, hit)
         }
     }
+    val missing = ids.filter { DlsiteClient.canonicalWorkno(it) !in resolved }
+    if (missing.isNotEmpty()) {
+        missing.map { id ->
+            async {
+                try {
+                    fetchSingle(id)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    null
+                }
+            }
+        }.awaitAll().forEach { hit ->
+            if (hit != null) resolved.putIfAbsent(DlsiteClient.canonicalWorkno(hit.workno), hit)
+        }
+    }
+    ids.mapNotNull { resolved[DlsiteClient.canonicalWorkno(it)] }
 }

@@ -1,6 +1,7 @@
 package com.nanahoshi.audioplayer.bilibili
 
 import androidx.annotation.StringRes
+import com.nanahoshi.audioplayer.data.toHttps
 import com.nanahoshi.audioplayer.text.TextRef
 import com.nanahoshi.audioplayer.R
 import kotlinx.coroutines.ensureActive
@@ -43,16 +44,11 @@ private fun JsonElement.string(key: String) = (value(key) as? JsonPrimitive)?.co
 private fun JsonElement.long(key: String) = string(key).toLongOrNull()
 private fun JsonElement.array(key: String) = value(key) as? JsonArray
     ?: throw BilibiliException(0, TextRef.Res(R.string.bilibili_error_collection_list_missing))
-private fun https(value: String) = when {
-    value.startsWith("//") -> "https:$value"
-    value.startsWith("http://") -> value.replaceFirst("http://", "https://")
-    else -> value
-}
 
 /** 统一使用首视频封面；未知首视频时只保留已确认来自首视频的缓存。 */
 internal fun BiliCollection.withFirstVideoCover(cover: String?): BiliCollection =
     if (cover == null && coverIsFallback) this
-    else copy(coverUrl = https(cover.orEmpty()), coverIsFallback = true)
+    else copy(coverUrl = cover.orEmpty().toHttps(), coverIsFallback = true)
 
 /** 与请求身份分离，解析可在 JVM 上测试。 */
 class BiliCollectionApi(private val data: suspend (String, Map<String, String>, String) -> JsonElement) {
@@ -83,9 +79,9 @@ class BiliCollectionApi(private val data: suspend (String, Map<String, String>, 
         val body = data(path, params, "https://space.bilibili.com/${collection.mid}")
         val total = body.value("page").long("total") ?: throw BilibiliException(0, TextRef.Res(R.string.bilibili_error_collection_pagination))
         val items = body.array("archives").map { item ->
-            val bv = item.string("bvid").takeIf { Regex("BV[0-9A-Za-z]{10}").matches(it) }
+            val bv = item.string("bvid").takeIf { BV_PATTERN.matches(it) }
                 ?: throw BilibiliException(0, TextRef.Res(R.string.bilibili_error_collection_video_identity))
-            BiliVideoHit(bv, biliPlainText(item.string("title")), "", https(item.string("pic")),
+            BiliVideoHit(bv, biliPlainText(item.string("title")), "", item.string("pic").toHttps(),
                 (item.long("duration") ?: 0).coerceAtLeast(0) * 1000, collection.mid)
         }.distinctBy { it.bvid }
         val updated = if (season) metadata(body.value("meta"), collection) else if (page == 1) {

@@ -1,5 +1,9 @@
 package com.nanahoshi.audioplayer.bilibili
 
+import com.nanahoshi.audioplayer.data.CookieHeaders
+import com.nanahoshi.audioplayer.data.toHex
+import okio.ByteString.Companion.decodeBase64
+import org.jsoup.Jsoup
 import java.net.URLDecoder
 import java.security.KeyFactory
 import java.security.spec.MGF1ParameterSpec
@@ -20,7 +24,7 @@ internal fun sessionCookies(pairs: Map<String, String>): String {
     val parts = BILI_SESSION_COOKIE_NAMES.mapNotNull { name ->
         val value = pairs[name]?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
         val stored = if (name == "SESSDATA") value.replace(",", "%2C") else value
-        "$name=$stored"
+        "$name=${CookieHeaders.sanitize(stored)}"
     }
     if (parts.none { it.startsWith("SESSDATA=") }) return ""
     return parts.joinToString("; ")
@@ -32,9 +36,9 @@ internal fun sessionCookiesFromUrl(url: String): String {
     val pairs = linkedMapOf<String, String>()
     for (part in query.split('&')) {
         if (!part.contains('=')) continue
-        val name = URLDecoder.decode(part.substringBefore('='), "UTF-8")
+        val name = URLDecoder.decode(part.substringBefore('='), Charsets.UTF_8.name())
         if (name !in BILI_SESSION_COOKIE_NAMES) continue
-        val decoded = URLDecoder.decode(part.substringAfter('='), "UTF-8")
+        val decoded = URLDecoder.decode(part.substringAfter('='), Charsets.UTF_8.name())
         if (decoded.isNotEmpty()) pairs[name] = decoded
     }
     return sessionCookies(pairs)
@@ -59,12 +63,8 @@ internal fun sessionCookiesFromSetCookie(headers: List<String>): String {
 internal fun combineSessionCookies(primary: String, fallback: String): String {
     val pairs = linkedMapOf<String, String>()
     fun absorb(header: String, overwrite: Boolean) {
-        for (part in header.split(';')) {
-            val trimmed = part.trim()
-            if (!trimmed.contains('=')) continue
-            val name = trimmed.substringBefore('=').trim()
+        for ((name, value) in CookieHeaders.parse(header)) {
             if (name !in BILI_SESSION_COOKIE_NAMES) continue
-            val value = trimmed.substringAfter('=')
             if (value.isEmpty()) continue
             if (overwrite || name !in pairs) pairs[name] = value
         }
@@ -74,18 +74,11 @@ internal fun combineSessionCookies(primary: String, fallback: String): String {
     return sessionCookies(pairs)
 }
 
-internal fun cookieField(header: String, name: String): String? =
-    header.split(';')
-        .map { it.trim() }
-        .firstOrNull { it.substringBefore('=').trim() == name }
-        ?.substringAfter('=', "")
-        ?.takeIf { it.isNotEmpty() }
+internal fun cookieField(header: String, name: String): String? = CookieHeaders.field(header, name)
 
 internal fun refreshCsrf(html: String): String? =
-    Regex("""id\s*=\s*["']1-name["']\s*>([^<]+)<""")
-        .find(html)
-        ?.groupValues
-        ?.getOrNull(1)
+    Jsoup.parse(html).getElementById("1-name")
+        ?.text()
         ?.trim()
         ?.takeIf { it.isNotEmpty() }
 
@@ -97,36 +90,17 @@ internal fun correspondPath(timestampMs: Long): String {
         OAEPParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA256, PSource.PSpecified.DEFAULT),
     )
     val encrypted = cipher.doFinal("refresh_$timestampMs".toByteArray(Charsets.UTF_8))
-    return encrypted.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+    return encrypted.toHex()
 }
 
 private val correspondKey by lazy {
-    val encoded = decodeBase64(
-        "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDLgd2OAkcGVtoE3ThUREbio0Eg" +
-            "Uc/prcajMKXvkCKFCWhJYJcLkcM2DKKcSeFpD/j6Boy538YXnR6VhcuUJOhH2x71" +
-            "nzPjfdTcqMz7djHum0qSZA0AyCBDABUqCrfNgCiJ00Ra7GmRj+YCK1NJEuewlb40" +
-            "JNrRuoEUXpabUzGB8QIDAQAB",
-    )
+    val encoded = requireNotNull(
+        (
+            "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDLgd2OAkcGVtoE3ThUREbio0Eg" +
+                "Uc/prcajMKXvkCKFCWhJYJcLkcM2DKKcSeFpD/j6Boy538YXnR6VhcuUJOhH2x71" +
+                "nzPjfdTcqMz7djHum0qSZA0AyCBDABUqCrfNgCiJ00Ra7GmRj+YCK1NJEuewlb40" +
+                "JNrRuoEUXpabUzGB8QIDAQAB"
+            ).decodeBase64(),
+    ) { "invalid base64 key" }.toByteArray()
     KeyFactory.getInstance("RSA").generatePublic(X509EncodedKeySpec(encoded))
-}
-
-private fun decodeBase64(value: String): ByteArray {
-    val table = IntArray(256) { -1 }
-    val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-    alphabet.forEachIndexed { index, char -> table[char.code] = index }
-    val out = ArrayList<Byte>(value.length)
-    var buffer = 0
-    var bits = 0
-    for (char in value) {
-        if (char.isWhitespace() || char == '=') continue
-        val six = table[char.code]
-        if (six < 0) continue
-        buffer = (buffer shl 6) or six
-        bits += 6
-        if (bits >= 8) {
-            bits -= 8
-            out += ((buffer shr bits) and 0xff).toByte()
-        }
-    }
-    return out.toByteArray()
 }

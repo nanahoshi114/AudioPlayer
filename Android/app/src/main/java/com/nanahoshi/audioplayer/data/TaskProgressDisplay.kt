@@ -22,16 +22,7 @@ fun progressDuration(context: Context, ms: Long?): String {
         else -> context.getString(R.string.progress_duration_s, seconds)
     }
 }
-fun progressBytes(bytes: Long?): String {
-    if (bytes == null) return "—"
-    val value = bytes.coerceAtLeast(0).toDouble()
-    return when {
-        value >= 1024 * 1024 * 1024 -> String.format(Locale.ROOT, "%.2f GiB", value / (1024 * 1024 * 1024))
-        value >= 1024 * 1024 -> String.format(Locale.ROOT, "%.1f MiB", value / (1024 * 1024))
-        value >= 1024 -> String.format(Locale.ROOT, "%.1f KiB", value / 1024)
-        else -> "${value.toLong()} B"
-    }
-}
+fun progressBytes(bytes: Long?): String = ByteSizeFormatter.format(bytes)
 fun progressRate(rate: Double?): String = rate?.takeIf { it.isFinite() && it >= 0 }
     ?.let { "${progressBytes(it.toLong())}/s" } ?: "—"
 

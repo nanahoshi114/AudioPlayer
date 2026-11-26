@@ -2,8 +2,11 @@ package com.nanahoshi.audioplayer.data
 
 import android.content.Context
 import androidx.room.withTransaction
+import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.bilibili.*
 import com.nanahoshi.audioplayer.data.db.*
+import com.nanahoshi.audioplayer.text.TextRef
+import com.nanahoshi.audioplayer.text.UserFacingException
 
 /** 保存作品分组及其分 P，沿用现有曲目编号。 */
 internal class BiliLibraryStore(
@@ -19,8 +22,8 @@ internal class BiliLibraryStore(
 
     private suspend fun validateConversion(request: BiliImportRequest) {
         val current = mode(request.video.bvid)
-        check(current == null || current == request.mode || request.conversionConfirmed) {
-            "这个视频的导入方式已经改变，请重新导入并确认。"
+        if (!(current == null || current == request.mode || request.conversionConfirmed)) {
+            throw UserFacingException(TextRef.Res(R.string.bilibili_import_mode_changed))
         }
     }
 
@@ -44,8 +47,10 @@ internal class BiliLibraryStore(
             group.id
         } else {
             if (oldGroup != null) {
-                check(db.folders().childrenOf(oldGroup.id).isEmpty() && db.files().listIn(oldGroup.id).isEmpty() &&
-                    db.tracks().inFolder(oldGroup.id).all { it.bvid == bvid }) { "这个分组里还有其他视频，无法直接更改导入方式" }
+                if (!(db.folders().childrenOf(oldGroup.id).isEmpty() && db.files().listIn(oldGroup.id).isEmpty() &&
+                        db.tracks().inFolder(oldGroup.id).all { it.bvid == bvid })) {
+                    throw UserFacingException(TextRef.Res(R.string.bilibili_import_group_not_empty))
+                }
                 existing.filter { it.folderId == oldGroup.id }.forEach { db.tracks().setFolder(it.id, oldGroup.parentId) }
                 db.folders().delete(oldGroup.id)
             }

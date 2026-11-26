@@ -200,6 +200,60 @@ class DlsiteArchiveTest {
         assertEquals(1, unauthorizedRequests)
     }
 
+    @Test fun handles416AtEofAndRetriesFromZeroOnMismatch() = runBlocking {
+        val bytes = zip("01.wav" to "original")
+        // Case 1: 416 with Content-Range bytes */N where N == partial.length()
+        val eofStaging = temp.newFolder()
+        File(eofStaging, "RJ123.zip.part").writeBytes(bytes)
+        val eofClient = fakeClient { chain ->
+            if (chain.request().header("Range") == null) {
+                val body = object : ResponseBody() {
+                    override fun contentType() = "application/octet-stream".toMediaType()
+                    override fun contentLength() = -1L
+                    override fun source() = okio.Buffer().write(bytes)
+                }
+                Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("OK")
+                    .header("Content-Disposition", "attachment; filename=RJ123.zip").body(body).build()
+            } else {
+                Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(416)
+                    .message("Range Not Satisfiable")
+                    .header("Content-Range", "bytes */${bytes.size}")
+                    .body(ByteArray(0).toResponseBody()).build()
+            }
+        }
+        val eofFiles = eofClient.download("RJ123", eofStaging)
+        assertArrayEquals(bytes, eofFiles.single().readBytes())
+        assertEquals(bytes.size.toString(), File(eofStaging, "RJ123.zip.complete").readText())
+
+        // Case 2: 416 with mismatched total deletes .part and retries from offset 0 once
+        val mismatchStaging = temp.newFolder()
+        File(mismatchStaging, "RJ123.zip.part").writeBytes(ByteArray(bytes.size + 10))
+        val ranges = mutableListOf<String?>()
+        val mismatchClient = fakeClient { chain ->
+            val range = chain.request().header("Range")
+            ranges += range
+            when (range) {
+                null -> {
+                    val body = object : ResponseBody() {
+                        override fun contentType() = "application/octet-stream".toMediaType()
+                        override fun contentLength() = -1L
+                        override fun source() = okio.Buffer().write(bytes)
+                    }
+                    Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("OK")
+                        .header("Content-Disposition", "attachment; filename=RJ123.zip").body(body).build()
+                }
+                "bytes=0-" -> binary(chain, bytes, 200, "Content-Disposition" to "attachment; filename=RJ123.zip")
+                else -> Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(416)
+                    .message("Range Not Satisfiable")
+                    .header("Content-Range", "bytes */${bytes.size}")
+                    .body(ByteArray(0).toResponseBody()).build()
+            }
+        }
+        val retriedFiles = mismatchClient.download("RJ123", mismatchStaging)
+        assertArrayEquals(bytes, retriedFiles.single().readBytes())
+        assertTrue(ranges.contains("bytes=0-"))
+    }
+
     @Test fun parsesOfficialSplitLinksInNumericOrderAndMatchesWorkIdentity() {
         val links = DlsiteArchiveClient.parseDownloadLinks(
             "https://www.dlsite.com/home/split/=/product_id/RJ00000123.html".toHttpUrl(),

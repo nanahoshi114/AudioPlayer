@@ -17,6 +17,7 @@ import com.nanahoshi.audioplayer.playback.SubtitleSource
 import com.nanahoshi.audioplayer.playback.WorkSubtitleCandidate
 import com.nanahoshi.audioplayer.playback.WorkSubtitleMatcher
 import com.nanahoshi.audioplayer.playback.nearestSubtitleWorkRoot
+import com.nanahoshi.audioplayer.playback.writeTextAtomically
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
@@ -43,6 +44,7 @@ class SubtitleBindingStore(
 ) {
     val customSubtitleLock = Mutex()
     private val directory = File(context.filesDir, "custom-subtitles")
+    private val grantJournal = File(context.filesDir, "subtitle-grants.journal")
     internal val activeStagingNames = ConcurrentHashMap.newKeySet<String>()
     private val dao get() = db.trackSubtitles()
     private val resolver get() = context.contentResolver
@@ -70,22 +72,30 @@ class SubtitleBindingStore(
             )
         }
         customSubtitleLock.withLock {
+            val grantKey = grant.toString()
             val wasPersisted = hasGrant(grant)
             if (!wasPersisted) {
+                recordGrant(grantKey)
                 try {
                     resolver.takePersistableUriPermission(grant, Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 } catch (_: SecurityException) {
+                    forgetGrant(grantKey)
                     return@withLock BindExternalResult.NeedsAppCopy
                 } catch (_: IllegalArgumentException) {
+                    forgetGrant(grantKey)
                     return@withLock BindExternalResult.NeedsAppCopy
                 }
             }
-            if (!hasGrant(grant)) return@withLock BindExternalResult.NeedsAppCopy
+            if (!hasGrant(grant)) {
+                if (!wasPersisted) forgetGrant(grantKey)
+                return@withLock BindExternalResult.NeedsAppCopy
+            }
             withContext(NonCancellable) {
                 try {
                     commit(rows)
+                    recordGrant(grantKey)
                 } catch (error: Exception) {
-                    if (!wasPersisted) releaseIfUnused(grant.toString())
+                    if (!wasPersisted) releaseIfUnused(grantKey)
                     throw error
                 }
             }
@@ -177,6 +187,7 @@ class SubtitleBindingStore(
             .forEach { it.delete() }
         File(directory, ".staging").listFiles().orEmpty().filter { it.isFile && it.name !in activeStagingNames }
             .forEach { it.delete() }
+        reconcileGrantJournal()
     }
 
     internal suspend fun cleanupDetached(rows: List<TrackSubtitleBindingEntity>) = mutate {
@@ -291,13 +302,61 @@ class SubtitleBindingStore(
 
     private suspend fun releaseIfUnused(uri: String) {
         if (dao.countByUri(uri) != 0 || db.tracks().usesLocalGrant(uri) || db.files().usesLocalGrant(uri)) return
-        try {
-            resolver.releasePersistableUriPermission(Uri.parse(uri), Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        } catch (_: SecurityException) {
-            // The provider can revoke a grant before the user clears the binding.
-        } catch (_: IllegalArgumentException) {
-            // 非法或已失效的 URI 不应阻止解绑。
+        if (releasePersistedGrant(uri)) forgetGrant(uri)
+    }
+
+    private suspend fun reconcileGrantJournal() {
+        val journal = readGrantJournal()
+        if (journal.isEmpty()) return
+        val persisted = resolver.persistedUriPermissions
+            .filter { it.isReadPermission }
+            .map { it.uri.toString() }
+            .toSet()
+        val remaining = linkedSetOf<String>()
+        for (uri in journal) {
+            if (dao.countByUri(uri) > 0 || db.tracks().usesLocalGrant(uri) || db.files().usesLocalGrant(uri)) {
+                if (uri in persisted || dao.countByUri(uri) > 0) remaining += uri
+            } else if (uri in persisted) {
+                if (!releasePersistedGrant(uri)) remaining += uri
+            }
         }
+        if (remaining != journal) writeGrantJournal(remaining)
+    }
+
+    private fun releasePersistedGrant(uri: String): Boolean = try {
+        resolver.releasePersistableUriPermission(Uri.parse(uri), Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        true
+    } catch (_: SecurityException) {
+        // The provider can revoke a grant before the user clears the binding.
+        true
+    } catch (_: IllegalArgumentException) {
+        // 非法或已失效的 URI 不应阻止解绑。
+        true
+    }
+
+    private fun readGrantJournal(): LinkedHashSet<String> {
+        if (!grantJournal.isFile) return linkedSetOf()
+        return runCatching {
+            grantJournal.readLines().map { it.trim() }.filter { it.isNotEmpty() }.toCollection(linkedSetOf())
+        }.getOrElse { linkedSetOf() }
+    }
+
+    private fun writeGrantJournal(uris: Set<String>) {
+        if (uris.isEmpty()) {
+            grantJournal.delete()
+            return
+        }
+        runCatching { grantJournal.writeTextAtomically(uris.joinToString("\n")) }
+    }
+
+    private fun recordGrant(uri: String) {
+        val current = readGrantJournal()
+        if (current.add(uri)) writeGrantJournal(current)
+    }
+
+    private fun forgetGrant(uri: String) {
+        val current = readGrantJournal()
+        if (current.remove(uri)) writeGrantJournal(current)
     }
 
     private fun hasGrant(uri: Uri) =

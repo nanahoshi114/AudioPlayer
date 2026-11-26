@@ -37,6 +37,26 @@ class TextRefTest {
     }
 
     @Test
+    fun userFacingExceptionPreservesLocalizedReason() {
+        val error: Throwable = UserFacingException(TextRef.Res(R.string.library_folder_not_found))
+        assertEquals(TextRef.Res(R.string.library_folder_not_found), error.userTextOr(R.string.library_operation_failed))
+        assertEquals(R.string.library_folder_not_found, error.userTextOr(R.string.library_operation_failed).resIdOrNull())
+    }
+
+    @Test
+    fun userFacingExceptionKeepsSentinelMessageForCallers() {
+        val error: Throwable = UserFacingException(TextRef.Raw(PersistedErrors.JA_POST_REMOVED))
+        assertEquals(PersistedErrors.JA_POST_REMOVED, error.message)
+        assertTrue(error is IllegalStateException)
+    }
+
+    @Test
+    fun plainIllegalStateExceptionFallsBackWithoutLeakingMessage() {
+        val error: Throwable = IllegalStateException("internal detail")
+        assertEquals(TextRef.Res(R.string.library_operation_failed), error.userTextOr(R.string.library_operation_failed))
+    }
+
+    @Test
     fun persistedInterruptionRecognizesCurrentAndHistoricalMessages() {
         assertTrue(PersistedErrors.isInterrupted(PersistedErrors.DLSITE_ARCHIVE_INTERRUPTED))
         assertTrue(PersistedErrors.isInterrupted(PersistedErrors.SUBTITLE_TIMEOUT))

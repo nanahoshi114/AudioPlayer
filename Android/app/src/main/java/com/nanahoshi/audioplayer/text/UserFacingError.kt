@@ -14,16 +14,6 @@ fun Throwable.userTextOr(fallback: TextRef): TextRef =
 fun Throwable.userTextOr(@StringRes fallback: Int, vararg args: Any): TextRef =
     userTextOr(TextRef.Res(fallback, args.toList()))
 
-/** 旧代码会用 `"://"` 过滤可能带临时媒体地址的异常；迁移期保留这一保护。 */
-fun Throwable.userTextOrNoUrl(@StringRes fallback: Int, vararg args: Any): TextRef {
-    val text = userTextOr(fallback, *args)
-    return if (text is TextRef.Raw && "://" in text.value) {
-        TextRef.Res(fallback, args.toList())
-    } else {
-        text
-    }
-}
-
 /**
  * 替代 `error(...)` / `check(...)` / `require(...)` 的用户可见异常。
  *

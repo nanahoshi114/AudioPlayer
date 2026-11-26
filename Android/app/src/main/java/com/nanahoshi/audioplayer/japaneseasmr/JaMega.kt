@@ -19,6 +19,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okio.ByteString.Companion.decodeBase64
 import java.io.File
 import java.nio.ByteBuffer
+import com.nanahoshi.audioplayer.data.toHex
 import java.security.MessageDigest
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
@@ -39,6 +40,7 @@ private val apiBase = "https://g.api.mega.co.nz/cs".toHttpUrlOrNull()!!
 private val handlePattern = "[A-Za-z0-9_-]{8}"
 private val nodeHandle = Regex(handlePattern)
 private val fileKeyPattern = "[A-Za-z0-9_-]{43}=?"
+private val fileKeyRegex = Regex(fileKeyPattern)
 private val folderKeyPattern = "[A-Za-z0-9_-]{22}(?:==)?"
 private val legacySingle = Regex("!($handlePattern)!($fileKeyPattern)")
 private val legacyFolder = Regex("F!($handlePattern)!($folderKeyPattern)(?:([!?])($handlePattern))?")
@@ -227,7 +229,7 @@ internal sealed class JaMegaShare {
                 legacySingle.matchEntire(fragment)?.destructured?.let { (handle, key) -> return single(handle, key) }
             }
             if (parts.size == 2 && parts[0] == "file" && nodeHandle.matches(parts[1]) &&
-                Regex(fileKeyPattern).matches(fragment)) {
+                fileKeyRegex.matches(fragment)) {
                 return single(parts[1], fragment)
             }
             invalidShare()
@@ -267,7 +269,7 @@ internal class JaMegaCrypto(shareKey: ByteArray) {
     private val key = SecretKeySpec(ByteArray(16) { i -> (shareKey[i].toInt() xor shareKey[i + 16].toInt()).toByte() }, "AES")
     private val nonce = shareKey.copyOfRange(16, 24)
     private val expectedMac = shareKey.copyOfRange(24, 32)
-    val checksum = MessageDigest.getInstance("SHA-256").digest(expectedMac).joinToString("") { "%02x".format(it) }
+    val checksum = MessageDigest.getInstance("SHA-256").digest(expectedMac).toHex()
 
     fun name(attributes: String): String = nameOrNull(attributes) ?: invalidShare()
 
@@ -287,26 +289,31 @@ internal class JaMegaCrypto(shareKey: ByteArray) {
         val context = currentCoroutineContext()
         val cipher = Cipher.getInstance("AES/CBC/NoPadding")
         val aggregateCipher = Cipher.getInstance("AES/ECB/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key) }
-        var aggregate = ByteArray(16)
-        val chunks = ByteArray(1024 * 1024)
+        val aggregate = ByteArray(16)
+        val aggregateScratch = ByteArray(16)
+        val chunk = ByteArray(1024 * 1024)
+        // CBC/NoPadding 的输出与输入等长；复用同一个缓冲区，避免每 1 MiB 分块
+        // 只取末尾 16 字节却分配一整块临时数组。
+        val encrypted = ByteArray(chunk.size)
         val iv = IvParameterSpec(nonce + nonce)
         var offset = 0L
-        var chunk = 1
+        var chunkIndex = 1
         val size = path.length()
         java.io.DataInputStream(path.inputStream().buffered()).use { input ->
             while (offset < size) {
                 context.ensureActive()
-                val count = minOf(chunk * 128L * 1024, size - offset).toInt()
+                val count = minOf(chunkIndex * 128L * 1024, size - offset).toInt()
                 val padded = (count + 15) and 15.inv()
-                input.readFully(chunks, 0, count)
-                if (padded > count) chunks.fill(0, count, padded)
+                input.readFully(chunk, 0, count)
+                if (padded > count) chunk.fill(0, count, padded)
                 cipher.init(Cipher.ENCRYPT_MODE, key, iv)
-                val encrypted = cipher.doFinal(chunks, 0, padded)
+                cipher.doFinal(chunk, 0, padded, encrypted, 0)
                 for (i in aggregate.indices) aggregate[i] =
-                    (aggregate[i].toInt() xor encrypted[encrypted.size - 16 + i].toInt()).toByte()
-                aggregate = aggregateCipher.doFinal(aggregate)
+                    (aggregate[i].toInt() xor encrypted[padded - 16 + i].toInt()).toByte()
+                aggregateCipher.doFinal(aggregate, 0, aggregate.size, aggregateScratch, 0)
+                System.arraycopy(aggregateScratch, 0, aggregate, 0, aggregate.size)
                 offset += count
-                chunk = minOf(chunk + 1, 8)
+                chunkIndex = minOf(chunkIndex + 1, 8)
             }
         }
         val mac = ByteArray(8) { i ->

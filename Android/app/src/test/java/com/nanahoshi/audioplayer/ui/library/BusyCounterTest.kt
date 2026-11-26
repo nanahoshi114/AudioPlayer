@@ -27,11 +27,15 @@ class BusyCounterTest {
     }
 
     @Test
-    fun olderOperationEndingAfterNewerBeginDoesNotClearBusy() {
+    fun endWithoutMatchingBeginDoesNotLeaveTheCounterStuck() {
         val counter = BusyCounter()
-        counter.begin() // 旧操作（例如被取消的 openJob，finally 晚到）
-        counter.begin() // 新操作
         counter.end()
+        assertFalse(counter.busy.value)
+        counter.begin()
+        counter.end()
+        counter.end() // 取消路径遗留的多余 end() 不得把计数压成负数。
+        assertFalse(counter.busy.value)
+        counter.begin()
         assertTrue(counter.busy.value)
         counter.end()
         assertFalse(counter.busy.value)

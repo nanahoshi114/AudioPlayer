@@ -88,6 +88,7 @@
     <string name="translate_error_truncated">译文不完整，请重试</string>
     <string name="whisper_error_download_model_first">请先在「设置 → 听写和翻译」下载 %1$s 模型。</string>
     <string name="whisper_error_model_ambiguous">听写服务返回了多个模型，但没有名称包含 qwen3-asr 的模型，请检查服务配置</string>
+    <string name="whisper_error_endpoint_changed">听写服务地址已变更，请重新发起或改回原地址</string>
     <string name="whisper_error_no_timestamps">服务返回的字幕没有时间信息，请重试</string>
     <string name="whisper_error_audio_decode">音频解码失败</string>
     <string name="whisper_error_voice_detection">人声检测失败</string>
@@ -96,6 +97,9 @@
     <string name="translate_detail_missing_japanese">有句子没有日文。</string>
     <string name="translate_detail_missing_chinese">有句子没有译文。</string>
     <string name="translate_detail_missing_lines">返回的字幕没有覆盖全部原句。</string>
+    <string name="translate_detail_unexpected_merge">未开启语义合并，但返回合并了多条字幕。</string>
     <string name="translate_detail_line_format">返回的字幕编号或行格式不正确。</string>
     <string name="translate_detail_http_status">服务响应状态码：HTTP %1$d</string>
+    <string name="subtitle_delete_language_busy">当前字幕正在处理中，请先中止后再删除</string>
+    <string name="player_error_subtitle_delete">无法删除所选语言字幕，请重试</string>
 </resources>

@@ -9,6 +9,8 @@ import com.nanahoshi.audioplayer.data.db.FolderEntity
 import com.nanahoshi.audioplayer.data.db.TrackEntity
 import com.nanahoshi.audioplayer.data.db.TranslationJobEntity
 import com.nanahoshi.audioplayer.dlsite.DlsiteClient
+import com.nanahoshi.audioplayer.playback.SubtitleLanguageDelete
+import com.nanahoshi.audioplayer.playback.SubtitleLanguageDeleteResult
 import com.nanahoshi.audioplayer.playback.SubtitleSource
 import com.nanahoshi.audioplayer.playback.translationOverlayName
 import kotlinx.coroutines.Dispatchers
@@ -225,7 +227,10 @@ class StoredCatalog(
                 audio.file.parentFile?.listFiles().orEmpty().filter { it.isFile && isSubtitleFile(it.name) }
             } else {
                 val key = runCatching { folder.canonicalPath }.getOrDefault(folder.absolutePath)
-                if (scannedWorks.add(key)) subtitleFilesIn(folder) else emptyList()
+                if (scannedWorks.add(key)) {
+                    val skipDir = if (under(folder, dlsite)) File(folder, "original").canonicalFile else null
+                    subtitleFilesIn(folder, skipDir)
+                } else emptyList()
             }
         }
         val seen = built.map { canonicalPath(it.path) }.toSet()
@@ -321,6 +326,36 @@ class StoredCatalog(
         for (item in audios) deleteOne(item, deleteSubtitles)
     }
 
+    suspend fun deleteGeneratedLanguage(
+        item: StoredItem,
+        target: SubtitleLanguageDelete,
+    ): SubtitleLanguageDeleteResult = withContext(Dispatchers.IO) {
+        if (item.kind != StoredKind.GENERATED || item.translationOverlay) {
+            return@withContext SubtitleLanguageDeleteResult.NOT_APPLICABLE
+        }
+        val file = File(item.path)
+        if (!item.path.startsWith("/") || !owned(file)) {
+            return@withContext SubtitleLanguageDeleteResult.NOT_APPLICABLE
+        }
+        val fingerprint = file.nameWithoutExtension
+        if (fingerprint.isBlank() || !file.name.endsWith(".json")) {
+            return@withContext SubtitleLanguageDeleteResult.NOT_APPLICABLE
+        }
+        subtitles.deleteGeneratedLanguage(fingerprint, target)
+    }
+
+    suspend fun deleteTranslationOverlay(item: StoredItem): SubtitleLanguageDeleteResult =
+        withContext(Dispatchers.IO) {
+            if (item.kind != StoredKind.GENERATED || !item.translationOverlay) {
+                return@withContext SubtitleLanguageDeleteResult.NOT_APPLICABLE
+            }
+            val file = File(item.path)
+            if (!item.path.startsWith("/") || !owned(file)) {
+                return@withContext SubtitleLanguageDeleteResult.NOT_APPLICABLE
+            }
+            subtitles.deleteTranslationOverlayChecked(file)
+        }
+
     private suspend fun deleteOne(item: StoredItem, deleteSubtitles: Boolean) {
         val file = File(item.path)
         if (!item.path.startsWith("/") || !owned(file)) return
@@ -343,9 +378,12 @@ class StoredCatalog(
                     if (lock == null) removeCustom() else lock.withLock { removeCustom() }
                 } else {
                     withContext(NonCancellable) {
-                        if (deleteStoredLibraryFileLocked(db, filesDir, item.path) == LibraryFileDeleteOutcome.REMOVED) {
-                            subtitles.invalidate()
+                        val removed = db.withTransaction {
+                            val target = runCatching { file.canonicalFile }.getOrNull() ?: return@withTransaction false
+                            if (!allowsOriginalMutation(target)) return@withTransaction false
+                            deleteStoredLibraryFileLocked(db, filesDir, item.path) == LibraryFileDeleteOutcome.REMOVED
                         }
+                        if (removed) subtitles.invalidate()
                     }
                 }
             }
@@ -361,6 +399,7 @@ class StoredCatalog(
                 val paths = setOf(item.path, file.path)
                 val ja = paths.firstNotNullOfOrNull { db.jaDownloads().entryForPath(it) }
                 if (under(file, jaWorkRoot.canonicalFile) && ja == null) return@withTransaction false
+                if (!allowsOriginalMutation(file)) return@withTransaction false
                 val tracks = buildList {
                     item.trackId?.let { db.tracks().getById(it) }?.let(::add)
                     ja?.trackId?.let { db.tracks().getById(it) }?.let(::add)
@@ -378,7 +417,7 @@ class StoredCatalog(
                     if (trackIds.isEmpty()) subtitles.discardStoredLocked(null, item.path, identityUrl, excluded)
                     else for (id in trackIds) subtitles.discardStoredLocked(id, item.path, identityUrl, excluded)
                 }
-                deleteBiliSubtitleBeside(file)
+                deleteBiliSubtitleBeside(filesDir, file)
                 for (track in tracks) {
                     if (track.source == TrackSource.BILIBILI) deleteBiliSubtitle(filesDir, track.bvid, track.cid)
                     db.tracks().clearLocalUri(track.id)
@@ -537,6 +576,21 @@ class StoredCatalog(
         return realCode(relative.substringBefore('/'))
     }
 
+    private suspend fun allowsOriginalMutation(file: File): Boolean {
+        if (!isUnderDlsiteOriginal(file, dlsiteRoot.canonicalFile)) return true
+        return db.dlsiteOriginals().allEntries().any {
+            it.kind != DlsiteOriginalKind.FOLDER && filesTouch(it.localPath, file)
+        }
+    }
+
+    private fun isUnderDlsiteOriginal(file: File, dlsite: File): Boolean {
+        val path = runCatching { file.canonicalFile }.getOrNull() ?: return false
+        if (!path.startsWith(dlsite)) return false
+        val relative = path.relativeTo(dlsite).invariantSeparatorsPath
+        val segments = relative.split('/')
+        return segments.size >= 3 && segments[1] == "original"
+    }
+
     private fun owned(file: File): Boolean {
         val root = filesDir.canonicalFile
         val path = runCatching { file.canonicalFile }.getOrNull() ?: return false
@@ -622,7 +676,7 @@ internal fun cueFiles(dir: File, overlay: Boolean): List<File> =
             file.name.startsWith("extra-") == overlay
     }
 
-internal fun subtitleFilesIn(root: File): List<File> {
+internal fun subtitleFilesIn(root: File, skipDir: File? = null): List<File> {
     if (!root.isDirectory) return emptyList()
     val found = mutableListOf<File>()
     val pending = ArrayDeque<File>()
@@ -630,7 +684,9 @@ internal fun subtitleFilesIn(root: File): List<File> {
     pending.add(root)
     while (pending.isNotEmpty()) {
         val dir = pending.removeFirst()
-        val key = runCatching { dir.canonicalPath }.getOrDefault(dir.absolutePath)
+        val canonical = runCatching { dir.canonicalFile }.getOrNull()
+        if (skipDir != null && canonical == skipDir) continue
+        val key = canonical?.path ?: dir.absolutePath
         if (!seen.add(key)) continue
         for (child in dir.listFiles().orEmpty()) {
             when {

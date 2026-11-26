@@ -1,5 +1,7 @@
 package com.nanahoshi.audioplayer.data
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.coroutineScope
@@ -15,6 +17,46 @@ class InflightCalls {
     }
 
     private val slots = HashMap<String, Slot>()
+    private val shared = HashMap<String, CompletableDeferred<Any?>>()
+
+    /**
+     * 同一 [key] 的并发请求只执行一次，其余调用者等待同一结果。
+     * 先到者持有取消票据；它被取消时所有等待者一同收到取消。
+     */
+    suspend fun <T : Any> execute(
+        key: String,
+        progress: TaskReporter? = null,
+        block: suspend (Ticket) -> T,
+    ): T {
+        val deferred: CompletableDeferred<Any?>
+        val owner: Boolean
+        synchronized(slots) {
+            val existing = shared[key]
+            if (existing != null) {
+                deferred = existing
+                owner = false
+            } else {
+                deferred = CompletableDeferred()
+                shared[key] = deferred
+                owner = true
+            }
+        }
+        if (!owner) {
+            @Suppress("UNCHECKED_CAST")
+            return deferred.await() as T
+        }
+        val ticket = prepare(key, progress)
+        try {
+            val value = block(ticket)
+            deferred.complete(value)
+            return value
+        } catch (error: Throwable) {
+            deferred.completeExceptionally(error)
+            throw error
+        } finally {
+            synchronized(slots) { if (shared[key] === deferred) shared.remove(key) }
+        }
+    }
 
     fun prepare(key: String, progress: TaskReporter? = null): Ticket {
         val (ticket, previous) = synchronized(slots) {

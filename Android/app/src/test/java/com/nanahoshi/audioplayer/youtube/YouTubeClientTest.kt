@@ -415,4 +415,46 @@ class YouTubeClientTest {
         } finally { file.delete() }
     }
 
+    @Test fun requestPreservesHttpSpecificErrors() = runBlocking {
+        for ((code, expectedRes) in listOf(
+            401 to R.string.youtube_error_login_expired,
+            500 to R.string.youtube_error_request_failed,
+        )) {
+            val mockHttp = okhttp3.OkHttpClient.Builder().addInterceptor { chain ->
+                okhttp3.Response.Builder().request(chain.request()).protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(code).message("Error").body("{}".toResponseBody()).build()
+            }.build()
+            val field = YouTubeClient::class.java.getDeclaredField("http").apply { isAccessible = true }
+            val client = YouTubeClient({ null }, solver)
+            field.set(client, mockHttp)
+            val error = try {
+                client.videoInfo(id)
+                fail("expected YouTubeException")
+                null
+            } catch (e: YouTubeException) {
+                e
+            }!!
+            assertEquals(TextRef.Res(expectedRes), error.userText)
+            assertEquals(code, error.statusCode)
+        }
+    }
+
+    @Test fun requestPreservesEmptyContentErrorInsteadOfGenericRequestCheck() = runBlocking {
+        val mockHttp = okhttp3.OkHttpClient.Builder().addInterceptor { chain ->
+            okhttp3.Response.Builder().request(chain.request()).protocol(okhttp3.Protocol.HTTP_1_1)
+                .code(200).message("OK").body("".toResponseBody()).build()
+        }.build()
+        val field = YouTubeClient::class.java.getDeclaredField("http").apply { isAccessible = true }
+        val client = YouTubeClient({ null }, solver)
+        field.set(client, mockHttp)
+        val error = try {
+            client.videoInfo(id)
+            fail("expected YouTubeException")
+            null
+        } catch (e: YouTubeException) {
+            e
+        }!!
+        assertEquals(TextRef.Res(R.string.youtube_error_no_content), error.userText)
+    }
+
 }

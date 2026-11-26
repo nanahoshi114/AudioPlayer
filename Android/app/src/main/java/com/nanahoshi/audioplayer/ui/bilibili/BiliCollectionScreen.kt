@@ -11,8 +11,6 @@ import androidx.compose.foundation.lazy.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
-import androidx.compose.material.icons.filled.ArrowDropDown
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Deselect
 import androidx.compose.material.icons.filled.LibraryAdd
 import androidx.compose.material.icons.filled.MoreVert
@@ -28,12 +26,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nanahoshi.audioplayer.bilibili.BiliCollection
-import com.nanahoshi.audioplayer.ui.CoverImage
 import com.nanahoshi.audioplayer.ui.components.AppTopBar
+import com.nanahoshi.audioplayer.ui.components.ConfirmActionDialog
+import com.nanahoshi.audioplayer.ui.components.CoverImage
+import com.nanahoshi.audioplayer.ui.components.DropdownFilterButton
 import com.nanahoshi.audioplayer.ui.components.EmptyState
+import com.nanahoshi.audioplayer.ui.components.RoundedProgress
+import com.nanahoshi.audioplayer.ui.components.SelectableLeading
 import com.nanahoshi.audioplayer.ui.components.SelectionAction
 import com.nanahoshi.audioplayer.ui.components.SelectionTopBar
-import com.nanahoshi.audioplayer.ui.formatDuration
+import com.nanahoshi.audioplayer.ui.components.formatDuration
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -113,7 +115,7 @@ fun BiliCollectionScreen(
             })
         }
         if (model.running) {
-            LinearProgressIndicator(Modifier.fillMaxWidth())
+            RoundedProgress(progress = null)
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(model.progress, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                 if (!model.committing && (model.preparing || model.loading)) {
@@ -191,8 +193,15 @@ fun BiliCollectionScreen(
                 ListItem(headlineContent = { Text(video.title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
                     supportingContent = { Text("${formatDuration(video.durationMs)} · ${video.bvid}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     leadingContent = {
-                        if (selecting) Checkbox(video.bvid in model.selected, onCheckedChange = { model.toggle(video.bvid) }, enabled = !model.busy)
-                        else CoverImage(video.coverUrl, shape = MaterialTheme.shapes.small)
+                        SelectableLeading(
+                            selecting = selecting,
+                            selected = video.bvid in model.selected,
+                            onToggle = { model.toggle(video.bvid) },
+                            enabled = !model.busy,
+                            label = "biliCollectionLead",
+                        ) {
+                            CoverImage(video.coverUrl, shape = MaterialTheme.shapes.small)
+                        }
                     }, trailingContent = {
                         if (!selecting) Box {
                             IconButton(onClick = { rowMenu = true }, enabled = !model.busy) { Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.bilibili_video_actions)) }
@@ -244,10 +253,16 @@ fun BiliCollectionScreen(
             confirmButton = { TextButton(onClick = { model.confirmCopyName(name) }, enabled = name.isNotBlank()) { Text(stringResource(R.string.bilibili_next_choose)) } },
             dismissButton = { TextButton(onClick = model::dismissCopy) { Text(stringResource(R.string.common_cancel)) } })
     }
-    if (removing) AlertDialog(onDismissRequest = { removing = false }, title = { Text(stringResource(R.string.bilibili_remove_playlist)) },
-        text = { Text(stringResource(R.string.bilibili_remove_playlist_message)) },
-        confirmButton = { TextButton(onClick = { removing = false; model.unbookmark() }) { Text(stringResource(R.string.bilibili_remove), color = MaterialTheme.colorScheme.error) } },
-        dismissButton = { TextButton(onClick = { removing = false }) { Text(stringResource(R.string.common_keep)) } })
+    if (removing) {
+        ConfirmActionDialog(
+            title = stringResource(R.string.bilibili_remove_playlist),
+            message = stringResource(R.string.bilibili_remove_playlist_message),
+            confirmLabel = stringResource(R.string.bilibili_remove),
+            dismissLabel = stringResource(R.string.common_keep),
+            onConfirm = { removing = false; model.unbookmark() },
+            onDismiss = { removing = false },
+        )
+    }
 }
 
 /** 路由参数解码失败时的兜底页：保留顶栏与返回，不再白屏。 */
@@ -294,21 +309,14 @@ internal fun CollectionPlaybackActions(selecting: Boolean, enabled: Boolean, onA
 
 @Composable
 internal fun CollectionSortSelector(sort: CollectionSort, onSort: (CollectionSort) -> Unit, enabled: Boolean = true) {
-    var expanded by remember { mutableStateOf(false) }
-    Box {
-        TextButton(onClick = { expanded = true }, enabled = enabled) {
-            Text(stringResource(R.string.bilibili_sort_label, stringResource(sort.labelRes)))
-            Icon(Icons.Default.ArrowDropDown, contentDescription = null)
-        }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            for (option in CollectionSort.entries) {
-                DropdownMenuItem(text = { Text(stringResource(option.labelRes)) }, onClick = {
-                    expanded = false
-                    onSort(option)
-                }, trailingIcon = { if (option == sort) Icon(Icons.Default.Check, contentDescription = stringResource(R.string.a11y_selected)) })
-            }
-        }
-    }
+    DropdownFilterButton(
+        options = CollectionSort.entries,
+        selected = sort,
+        buttonLabel = stringResource(R.string.bilibili_sort_label, stringResource(sort.labelRes)),
+        optionLabel = { stringResource(it.labelRes) },
+        onSelect = onSort,
+        enabled = enabled,
+    )
 }
 
 @Composable

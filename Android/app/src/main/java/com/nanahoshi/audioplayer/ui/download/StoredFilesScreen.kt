@@ -1,95 +1,100 @@
 package com.nanahoshi.audioplayer.ui.download
 
-import com.nanahoshi.audioplayer.text.resolveUserError
-import com.nanahoshi.audioplayer.R
-import androidx.compose.ui.res.stringResource
-
 import android.app.Application
 import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import com.nanahoshi.audioplayer.AppGraph
-import com.nanahoshi.audioplayer.data.TrackSource
-import kotlinx.coroutines.CancellationException
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Album
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.Icon
-import com.nanahoshi.audioplayer.playback.SubtitleCue
-import com.nanahoshi.audioplayer.playback.parseGeneratedSubtitles
-import com.nanahoshi.audioplayer.ui.components.AppTopBar
-import com.nanahoshi.audioplayer.ui.components.DeleteAudioDialog
-import com.nanahoshi.audioplayer.ui.components.EmptyState
-import com.nanahoshi.audioplayer.ui.components.ErrorState
-import com.nanahoshi.audioplayer.ui.components.LoadingState
-import com.nanahoshi.audioplayer.ui.components.SearchField
-import com.nanahoshi.audioplayer.ui.components.SelectionAction
-import com.nanahoshi.audioplayer.ui.components.SelectionTopBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.semantics.selected
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.nanahoshi.audioplayer.AppGraph
+import com.nanahoshi.audioplayer.R
+import com.nanahoshi.audioplayer.data.StoredCatalog
 import com.nanahoshi.audioplayer.data.StoredItem
 import com.nanahoshi.audioplayer.data.StoredKind
+import com.nanahoshi.audioplayer.data.TrackSource
 import com.nanahoshi.audioplayer.data.decodeTextBytes
 import com.nanahoshi.audioplayer.data.formatByteSize
 import com.nanahoshi.audioplayer.data.readBoundedBytes
 import com.nanahoshi.audioplayer.data.storedItemMatches
 import com.nanahoshi.audioplayer.graph
-import com.nanahoshi.audioplayer.ui.EmptyHint
-import kotlinx.coroutines.launch
+import com.nanahoshi.audioplayer.playback.StoredAudioRequest
+import com.nanahoshi.audioplayer.playback.SubtitleCue
+import com.nanahoshi.audioplayer.playback.SubtitleLanguageDelete
+import com.nanahoshi.audioplayer.playback.SubtitleLanguageDeleteResult
+import com.nanahoshi.audioplayer.playback.hasTranslation
+import com.nanahoshi.audioplayer.playback.parseGeneratedSubtitles
+import com.nanahoshi.audioplayer.text.resolveUserError
+import com.nanahoshi.audioplayer.ui.components.AppTopBar
+import com.nanahoshi.audioplayer.ui.components.DeleteAudioDialog
+import com.nanahoshi.audioplayer.ui.components.DeleteSubtitleLanguageDialog
+import com.nanahoshi.audioplayer.ui.components.EmptyState
+import com.nanahoshi.audioplayer.ui.components.ErrorState
+import com.nanahoshi.audioplayer.ui.components.LoadingState
+import com.nanahoshi.audioplayer.ui.components.SearchField
+import com.nanahoshi.audioplayer.ui.components.SegmentedTabBar
+import com.nanahoshi.audioplayer.ui.components.SelectionAction
+import com.nanahoshi.audioplayer.ui.components.SelectionState
+import com.nanahoshi.audioplayer.ui.components.SelectionTopBar
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
 
 class StoredFilesViewModel(app: Application) : AndroidViewModel(app) {
     private val graph = app.graph()
-    private val catalog = graph.storedCatalog
+    private val catalog: StoredCatalog = graph.storedCatalog
     var items by mutableStateOf<List<StoredItem>>(emptyList())
         private set
     var loading by mutableStateOf(true)
@@ -124,43 +129,19 @@ class StoredFilesViewModel(app: Application) : AndroidViewModel(app) {
 
     fun play(item: StoredItem) {
         if (item.kind != StoredKind.AUDIO) return
-        viewModelScope.launch {
-            val track = item.trackId?.let { graph.library.track(it) } ?: graph.db.tracks().findByLocalUri(item.path)
-            if (track != null) {
-                graph.player.replaceAndPlay(listOf(track))
-                return@launch
-            }
-            if (item.source == TrackSource.JAPANESE_ASMR && item.remoteUrl?.startsWith("japaneseasmr://file?") == true) {
-                graph.player.replaceAndPlayRemote(listOf(com.nanahoshi.audioplayer.dlsite.RemotePlayable(
-                    item.name, item.workTitle, null, item.remoteUrl, item.source, "",
-                    workno = item.workCode, fileKey = item.fileKey,
-                )))
-                return@launch
-            }
-            if (item.source == TrackSource.JAPANESE_ASMR) {
-                val postId = item.workKey ?: return@launch
-                val key = item.fileKey ?: return@launch
-                val post = graph.db.japaneseAsmr().post(postId) ?: return@launch
-                graph.player.replaceAndPlayRemote(listOf(com.nanahoshi.audioplayer.dlsite.RemotePlayable(
-                    item.name, item.workTitle, post.coverUri, post.url, item.source,
-                    com.nanahoshi.audioplayer.japaneseasmr.JapaneseAsmrClient.REFERER,
-                    workno = postId, fileKey = key, mediaKind = graph.db.japaneseAsmr().media(postId, key)?.kind,
-                )))
-                return@launch
-            }
-            val app = getApplication<Application>()
-            val file = File(item.path).canonicalFile
-            val youtube = file.startsWith(File(app.filesDir, "youtube").canonicalFile)
-            val bili = file.startsWith(File(app.filesDir, "bilibili").canonicalFile)
-            val id = item.workCode.orEmpty()
-            graph.player.replaceAndPlayRemote(listOf(com.nanahoshi.audioplayer.dlsite.RemotePlayable(
-                title = item.name, artist = item.workTitle, coverUri = null,
-                remoteUrl = if (youtube) "https://www.youtube.com/watch?v=$id" else item.path,
-                source = when { youtube -> com.nanahoshi.audioplayer.data.TrackSource.YOUTUBE; bili -> com.nanahoshi.audioplayer.data.TrackSource.BILIBILI; else -> com.nanahoshi.audioplayer.data.TrackSource.LOCAL },
-                referer = "", workno = id.takeIf { youtube || bili },
-                fileKey = if (youtube) "audio" else if (bili) file.nameWithoutExtension else null,
-            )))
-        }
+        graph.player.playStoredAudio(
+            StoredAudioRequest(
+                path = item.path,
+                title = item.name,
+                artist = item.workTitle,
+                trackId = item.trackId,
+                source = item.source,
+                workKey = item.workKey,
+                workCode = item.workCode,
+                fileKey = item.fileKey,
+                remoteUrl = item.remoteUrl,
+            ),
+        )
     }
 
     data class PendingDelete(val items: List<StoredItem>, val subtitles: Int)
@@ -200,6 +181,33 @@ class StoredFilesViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
     }
+
+    suspend fun deleteSubtitleLanguage(
+        item: StoredItem,
+        target: SubtitleLanguageDelete,
+    ): SubtitleLanguageDeleteResult {
+        val result = try {
+            if (item.translationOverlay) {
+                if (target == SubtitleLanguageDelete.CHINESE) catalog.deleteTranslationOverlay(item)
+                else SubtitleLanguageDeleteResult.NOT_APPLICABLE
+            } else {
+                catalog.deleteGeneratedLanguage(item, target)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            SubtitleLanguageDeleteResult.FAILED
+        }
+        when (result) {
+            SubtitleLanguageDeleteResult.DELETED -> {
+                runCatching { items = catalog.list() }
+            }
+            SubtitleLanguageDeleteResult.BUSY -> graph.show(R.string.subtitle_delete_language_busy)
+            SubtitleLanguageDeleteResult.FAILED -> graph.show(R.string.stored_delete_failed)
+            SubtitleLanguageDeleteResult.NOT_APPLICABLE -> Unit
+        }
+        return result
+    }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -215,7 +223,7 @@ fun StoredFilesScreen(
     val subtitleListState = rememberLazyListState()
     var query by rememberSaveable { mutableStateOf("") }
     var selecting by remember { mutableStateOf(false) }
-    var selected by remember { mutableStateOf(setOf<String>()) }
+    val selection = remember { SelectionState<String>() }
     var preview by remember { mutableStateOf<StoredItem?>(null) }
     val categoryItems = remember(viewModel.items, showAudio) {
         viewModel.items.filter { (it.kind == StoredKind.AUDIO) == showAudio }
@@ -223,36 +231,36 @@ fun StoredFilesScreen(
     val visible = remember(categoryItems, query) {
         categoryItems.filter { storedItemMatches(it, query) }
     }
-    val chosen = categoryItems.filter { it.path in selected }
-    val single = chosen.singleOrNull()
-    BackHandler(enabled = selecting) {
-        selecting = false
-        selected = emptySet()
+    val chosen = remember(categoryItems, selection.ids) {
+        categoryItems.filter { it.path in selection }
     }
+    val single = chosen.singleOrNull()
+    val clearSelection = {
+        selecting = false
+        selection.clear()
+    }
+    BackHandler(enabled = selecting, onBack = clearSelection)
     val pendingDelete = viewModel.pendingDelete
     if (pendingDelete != null) {
-        val onDone = {
-            selecting = false
-            selected = emptySet()
-        }
         DeleteAudioDialog(
             itemCount = pendingDelete.items.size,
             subtitleCount = pendingDelete.subtitles,
-            onConfirm = { deleteSubtitles -> viewModel.confirmDelete(deleteSubtitles, onDone) },
+            onConfirm = { deleteSubtitles -> viewModel.confirmDelete(deleteSubtitles, clearSelection) },
             onCancel = viewModel::cancelDelete,
         )
     }
     preview?.let { item ->
-        SubtitlePreviewDialog(item = item, onDismiss = { preview = null })
+        SubtitlePreviewDialog(
+            item = item,
+            onDeleteLanguage = viewModel::deleteSubtitleLanguage,
+            onDismiss = { preview = null },
+        )
     }
     Column(Modifier.fillMaxSize()) {
         if (selecting) {
             SelectionTopBar(
                 count = chosen.size,
-                onClose = {
-                    selecting = false
-                    selected = emptySet()
-                },
+                onClose = clearSelection,
                 pinDestructiveWhenFits = true,
                 actions = buildList {
                     add(
@@ -290,20 +298,16 @@ fun StoredFilesScreen(
                 },
             )
         }
-        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
-            SegmentedButton(
-                selected = showAudio,
-                onClick = { showAudio = true },
-                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-                enabled = !selecting,
-            ) { Text(stringResource(R.string.stored_segment_audio), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
-            SegmentedButton(
-                selected = !showAudio,
-                onClick = { showAudio = false },
-                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-                enabled = !selecting,
-            ) { Text(stringResource(R.string.stored_segment_subtitle), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
-        }
+        SegmentedTabBar(
+            options = listOf(true, false),
+            selected = showAudio,
+            label = { audio ->
+                stringResource(if (audio) R.string.stored_segment_audio else R.string.stored_segment_subtitle)
+            },
+            onSelect = { showAudio = it },
+            enabled = !selecting,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+        )
         SearchField(
             value = query,
             onValueChange = { query = it },
@@ -359,7 +363,7 @@ fun StoredFilesScreen(
                     }
                 }
                 items(visible, key = { it.path }) { item ->
-                    val on = item.path in selected
+                    val on = item.path in selection
                     ListItem(
                         headlineContent = { Text(item.name, maxLines = 2, overflow = TextOverflow.Ellipsis) },
                         leadingContent = {
@@ -393,13 +397,13 @@ fun StoredFilesScreen(
                                     }
                                     return@combinedClickable
                                 }
-                                selected = if (on) selected - item.path else selected + item.path
-                                if (selected.isEmpty()) selecting = false
+                                selection.toggle(item.path)
+                                if (selection.isEmpty) selecting = false
                             },
                             onLongClick = {
                                 selecting = true
-                                selected = if (on) selected - item.path else selected + item.path
-                                if (selected.isEmpty()) selecting = false
+                                selection.toggle(item.path)
+                                if (selection.isEmpty) selecting = false
                             },
                         ),
                     )
@@ -415,58 +419,134 @@ private class SubtitlePreviewContent(
     val raw: String,
     val cues: List<SubtitleCue>?,
     val truncated: Boolean,
+    val hasTranslation: Boolean,
 )
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun SubtitlePreviewDialog(item: StoredItem, onDismiss: () -> Unit) {
+private fun SubtitlePreviewDialog(
+    item: StoredItem,
+    onDeleteLanguage: suspend (StoredItem, SubtitleLanguageDelete) -> SubtitleLanguageDeleteResult,
+    onDismiss: () -> Unit,
+) {
     var content by remember(item.path) { mutableStateOf<SubtitlePreviewContent?>(null) }
     var failed by remember(item.path) { mutableStateOf(false) }
-    LaunchedEffect(item.path) {
+    var reloadKey by remember(item.path) { mutableStateOf(0) }
+    var busy by remember(item.path) { mutableStateOf(false) }
+    var confirmTarget by remember(item.path) { mutableStateOf<SubtitleLanguageDelete?>(null) }
+    val previewListState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    LaunchedEffect(item.path, reloadKey) {
         content = null
         failed = false
         val loaded = withContext(Dispatchers.IO) {
-            runCatching { readSubtitlePreview(File(item.path), item.kind) }
+            runCatching { readSubtitlePreview(File(item.path), item) }
         }
         loaded.onSuccess { content = it }.onFailure { failed = true }
     }
+    confirmTarget?.let { target ->
+        DeleteSubtitleLanguageDialog(
+            target = target,
+            translationOverlay = item.translationOverlay,
+            enabled = !busy,
+            onConfirm = {
+                confirmTarget = null
+                busy = true
+                scope.launch {
+                    try {
+                        val result = onDeleteLanguage(item, target)
+                        if (result == SubtitleLanguageDeleteResult.DELETED) {
+                            if (item.translationOverlay) onDismiss() else reloadKey++
+                        }
+                    } finally {
+                        busy = false
+                    }
+                }
+            },
+            onDismiss = { confirmTarget = null },
+        )
+    }
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!busy) onDismiss() },
         title = { Text(item.name, maxLines = 2, overflow = TextOverflow.Ellipsis) },
         text = {
             val loaded = content
             when {
                 failed -> Text(stringResource(R.string.stored_preview_failed))
                 loaded == null -> LoadingState(stringResource(R.string.stored_loading))
-                else -> SelectionContainer {
-                    Column(
-                        Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState()),
+                else -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val showDeleteChinese = item.kind == StoredKind.GENERATED && loaded.hasTranslation
+                    val showDeleteOriginal = item.kind == StoredKind.GENERATED && !item.translationOverlay && loaded.hasTranslation
+                    if (showDeleteChinese || showDeleteOriginal) {
+                        FlowRow(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            if (showDeleteChinese) {
+                                TextButton(
+                                    enabled = !busy,
+                                    onClick = { confirmTarget = SubtitleLanguageDelete.CHINESE },
+                                    modifier = Modifier.defaultMinSize(minHeight = 48.dp),
+                                ) {
+                                    Text(
+                                        stringResource(R.string.player_delete_chinese_subtitle),
+                                        color = MaterialTheme.colorScheme.error,
+                                    )
+                                }
+                            }
+                            if (showDeleteOriginal) {
+                                TextButton(
+                                    enabled = !busy,
+                                    onClick = { confirmTarget = SubtitleLanguageDelete.ORIGINAL },
+                                    modifier = Modifier.defaultMinSize(minHeight = 48.dp),
+                                ) {
+                                    Text(
+                                        stringResource(R.string.player_delete_original_subtitle),
+                                        color = MaterialTheme.colorScheme.error,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    val cues = loaded.cues
+                    LazyColumn(
+                        state = previewListState,
+                        modifier = Modifier.fillMaxWidth().heightIn(max = 440.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         if (loaded.truncated) {
-                            Text(
-                                stringResource(R.string.stored_preview_truncated),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+                            item(key = "truncated") {
+                                Text(
+                                    stringResource(R.string.stored_preview_truncated),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                         }
-                        val cues = loaded.cues
                         if (cues == null) {
-                            Text(loaded.raw, style = MaterialTheme.typography.bodySmall)
+                            item(key = "raw") {
+                                SelectionContainer {
+                                    Text(loaded.raw, style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
                         } else {
-                            cues.forEach { cue ->
-                                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                    Text(
-                                        "${subtitleTime(cue.startMs)} → ${subtitleTime(cue.endMs)}",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                    Text(cue.text, style = MaterialTheme.typography.bodyMedium)
-                                    cue.translation?.takeIf { it.isNotBlank() }?.let { translation ->
+                            itemsIndexed(cues, key = { index, cue -> "$index-${cue.startMs}" }) { _, cue ->
+                                SelectionContainer {
+                                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                         Text(
-                                            translation,
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            color = MaterialTheme.colorScheme.primary,
+                                            "${subtitleTime(cue.startMs)} → ${subtitleTime(cue.endMs)}",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         )
+                                        Text(cue.text, style = MaterialTheme.typography.bodyMedium)
+                                        cue.translation?.takeIf { it.isNotBlank() }?.let { translation ->
+                                            Text(
+                                                translation,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                color = MaterialTheme.colorScheme.primary,
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -476,17 +556,24 @@ private fun SubtitlePreviewDialog(item: StoredItem, onDismiss: () -> Unit) {
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_close)) }
+            TextButton(enabled = !busy, onClick = onDismiss) { Text(stringResource(R.string.common_close)) }
         },
     )
 }
 
-private fun readSubtitlePreview(file: File, kind: StoredKind): SubtitlePreviewContent {
+private fun readSubtitlePreview(file: File, item: StoredItem): SubtitlePreviewContent {
     if (!file.isFile) throw java.io.IOException("subtitle missing")
     val (bytes, clipped) = file.inputStream().use { readBoundedBytes(it, SUBTITLE_PREVIEW_LIMIT) }
     val raw = decodeTextBytes(bytes, clipped)
-    val cues = if (kind == StoredKind.GENERATED) parseGeneratedSubtitles(raw)?.displayCues else null
-    return SubtitlePreviewContent(raw, cues, clipped)
+    val cues = if (item.kind == StoredKind.GENERATED) parseGeneratedSubtitles(raw)?.displayCues else null
+    val hasTranslation = when {
+        item.kind != StoredKind.GENERATED -> false
+        item.translationOverlay -> true
+        cues != null -> cues.hasTranslation()
+        clipped -> runCatching { parseGeneratedSubtitles(file.readText())?.displayCues?.hasTranslation() == true }.getOrDefault(false)
+        else -> false
+    }
+    return SubtitlePreviewContent(raw, cues, clipped, hasTranslation)
 }
 
 private fun subtitleTime(milliseconds: Long): String {

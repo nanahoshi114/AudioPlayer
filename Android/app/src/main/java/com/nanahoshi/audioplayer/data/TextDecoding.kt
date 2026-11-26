@@ -1,10 +1,31 @@
 package com.nanahoshi.audioplayer.data
 
+import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.CharBuffer
 import java.nio.charset.Charset
 import java.nio.charset.CodingErrorAction
+
+internal const val MAX_SUBTITLE_TEXT_BYTES = 16 * 1024 * 1024
+
+internal fun InputStream.readFullText(maxBytes: Int = MAX_SUBTITLE_TEXT_BYTES): String {
+    require(maxBytes > 0)
+    val output = ByteArrayOutputStream()
+    val buffer = ByteArray(16 * 1024)
+    var total = 0
+    while (true) {
+        val count = read(buffer)
+        if (count < 0) break
+        if (count > maxBytes - total) {
+            throw IOException("Text exceeds $maxBytes bytes")
+        }
+        output.write(buffer, 0, count)
+        total += count
+    }
+    return decodeTextBytes(output.toByteArray(), clipped = false)
+}
 
 data class BoundedTextBytes(val bytes: ByteArray, val clipped: Boolean)
 

@@ -12,4 +12,9 @@ class SettingsInputBaselineTest {
         assertTrue(baseline.isModified("address/", "token"))
         assertTrue(baseline.isModified("address", "new-token"))
     }
+
+    @Test
+    fun toStringNeverExposesSavedCredentials() {
+        assertFalse(SettingsInputBaseline("secret-token").toString().contains("secret-token"))
+    }
 }

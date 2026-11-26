@@ -5,6 +5,7 @@ import com.nanahoshi.audioplayer.text.TextRef
 import androidx.compose.ui.res.stringResource
 import android.app.Application
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -20,18 +21,17 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.nanahoshi.audioplayer.data.LocalRemoval
+import com.nanahoshi.audioplayer.data.LocalRemovalPlan
+import com.nanahoshi.audioplayer.data.TrackSource
+import com.nanahoshi.audioplayer.data.canonicalPath
 import com.nanahoshi.audioplayer.data.db.FolderEntity
 import com.nanahoshi.audioplayer.data.db.TrackEntity
-import com.nanahoshi.audioplayer.data.localRemoval
 import com.nanahoshi.audioplayer.graph
-import com.nanahoshi.audioplayer.ui.CoverImage
 import com.nanahoshi.audioplayer.ui.components.*
-import com.nanahoshi.audioplayer.ui.formatDuration
 import com.nanahoshi.audioplayer.ui.library.PlaylistPickDialog
 import com.nanahoshi.audioplayer.ui.library.TrackRow
 import com.nanahoshi.audioplayer.ui.library.deleteDownloadedNotice
-import com.nanahoshi.audioplayer.ui.theme.LocalSourceColors
+import com.nanahoshi.audioplayer.ui.library.hasTargets
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.combine
 
@@ -76,19 +76,37 @@ class BiliVideoViewModel(app: Application) : AndroidViewModel(app) {
             else TextRef.Res(R.string.bilibili_already_local_or_downloading),
         )
     }
-    data class PendingDelete(val tracks: List<TrackEntity>, val subtitles: Int)
-    var pendingDelete by mutableStateOf<PendingDelete?>(null); private set
+    internal data class PendingDelete(
+        val plan: LocalRemovalPlan,
+        val audioCount: Int,
+        val associationCount: Int,
+        val generatedSubtitleCount: Int,
+        val customSubtitleCount: Int,
+    )
+    internal var pendingDelete by mutableStateOf<PendingDelete?>(null); private set
 
     fun deleteDownloads(items: List<TrackEntity> = chosen()) = action {
-        val downloads = withContext(Dispatchers.IO) {
-            val filesDir = getApplication<Application>().filesDir
-            items.filter { it.localRemoval(filesDir) == LocalRemoval.DOWNLOAD }
+        val ids = items.map { it.id }.toSet()
+        if (ids.isEmpty()) return@action
+        val plan = graph.library.localRemovalPlan(ids, emptySet(), emptySet(), TrackSource.BILIBILI)
+        if (!plan.hasTargets) return@action
+        val downloadGroups = plan.audioDownloads.groupBy { it.localUri?.let(::canonicalPath) ?: "id:${it.id}" }
+        val audioCount = downloadGroups.size
+        val associationCount = plan.audioAssociations.distinctBy { it.id }.size
+        val generatedSubtitleCount = downloadGroups.values.count { group ->
+            group.any { graph.subtitles.hasRemovableSubtitlesForTrack(it) }
         }
-        val subtitles = downloads.count { graph.subtitles.hasGenerated(it.id, it.localUri, it.remoteUrl) }
-        if (subtitles > 0) {
-            pendingDelete = PendingDelete(downloads, subtitles)
+        val customSubtitleCount = plan.customSubtitlePaths.distinct().size
+        if (generatedSubtitleCount > 0 || customSubtitleCount > 0 || (audioCount > 0 && associationCount > 0)) {
+            pendingDelete = PendingDelete(
+                plan = plan,
+                audioCount = audioCount,
+                associationCount = associationCount,
+                generatedSubtitleCount = generatedSubtitleCount,
+                customSubtitleCount = customSubtitleCount,
+            )
         } else {
-            val result = graph.downloads.deleteDownloaded(downloads, deleteSubtitles = true)
+            val result = graph.downloads.deleteLocalTargets(plan, deleteSubtitles = true, graph.subtitleBindings)
             clear()
             graph.show(deleteDownloadedNotice(result))
         }
@@ -97,7 +115,7 @@ class BiliVideoViewModel(app: Application) : AndroidViewModel(app) {
         val pending = pendingDelete ?: return
         pendingDelete = null
         action {
-            val result = graph.downloads.deleteDownloaded(pending.tracks, deleteSubtitles)
+            val result = graph.downloads.deleteLocalTargets(pending.plan, deleteSubtitles, graph.subtitleBindings)
             clear()
             graph.show(deleteDownloadedNotice(result))
         }
@@ -108,7 +126,12 @@ class BiliVideoViewModel(app: Application) : AndroidViewModel(app) {
 }
 
 @Composable
-fun BiliVideoScreen(folderId: Long, onBack: () -> Unit, viewModel: BiliVideoViewModel = viewModel()) {
+fun BiliVideoScreen(
+    folderId: Long,
+    onBack: () -> Unit,
+    onSearchUploader: (String) -> Unit = {},
+    viewModel: BiliVideoViewModel = viewModel(),
+) {
     LaunchedEffect(folderId) { viewModel.open(folderId) }
     LaunchedEffect(viewModel.loaded, viewModel.folder) { if (viewModel.loaded && viewModel.folder == null) onBack() }
     val selecting = viewModel.selected.isNotEmpty()
@@ -118,63 +141,119 @@ fun BiliVideoScreen(folderId: Long, onBack: () -> Unit, viewModel: BiliVideoView
     var pickingPlaylist by remember { mutableStateOf(false) }
     val playlists by viewModel.playlists.collectAsStateWithLifecycle(emptyList())
     val state = rememberLazyListState()
-    Column(Modifier.fillMaxSize()) {
-        if (selecting) SelectionTopBar(viewModel.selected.size, viewModel::clear, listOf(
-            SelectionAction(stringResource(R.string.bilibili_play_selected), Icons.Default.PlayArrow, viewModel::playSelection),
-            SelectionAction(stringResource(R.string.library_play_next), Icons.Default.SkipNext, { viewModel.next() }),
-            SelectionAction(stringResource(R.string.library_add_queue), Icons.AutoMirrored.Filled.PlaylistAdd, { viewModel.append() }),
-            SelectionAction(stringResource(R.string.bilibili_download_track), Icons.Default.Download, { viewModel.download() }),
-            SelectionAction(stringResource(R.string.library_add_playlist), Icons.AutoMirrored.Filled.QueueMusic, { pickingPlaylist = true }),
-            SelectionAction(stringResource(R.string.bilibili_delete_downloads), Icons.Default.Delete, { viewModel.deleteDownloads() }, destructive = true),
-        )) else AppTopBar(stringResource(R.string.bilibili_video_title), onBack = onBack, actions = {
-            IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.a11y_video_actions)) }
-            DropdownMenu(menu, { menu = false }) {
-                DropdownMenuItem(text = { Text(stringResource(R.string.library_remove_from_library)) }, onClick = { menu = false; removing = true })
-            }
-        })
-        val folder = viewModel.folder
-        if (folder == null) LoadingState(stringResource(R.string.bilibili_reading_video)) else WorkFileBrowser(
-            state = state, modifier = Modifier.weight(1f).fillMaxWidth(),
-            header = {
-                Row(Modifier.padding(16.dp)) {
-                    CoverImage(folder.coverUri, size = 112.dp)
-                    Column(Modifier.weight(1f).padding(start = 12.dp)) {
-                        Text(folder.name, style = MaterialTheme.typography.titleLarge)
-                        Text(viewModel.tracks.firstOrNull()?.artist.orEmpty(), Modifier.padding(top = 8.dp))
-                        BadgeLine(listOf(BadgeItem(stringResource(R.string.library_badge_bilibili), LocalSourceColors.current.bilibili), BadgeItem(stringResource(R.string.library_badge_multi_part), MaterialTheme.colorScheme.secondary)),
-                            listOf(BadgeItem(folder.biliBvid.orEmpty(), MaterialTheme.colorScheme.onSurfaceVariant)), modifier = Modifier.padding(top = 8.dp))
-                        Text("${viewModel.tracks.size} P · ${formatDuration(viewModel.tracks.sumOf { it.durationMs })}", Modifier.padding(top = 8.dp))
-                    }
+    val pageState = rememberScrollState()
+    val title = stringResource(R.string.bilibili_video_title)
+    val folder = viewModel.folder
+    if (folder == null) {
+        Column(Modifier.fillMaxSize()) {
+            AppTopBar(title, onBack = onBack)
+            LoadingState(stringResource(R.string.bilibili_reading_video))
+        }
+    } else {
+        ImmersiveWorkScaffold(
+            listState = state,
+            pageState = pageState,
+            selectionBar = if (selecting) {
+                {
+                    SelectionTopBar(
+                        count = viewModel.selected.size,
+                        onClose = viewModel::clear,
+                        actions = listOf(
+                            SelectionAction(stringResource(R.string.bilibili_play_selected), Icons.Default.PlayArrow, viewModel::playSelection),
+                            SelectionAction(stringResource(R.string.library_play_next), Icons.Default.SkipNext, { viewModel.next() }),
+                            SelectionAction(stringResource(R.string.library_add_queue), Icons.AutoMirrored.Filled.PlaylistAdd, { viewModel.append() }),
+                            SelectionAction(stringResource(R.string.bilibili_download_track), Icons.Default.Download, { viewModel.download() }),
+                            SelectionAction(stringResource(R.string.library_add_playlist), Icons.AutoMirrored.Filled.QueueMusic, { pickingPlaylist = true }),
+                            SelectionAction(stringResource(R.string.bilibili_delete_downloads), Icons.Default.Delete, { viewModel.deleteDownloads() }, destructive = true),
+                        ),
+                    )
                 }
-                FilledTonalButton(onClick = { viewModel.download(viewModel.tracks) }, modifier = Modifier.padding(horizontal = 16.dp)) { Text(stringResource(R.string.bilibili_download_all_tracks)) }
+            } else {
+                null
+            },
+            topBar = { containerAlpha ->
+                ImmersiveTopBar(
+                    title = title,
+                    containerAlpha = containerAlpha,
+                    onBack = onBack,
+                    actions = {
+                        IconButton(onClick = { menu = true }) {
+                            Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.a11y_video_actions))
+                        }
+                        DropdownMenu(menu, { menu = false }) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.library_remove_from_library)) },
+                                onClick = {
+                                    menu = false
+                                    removing = true
+                                },
+                            )
+                        }
+                    },
+                )
+            },
+            header = { topBarInset, heroMeasureModifier ->
+                BiliVideoHeroHeader(
+                    title = folder.name,
+                    bvid = folder.biliBvid.orEmpty(),
+                    uploader = viewModel.tracks.firstOrNull()?.artist,
+                    partCount = viewModel.tracks.size,
+                    totalDurationText = formatDuration(viewModel.tracks.sumOf { it.durationMs }),
+                    coverUrl = folder.coverUri,
+                    topBarInset = topBarInset,
+                    onSearchUploader = onSearchUploader,
+                    modifier = heroMeasureModifier,
+                )
+                FilledTonalButton(
+                    onClick = { viewModel.download(viewModel.tracks) },
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                ) {
+                    Text(stringResource(R.string.bilibili_download_all_tracks))
+                }
             },
             controls = {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    SectionHeader(stringResource(R.string.bilibili_parts), Modifier.weight(1f))
-                    TextButton(onClick = viewModel::all) { Text(stringResource(if (selecting && viewModel.selected.size == viewModel.tracks.size) R.string.bilibili_deselect_all else R.string.bilibili_select_all)) }
+                SectionHeader(stringResource(R.string.bilibili_parts)) {
+                    val allSelected = selecting && viewModel.selected.size == viewModel.tracks.size
+                    TextButton(onClick = viewModel::all) {
+                        Text(stringResource(if (allSelected) R.string.bilibili_deselect_all else R.string.bilibili_select_all))
+                    }
                 }
             },
         ) {
             items(viewModel.tracks, key = { it.id }) { track ->
-                TrackRow(track = track.copy(title = "P${track.page ?: 1} · ${track.title.removePrefix(folder.name + " - ")}"),
-                    hasSubtitle = false, selected = track.id in viewModel.selected, selecting = selecting,
+                TrackRow(
+                    track = track.copy(title = "P${track.page ?: 1} · ${track.title.removePrefix(folder.name + " - ")}"),
+                    hasSubtitle = false,
+                    selected = track.id in viewModel.selected,
+                    selecting = selecting,
                     onClick = { if (selecting) viewModel.toggle(track.id) else viewModel.play(track) },
-                    onLongClick = { viewModel.toggle(track.id) }, onAppend = { viewModel.append(listOf(track)) },
-                    onPlayNext = { viewModel.next(listOf(track)) }, onDownload = { viewModel.download(listOf(track)) },
-                    onDeleteDownloaded = { viewModel.deleteDownloads(listOf(track)) }, onDelete = null)
+                    onLongClick = { viewModel.toggle(track.id) },
+                    onAppend = { viewModel.append(listOf(track)) },
+                    onPlayNext = { viewModel.next(listOf(track)) },
+                    onDownload = { viewModel.download(listOf(track)) },
+                    onDeleteDownloaded = { viewModel.deleteDownloads(listOf(track)) },
+                    onDelete = null,
+                )
             }
         }
     }
     if (pickingPlaylist) PlaylistPickDialog(playlists,
         onPick = { pickingPlaylist = false; viewModel.addToPlaylist(it) }, onDismiss = { pickingPlaylist = false })
-    if (removing) AlertDialog(onDismissRequest = { removing = false }, title = { Text(stringResource(R.string.library_remove_from_library)) },
-        text = { Text(stringResource(R.string.bilibili_remove_video_message)) },
-        confirmButton = { TextButton(onClick = { removing = false; viewModel.remove() }) { Text(stringResource(R.string.common_remove), color = MaterialTheme.colorScheme.error) } },
-        dismissButton = { TextButton(onClick = { removing = false }) { Text(stringResource(R.string.common_cancel)) } })
+    if (removing) {
+        ConfirmActionDialog(
+            title = stringResource(R.string.library_remove_from_library),
+            message = stringResource(R.string.bilibili_remove_video_message),
+            confirmLabel = stringResource(R.string.common_remove),
+            onConfirm = { removing = false; viewModel.remove() },
+            onDismiss = { removing = false },
+        )
+    }
     viewModel.pendingDelete?.let { pending ->
         com.nanahoshi.audioplayer.ui.components.DeleteAudioDialog(
-            itemCount = pending.tracks.size,
-            subtitleCount = pending.subtitles,
+            itemCount = pending.audioCount,
+            associationCount = pending.associationCount,
+            subtitleCount = pending.generatedSubtitleCount,
+            customSubtitleCount = pending.customSubtitleCount,
             onConfirm = viewModel::confirmDelete,
             onCancel = viewModel::cancelDelete,
         )

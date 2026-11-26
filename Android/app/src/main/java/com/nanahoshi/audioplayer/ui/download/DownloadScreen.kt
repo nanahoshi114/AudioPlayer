@@ -1,81 +1,74 @@
 package com.nanahoshi.audioplayer.ui.download
 
-import com.nanahoshi.audioplayer.data.ProgressResult
-import com.nanahoshi.audioplayer.data.SubtitleTask
-import com.nanahoshi.audioplayer.text.resolveNoUrl
-import androidx.annotation.StringRes
-import androidx.compose.ui.platform.LocalContext
-import com.nanahoshi.audioplayer.R
-import androidx.compose.ui.res.stringResource
-import com.nanahoshi.audioplayer.japaneseasmr.JA_WORK_DOWNLOAD
-import com.nanahoshi.audioplayer.japaneseasmr.JA_VERIFY_PHASE
-
 import android.app.Application
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.ui.Alignment
-import com.nanahoshi.audioplayer.ui.components.ConfirmActionDialog
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.AlertDialog
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import com.nanahoshi.audioplayer.ui.components.AppTopBar
-import com.nanahoshi.audioplayer.ui.components.EmptyState
-import com.nanahoshi.audioplayer.ui.components.RoundedProgress
-import com.nanahoshi.audioplayer.ui.components.StatusBadge
-import com.nanahoshi.audioplayer.ui.components.StatusTone
-import com.nanahoshi.audioplayer.ui.components.rememberLocalNetworkAccess
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.semantics.LiveRegionMode
-import androidx.compose.ui.semantics.liveRegion
-import androidx.compose.ui.semantics.semantics
-import com.nanahoshi.audioplayer.data.*
-import com.nanahoshi.audioplayer.text.PersistedErrors
-import com.nanahoshi.audioplayer.text.asString
-import com.nanahoshi.audioplayer.text.persistedErrorText
-import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.flow.SharingStarted
-import com.nanahoshi.audioplayer.data.TrackSource
-import com.nanahoshi.audioplayer.data.DlsiteDownloadMode
-import com.nanahoshi.audioplayer.dlsite.RemotePlayable
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.nanahoshi.audioplayer.data.operation
+import com.nanahoshi.audioplayer.R
+import com.nanahoshi.audioplayer.data.DlsiteDownloadMode
+import com.nanahoshi.audioplayer.data.ProgressPart
+import com.nanahoshi.audioplayer.data.SubtitleTask
+import com.nanahoshi.audioplayer.data.TaskKey
+import com.nanahoshi.audioplayer.data.TaskKind
+import com.nanahoshi.audioplayer.data.TaskProgressSnapshot
+import com.nanahoshi.audioplayer.data.TrackSource
 import com.nanahoshi.audioplayer.data.db.DownloadEntity
 import com.nanahoshi.audioplayer.data.db.DownloadStatus
 import com.nanahoshi.audioplayer.data.db.TranslateMark
 import com.nanahoshi.audioplayer.data.db.TranslationJobEntity
 import com.nanahoshi.audioplayer.data.db.WhisperJobEntity
+import com.nanahoshi.audioplayer.data.decodeProgressSummary
 import com.nanahoshi.audioplayer.data.missingOfflineWhisperModelMessage
+import com.nanahoshi.audioplayer.data.operation
+import com.nanahoshi.audioplayer.data.progressRate
+import com.nanahoshi.audioplayer.data.progressResultLabel
+import com.nanahoshi.audioplayer.data.totalDownloadRate
 import com.nanahoshi.audioplayer.graph
+import com.nanahoshi.audioplayer.japaneseasmr.JA_VERIFY_PHASE
+import com.nanahoshi.audioplayer.japaneseasmr.JA_WORK_DOWNLOAD
+import com.nanahoshi.audioplayer.playback.StoredAudioRequest
+import com.nanahoshi.audioplayer.text.PersistedErrors
+import com.nanahoshi.audioplayer.text.asString
+import com.nanahoshi.audioplayer.ui.components.AppTopBar
+import com.nanahoshi.audioplayer.ui.components.ConfirmActionDialog
+import com.nanahoshi.audioplayer.ui.components.EmptyState
+import com.nanahoshi.audioplayer.ui.components.SegmentedTabBar
+import com.nanahoshi.audioplayer.ui.components.StatusTone
+import com.nanahoshi.audioplayer.ui.components.rememberLocalNetworkAccess
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 class DownloadViewModel(app: Application) : AndroidViewModel(app) {
@@ -94,26 +87,14 @@ class DownloadViewModel(app: Application) : AndroidViewModel(app) {
     fun cancelDownload(id: Long) { graph.downloads.cancel(id) }
 
     fun verifyJapaneseWork(id: Long, navigate: (String) -> Unit) {
-        viewModelScope.launch {
-            try {
-                navigate(graph.downloads.beginJaTaskVerification(id))
-            } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                throw cancelled
-            } catch (failure: Exception) {
-                graph.showError(failure, R.string.download_error_continue)
-            }
+        graph.launchGuarded(viewModelScope, R.string.download_error_continue) {
+            navigate(graph.downloads.beginJaTaskVerification(id))
         }
     }
 
     fun retry(id: Long) {
-        viewModelScope.launch {
-            try {
-                graph.downloads.retry(id)
-            } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                throw cancelled
-            } catch (error: Exception) {
-                graph.showError(error, R.string.download_error_retry)
-            }
+        graph.launchGuarded(viewModelScope, R.string.download_error_retry) {
+            graph.downloads.retry(id)
         }
     }
 
@@ -181,7 +162,7 @@ class DownloadViewModel(app: Application) : AndroidViewModel(app) {
                 graph.translator.retry(job.id, job.operation)
             } catch (stopped: com.nanahoshi.audioplayer.data.SubtitleTaskStopped) {
                 graph.show(stopped.userText)
-            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
                 graph.showError(error, R.string.download_error_retry_subtitle)
@@ -195,43 +176,19 @@ class DownloadViewModel(app: Application) : AndroidViewModel(app) {
 
     fun play(job: DownloadEntity) {
         val path = job.localPath ?: return
-        viewModelScope.launch {
-            // 已经入库的曲目按曲目播放，队列才带 bvid/cid，缓存过的字幕也能读到。
-            val track = job.trackId.takeIf { it > 0L }?.let { graph.library.track(it) }
-            if (track != null && track.localUri == path) {
-                graph.player.replaceAndPlay(listOf(track))
-                return@launch
-            }
-            if (job.source == TrackSource.JAPANESE_ASMR.name) {
-                val postId = job.workKey ?: return@launch
-                val key = job.fileKey ?: return@launch
-                val post = graph.db.japaneseAsmr().post(postId) ?: return@launch
-                graph.player.replaceAndPlayRemote(listOf(RemotePlayable(
-                    job.title, post.title, post.coverUri, post.url, TrackSource.JAPANESE_ASMR,
-                    com.nanahoshi.audioplayer.japaneseasmr.JapaneseAsmrClient.REFERER,
-                    workno = postId, fileKey = key, mediaKind = graph.db.japaneseAsmr().media(postId, key)?.kind,
-                )))
-                return@launch
-            }
-            // 没入库的 B 站缓存（例如从收藏夹直接缓存）借 workno/fileKey 带上 bvid/cid，
-            // 播放队列里不新增列，字幕也能按这两个字段找回。
-            val bili = job.source == TrackSource.BILIBILI.name
-            val youtube = job.source == TrackSource.YOUTUBE.name
-            graph.player.replaceAndPlayRemote(
-                listOf(
-                    RemotePlayable(
-                        title = job.title,
-                        artist = null,
-                        coverUri = null,
-                        remoteUrl = if (youtube) "https://www.youtube.com/watch?v=${job.workKey.orEmpty()}" else path,
-                        source = if (youtube) TrackSource.YOUTUBE else if (bili) TrackSource.BILIBILI else TrackSource.LOCAL,
-                        referer = if (bili) "https://www.bilibili.com/video/${job.workKey.orEmpty()}" else "",
-                        workno = job.workKey.takeIf { bili || youtube },
-                        fileKey = job.fileKey.takeIf { bili || youtube },
-                    ),
-                ),
-            )
-        }
+        val source = job.source?.let { raw -> runCatching { TrackSource.valueOf(raw) }.getOrNull() }
+        graph.player.playStoredAudio(
+            StoredAudioRequest(
+                path = path,
+                title = job.title,
+                artist = null,
+                trackId = job.trackId.takeIf { it > 0L },
+                source = source,
+                workKey = job.workKey,
+                workCode = job.workKey,
+                fileKey = job.fileKey,
+            ),
+        )
     }
 }
 
@@ -248,7 +205,6 @@ fun DownloadScreen(
     val translationJobs by viewModel.translationJobs.collectAsStateWithLifecycle(emptyList())
     val publishedWhisperIds by viewModel.publishedWhisperIds.collectAsStateWithLifecycle(emptyList())
     val publishedTranslationIds by viewModel.publishedTranslationIds.collectAsStateWithLifecycle(emptyList())
-    val snapshots by viewModel.progress.collectAsStateWithLifecycle()
     val dependencies by viewModel.dependencies.collectAsStateWithLifecycle()
     val localNetwork = rememberLocalNetworkAccess { viewModel.reportLocalNetworkDenied() }
     var subtitles by rememberSaveable { mutableStateOf(initialSubtitles) }
@@ -258,11 +214,13 @@ fun DownloadScreen(
     val publishedWhispers = remember(publishedWhisperIds) { publishedWhisperIds.toSet() }
     val publishedTranslations = remember(publishedTranslationIds) { publishedTranslationIds.toSet() }
     val subtitleTasks = remember(whisperJobs, translationJobs) { sortSubtitleTasks(whisperJobs, translationJobs) }
-    val clearableCount = if (subtitles) {
-        whisperJobs.count { isClearableCompletedWhisper(it, publishedWhispers) } +
-            translationJobs.count { isClearableCompletedTranslation(it, publishedTranslations) }
-    } else {
-        jobs.count { isClearableCompletedDownload(it) }
+    val clearableCount = remember(subtitles, whisperJobs, translationJobs, jobs, publishedWhispers, publishedTranslations) {
+        if (subtitles) {
+            whisperJobs.count { isClearableCompletedWhisper(it, publishedWhispers) } +
+                translationJobs.count { isClearableCompletedTranslation(it, publishedTranslations) }
+        } else {
+            jobs.count { isClearableCompletedDownload(it) }
+        }
     }
     Column(Modifier.fillMaxSize()) {
         AppTopBar(
@@ -276,24 +234,17 @@ fun DownloadScreen(
                 }
             },
         )
-        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
-            SegmentedButton(selected = !subtitles, onClick = { subtitles = false },
-                shape = SegmentedButtonDefaults.itemShape(0, 2)) {
-                Text(stringResource(R.string.download_segment_download), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
-            }
-            SegmentedButton(selected = subtitles, onClick = { subtitles = true },
-                shape = SegmentedButtonDefaults.itemShape(1, 2)) {
-                Text(stringResource(R.string.download_segment_subtitle), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
-            }
-        }
+        SegmentedTabBar(
+            options = listOf(false, true),
+            selected = subtitles,
+            label = { isSub ->
+                stringResource(if (isSub) R.string.download_segment_subtitle else R.string.download_segment_download)
+            },
+            onSelect = { subtitles = it },
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+        )
         if (!subtitles && jobs.any { it.status == DownloadStatus.RUNNING || it.status == DownloadStatus.QUEUED }) {
-            Text(stringResource(
-                R.string.download_summary,
-                jobs.count { it.status == DownloadStatus.RUNNING },
-                jobs.count { it.status == DownloadStatus.QUEUED },
-                progressRate(totalDownloadRate(snapshots)),
-            ),
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp), style = MaterialTheme.typography.bodySmall)
+            ActiveDownloadBanner(jobs, viewModel.progress)
         }
         if (if (subtitles) subtitleTasks.isEmpty() else jobs.isEmpty()) {
             EmptyState(
@@ -316,16 +267,14 @@ fun DownloadScreen(
                 if (!subtitles && jobs.isNotEmpty()) {
                     items(jobs, key = { "download-${it.id}" }) { job ->
                         DownloadRow(
-                            job,
-                            runtime = snapshots[TaskKey(TaskKind.DOWNLOAD, job.id)],
-                            subtitleRuntime = snapshots[TaskKey(TaskKind.DOWNLOAD, job.id, ProgressPart.BILI_SUBTITLE)],
+                            job = job,
+                            progressFlow = viewModel.progress,
                             onRetry = {
                                 if (job.phase == JA_VERIFY_PHASE) viewModel.verifyJapaneseWork(job.id, onVerifyJaDownload)
                                 else viewModel.retry(job.id)
                             },
                             onCancel = { viewModel.cancelDownload(job.id) },
                             onDelete = { viewModel.delete(job.id) },
-                            onDeleteRecord = { viewModel.delete(job.id) },
                             onOpenArticle = if (job.source == TrackSource.JAPANESE_ASMR.name) ({ viewModel.openArticle(job) }) else null,
                             onPlay = if (job.kind !in setOf("DLSITE_ARCHIVE", JA_WORK_DOWNLOAD) && job.status == DownloadStatus.DONE && !job.localPath.isNullOrBlank()) {
                                 { viewModel.play(job) }
@@ -341,9 +290,9 @@ fun DownloadScreen(
                             is SubtitleTaskItem.Whisper -> {
                                 val job = item.job
                                 WhisperJobRow(
-                                    job,
-                                    runtime = snapshots[TaskKey(TaskKind.WHISPER, job.id)],
-                                    dependency = dependencies[job.id]?.let { snapshots[TaskKey(TaskKind.DOWNLOAD, it)] },
+                                    job = job,
+                                    progressFlow = viewModel.progress,
+                                    dependencyId = dependencies[job.id],
                                     publishedIds = publishedWhispers,
                                     onRetry = {
                                         localNetwork.run(viewModel.retryNeedsLocalNetwork(job)) {
@@ -358,8 +307,8 @@ fun DownloadScreen(
                             is SubtitleTaskItem.Translation -> {
                                 val job = item.job
                                 TranslationJobRow(
-                                    job,
-                                    runtime = snapshots[TaskKey(TaskKind.TRANSLATION, job.id)],
+                                    job = job,
+                                    progressFlow = viewModel.progress,
                                     publishedIds = publishedTranslations,
                                     onCancel = { viewModel.cancelTranslation(job.id) },
                                     onRetry = { viewModel.retryTranslation(job) },
@@ -391,24 +340,64 @@ fun DownloadScreen(
 }
 
 @Composable
+private fun ActiveDownloadBanner(
+    jobs: List<DownloadEntity>,
+    progressFlow: StateFlow<Map<TaskKey, TaskProgressSnapshot>>,
+) {
+    val snapshots by progressFlow.collectAsStateWithLifecycle()
+    val runningCount = remember(jobs) { jobs.count { it.status == DownloadStatus.RUNNING } }
+    val queuedCount = remember(jobs) { jobs.count { it.status == DownloadStatus.QUEUED } }
+    Text(
+        stringResource(
+            R.string.download_summary,
+            runningCount,
+            queuedCount,
+            progressRate(totalDownloadRate(snapshots)),
+        ),
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+        style = MaterialTheme.typography.bodySmall,
+    )
+}
+
+@Composable
+private fun rememberTaskSnapshot(
+    key: TaskKey?,
+    observe: Boolean,
+    progressFlow: StateFlow<Map<TaskKey, TaskProgressSnapshot>>,
+): TaskProgressSnapshot? {
+    val snapshotFlow = remember(key, observe, progressFlow) {
+        if (key != null && observe) {
+            progressFlow.map { it[key] }.distinctUntilChanged()
+        } else {
+            flowOf(null)
+        }
+    }
+    return snapshotFlow.collectAsStateWithLifecycle(null).value
+}
+
+@Composable
 private fun DownloadRow(
     job: DownloadEntity,
-    runtime: TaskProgressSnapshot?,
-    subtitleRuntime: TaskProgressSnapshot?,
+    progressFlow: StateFlow<Map<TaskKey, TaskProgressSnapshot>>,
     onRetry: () -> Unit,
     onCancel: () -> Unit,
     onDelete: () -> Unit,
-    onDeleteRecord: () -> Unit,
     onPlay: (() -> Unit)?,
     onOpenArticle: (() -> Unit)?,
 ) {
     var confirming by remember { mutableStateOf(false) }
     var showingError by remember { mutableStateOf(false) }
-    val context = androidx.compose.ui.platform.LocalContext.current
+    val context = LocalContext.current
     val active = job.status == DownloadStatus.RUNNING || job.status == DownloadStatus.QUEUED
+    val taskKey = remember(job.id) { TaskKey(TaskKind.DOWNLOAD, job.id) }
+    val subtitleKey = remember(job.id) { TaskKey(TaskKind.DOWNLOAD, job.id, ProgressPart.BILI_SUBTITLE) }
+    val runtime = rememberTaskSnapshot(taskKey, observe = active, progressFlow = progressFlow)
+    val subtitleActive = job.status == DownloadStatus.DONE && job.pendingBiliSubtitle == true
+    val subtitleRuntime = rememberTaskSnapshot(subtitleKey, observe = subtitleActive, progressFlow = progressFlow)
+    val decodedSummary = remember(job.progressSummary) { decodeProgressSummary(job.progressSummary) }
     val failureText = taskFailureText(job.error, R.string.download_failed_generic)
     val downloadResult = runtime?.summary?.result
-        ?: decodeProgressSummary(job.progressSummary).parts[ProgressPart.DOWNLOAD]?.result
+        ?: decodedSummary.parts[ProgressPart.DOWNLOAD]?.result
     val status = runtime?.takeIf { active && it.active }?.summary?.phase?.let { stringResource(it.labelRes) } ?: when (job.status) {
         DownloadStatus.QUEUED -> stringResource(R.string.status_queued)
         DownloadStatus.RUNNING -> if (job.kind in setOf("DLSITE_ARCHIVE", JA_WORK_DOWNLOAD)) {
@@ -425,73 +414,81 @@ private fun DownloadRow(
             else -> stringResource(taskFailedLabelRes(job.error, downloadResult))
         }
     }
-    ListItem(
+    val badgeStatus = when {
+        status.length <= 6 -> status
+        job.status == DownloadStatus.QUEUED || job.phase == JA_VERIFY_PHASE ||
+            runtime?.summary?.phase?.waiting == true -> stringResource(R.string.status_waiting)
+        else -> stringResource(R.string.status_running)
+    }
+    TaskRowScaffold(
+        title = job.title,
+        badgeText = badgeStatus,
+        badgeTone = toneFor(job.status),
         modifier = if (onPlay != null) Modifier.clickable(onClick = onPlay) else Modifier,
-        headlineContent = { Text(job.title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
-        supportingContent = {
-            Column(Modifier.fillMaxWidth()) {
-                val badgeStatus = when {
-                    status.length <= 6 -> status
-                    job.status == DownloadStatus.QUEUED || job.phase == JA_VERIFY_PHASE ||
-                        runtime?.summary?.phase?.waiting == true -> stringResource(R.string.status_waiting)
-                    else -> stringResource(R.string.status_running)
-                }
-                StatusBadge(
-                    badgeStatus,
-                    toneFor(job.status),
-                    Modifier.semantics { liveRegion = LiveRegionMode.Polite },
-                )
-                if (badgeStatus != status) {
-                    Text(status, style = MaterialTheme.typography.bodySmall)
-                }
-                if (job.kind == JA_WORK_DOWNLOAD && active) runtime?.detail?.let {
-                    Text(it.asString(), style = MaterialTheme.typography.bodySmall)
-                }
-                if (onOpenArticle != null) TextButton(onClick = onOpenArticle) { Text(stringResource(R.string.download_open_article)) }
-                val failure = failureText
-                if (job.status == DownloadStatus.FAILED && !failure.isNullOrBlank()) {
-                    TaskFailureMessage(failure) { showingError = true }
-                }
-                TaskProgressContent(TaskKey(TaskKind.DOWNLOAD, job.id), job.progressSummary, runtime, active,
-                    legacyFraction = if (job.kind != "DLSITE_ARCHIVE" && job.bytesTotal > 0) job.bytesDone.toFloat() / job.bytesTotal else null)
-                val subtitleSummary = decodeProgressSummary(job.progressSummary).parts[ProgressPart.BILI_SUBTITLE]
-                if (job.status == DownloadStatus.DONE && (job.pendingBiliSubtitle == true || subtitleRuntime != null || subtitleSummary != null)) {
-                    val subtitleState = subtitleRuntime?.let {
-                        if (it.active) it.summary.phase?.let { phase -> stringResource(phase.labelRes) }
-                        else it.summary.result?.let { result -> progressResultLabel(context, ProgressPart.BILI_SUBTITLE, result) }
-                    } ?: subtitleSummary?.result?.let { progressResultLabel(context, ProgressPart.BILI_SUBTITLE, it) }
-                        ?: stringResource(R.string.download_waiting_subtitle)
-                    Text(
-                        stringResource(R.string.download_bilibili_subtitle, subtitleState),
-                        style = MaterialTheme.typography.bodySmall,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    TaskProgressContent(TaskKey(TaskKind.DOWNLOAD, job.id, ProgressPart.BILI_SUBTITLE),
-                        job.progressSummary, subtitleRuntime, subtitleRuntime?.active ?: (job.pendingBiliSubtitle == true))
-                }
-            }
-        },
-        trailingContent = {
+        trailing = {
             when {
                 job.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING) -> {
                     TextButton(onClick = onCancel) { Text(stringResource(R.string.common_stop)) }
                 }
                 job.status == DownloadStatus.FAILED -> {
                     Column(horizontalAlignment = Alignment.End) {
-                        FilledTonalButton(onClick = onRetry) { Text(stringResource(if (job.phase == JA_VERIFY_PHASE) R.string.download_verify_continue else R.string.common_retry)) }
+                        FilledTonalButton(onClick = onRetry) {
+                            Text(stringResource(if (job.phase == JA_VERIFY_PHASE) R.string.download_verify_continue else R.string.common_retry))
+                        }
                         TextButton(onClick = { confirming = true }) {
                             Text(stringResource(if (job.phase == JA_VERIFY_PHASE) R.string.download_abandon_task else R.string.common_delete))
                         }
                     }
                 }
                 job.status == DownloadStatus.DONE && isClearableCompletedDownload(job) -> {
-                    TextButton(onClick = onDeleteRecord) { Text(stringResource(R.string.download_delete_record)) }
+                    TextButton(onClick = onDelete) { Text(stringResource(R.string.download_delete_record)) }
                 }
                 else -> Unit
             }
         },
-    )
+    ) {
+        if (badgeStatus != status) {
+            Text(status, style = MaterialTheme.typography.bodySmall)
+        }
+        if (job.kind == JA_WORK_DOWNLOAD && active) runtime?.detail?.let {
+            Text(it.asString(), style = MaterialTheme.typography.bodySmall)
+        }
+        if (onOpenArticle != null) {
+            TextButton(onClick = onOpenArticle) { Text(stringResource(R.string.download_open_article)) }
+        }
+        if (job.status == DownloadStatus.FAILED && !failureText.isNullOrBlank()) {
+            TaskFailureMessage(failureText) { showingError = true }
+        }
+        TaskProgressContent(
+            key = taskKey,
+            rawSummary = job.progressSummary,
+            runtime = runtime,
+            active = active,
+            legacyFraction = if (job.kind != "DLSITE_ARCHIVE" && job.bytesTotal > 0) job.bytesDone.toFloat() / job.bytesTotal else null,
+            decodedSummary = decodedSummary,
+        )
+        val subtitleSummary = decodedSummary.parts[ProgressPart.BILI_SUBTITLE]
+        if (job.status == DownloadStatus.DONE && (job.pendingBiliSubtitle == true || subtitleRuntime != null || subtitleSummary != null)) {
+            val subtitleState = subtitleRuntime?.let {
+                if (it.active) it.summary.phase?.let { phase -> stringResource(phase.labelRes) }
+                else it.summary.result?.let { result -> progressResultLabel(context, ProgressPart.BILI_SUBTITLE, result) }
+            } ?: subtitleSummary?.result?.let { progressResultLabel(context, ProgressPart.BILI_SUBTITLE, it) }
+                ?: stringResource(R.string.download_waiting_subtitle)
+            Text(
+                stringResource(R.string.download_bilibili_subtitle, subtitleState),
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
+            TaskProgressContent(
+                key = subtitleKey,
+                rawSummary = job.progressSummary,
+                runtime = subtitleRuntime,
+                active = subtitleRuntime?.active ?: (job.pendingBiliSubtitle == true),
+                decodedSummary = decodedSummary,
+            )
+        }
+    }
     if (confirming) {
         ConfirmActionDialog(
             title = stringResource(if (job.phase == JA_VERIFY_PHASE) R.string.download_abandon_task else R.string.download_delete_title),
@@ -509,45 +506,14 @@ private fun DownloadRow(
             onDismiss = { confirming = false },
         )
     }
-    if (showingError && failureText != null) ReplyDialog(failureText) { showingError = false }
-}
-
-@StringRes
-private fun taskFailedLabelRes(error: String?, result: ProgressResult?, @StringRes fallback: Int = R.string.status_failed): Int =
-    when {
-        PersistedErrors.isCancelled(error) || result == ProgressResult.CANCELLED -> R.string.status_cancelled
-        result == ProgressResult.INTERRUPTED || (result == null && PersistedErrors.isInterrupted(error)) ->
-            R.string.progress_result_interrupted
-        else -> fallback
-    }
-
-@Composable
-private fun TaskFailureMessage(text: String, onDetails: () -> Unit) {
-    var truncated by remember(text) { mutableStateOf(false) }
-    Text(
-        text,
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.error,
-        maxLines = 3,
-        overflow = TextOverflow.Ellipsis,
-        onTextLayout = { truncated = it.hasVisualOverflow },
-    )
-    if (truncated || '\n' in text) {
-        TextButton(onClick = onDetails) { Text(stringResource(R.string.download_error_details)) }
-    }
-}
-
-@Composable
-private fun taskFailureText(error: String?, @StringRes fallback: Int): String? {
-    val context = LocalContext.current
-    return persistedErrorText(error)?.let { context.resolveNoUrl(it, fallback) }
+    if (showingError && failureText != null) TaskReplyDialog(failureText) { showingError = false }
 }
 
 @Composable
 private fun WhisperJobRow(
     job: WhisperJobEntity,
-    runtime: TaskProgressSnapshot?,
-    dependency: TaskProgressSnapshot?,
+    progressFlow: StateFlow<Map<TaskKey, TaskProgressSnapshot>>,
+    dependencyId: Long?,
     publishedIds: Set<Long>,
     onRetry: () -> Unit,
     onCancel: () -> Unit,
@@ -560,9 +526,14 @@ private fun WhisperJobRow(
     val replyText = taskFailureText(reply, R.string.translate_status_failed)
     var shownReply by remember { mutableStateOf<String?>(null) }
     val canStop = translating || job.status == DownloadStatus.QUEUED || job.status == DownloadStatus.RUNNING
+    val taskKey = remember(job.id) { TaskKey(TaskKind.WHISPER, job.id) }
+    val depKey = remember(dependencyId) { dependencyId?.let { TaskKey(TaskKind.DOWNLOAD, it) } }
+    val runtime = rememberTaskSnapshot(taskKey, observe = canStop, progressFlow = progressFlow)
+    val dependency = rememberTaskSnapshot(depKey, observe = canStop && depKey != null, progressFlow = progressFlow)
+    val decodedSummary = remember(job.progressSummary) { decodeProgressSummary(job.progressSummary) }
     val progressPart = if (job.translateStatus == TranslateMark.FAILED) ProgressPart.TRANSLATION else ProgressPart.TRANSCRIPTION
     val terminal = runtime?.takeIf { it.part == progressPart }?.summary?.result
-        ?: decodeProgressSummary(job.progressSummary).parts[progressPart]?.result
+        ?: decodedSummary.parts[progressPart]?.result
     val status = runtime?.takeIf { canStop && it.active }?.summary?.phase?.let { phase -> stringResource(phase.labelRes) } ?: when {
         job.translateStatus == TranslateMark.QUEUED -> stringResource(R.string.status_waiting_translation)
         translating -> stringResource(R.string.status_translating)
@@ -584,28 +555,11 @@ private fun WhisperJobRow(
     val errorDetailText = taskFailureText(errorDetail, R.string.whisper_error_failed)
     val canRetryTranslation = job.id !in publishedIds &&
         job.status == DownloadStatus.DONE && job.translateStatus == TranslateMark.FAILED
-    ListItem(
-        headlineContent = { Text(job.title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
-        supportingContent = {
-            Column(Modifier.fillMaxWidth()) {
-                StatusBadge(
-                    status,
-                    whisperTone(job, translating, stopped),
-                    Modifier.semantics { liveRegion = LiveRegionMode.Polite },
-                )
-                errorDetailText?.let { detail ->
-                    TaskFailureMessage(detail) { shownReply = detail }
-                }
-                if (job.translateStatus == TranslateMark.FAILED && !stopped) {
-                    replyText?.takeIf { it != status }?.let { detail ->
-                        TaskFailureMessage(detail) { shownReply = detail }
-                    }
-                }
-                TaskProgressContent(TaskKey(TaskKind.WHISPER, job.id), job.progressSummary, runtime, canStop,
-                    legacyFraction = job.progress.takeIf { !translating && it > 0 }, dependency = dependency)
-            }
-        },
-        trailingContent = {
+    TaskRowScaffold(
+        title = job.title,
+        badgeText = status,
+        badgeTone = whisperTone(job, translating, stopped),
+        trailing = {
             when {
                 canStop -> TextButton(onClick = onCancel) { Text(stringResource(R.string.common_stop)) }
                 job.status == DownloadStatus.FAILED -> Column(horizontalAlignment = Alignment.End) {
@@ -622,14 +576,32 @@ private fun WhisperJobRow(
                     TextButton(onClick = onDelete) { Text(stringResource(R.string.download_delete_record)) }
             }
         },
-    )
-    shownReply?.let { ReplyDialog(it) { shownReply = null } }
+    ) {
+        errorDetailText?.let { detail ->
+            TaskFailureMessage(detail) { shownReply = detail }
+        }
+        if (job.translateStatus == TranslateMark.FAILED && !stopped) {
+            replyText?.takeIf { it != status }?.let { detail ->
+                TaskFailureMessage(detail) { shownReply = detail }
+            }
+        }
+        TaskProgressContent(
+            key = taskKey,
+            rawSummary = job.progressSummary,
+            runtime = runtime,
+            active = canStop,
+            legacyFraction = job.progress.takeIf { !translating && it > 0 },
+            dependency = dependency,
+            decodedSummary = decodedSummary,
+        )
+    }
+    shownReply?.let { TaskReplyDialog(it) { shownReply = null } }
 }
 
 @Composable
 private fun TranslationJobRow(
     job: TranslationJobEntity,
-    runtime: TaskProgressSnapshot?,
+    progressFlow: StateFlow<Map<TaskKey, TaskProgressSnapshot>>,
     publishedIds: Set<Long>,
     onCancel: () -> Unit,
     onRetry: () -> Unit,
@@ -640,33 +612,27 @@ private fun TranslationJobRow(
     val replyText = taskFailureText(reply, R.string.translate_status_failed)
     var shownReply by remember { mutableStateOf<String?>(null) }
     val running = job.status == DownloadStatus.RUNNING || job.status == DownloadStatus.QUEUED
+    val taskKey = remember(job.id) { TaskKey(TaskKind.TRANSLATION, job.id) }
+    val runtime = rememberTaskSnapshot(taskKey, observe = running, progressFlow = progressFlow)
+    val decodedSummary = remember(job.progressSummary) { decodeProgressSummary(job.progressSummary) }
     val terminal = runtime?.summary?.result
-        ?: decodeProgressSummary(job.progressSummary).parts[ProgressPart.TRANSLATION]?.result
+        ?: decodedSummary.parts[ProgressPart.TRANSLATION]?.result
     val status = runtime?.takeIf { running && it.active }?.summary?.phase?.let { phase -> stringResource(phase.labelRes) } ?: when {
         job.status == DownloadStatus.QUEUED -> stringResource(R.string.status_queued)
         running -> stringResource(if (job.operation == SubtitleTask.POLISH) R.string.status_polishing else R.string.status_translating)
         job.status == DownloadStatus.FAILED -> stringResource(taskFailedLabelRes(job.error, terminal))
         else -> stringResource(R.string.status_done)
     }
-    ListItem(
-        headlineContent = { Text("${job.title} · ${stringResource(job.operation.labelRes)}", maxLines = 2, overflow = TextOverflow.Ellipsis) },
-        supportingContent = {
-            Column(Modifier.fillMaxWidth()) {
-                StatusBadge(
-                    status,
-                    when {
-                        stopped -> StatusTone.Neutral
-                        running -> StatusTone.Active
-                        job.status == DownloadStatus.FAILED -> StatusTone.Error
-                        else -> StatusTone.Success
-                    },
-                    Modifier.semantics { liveRegion = LiveRegionMode.Polite },
-                )
-                replyText?.takeIf { it != status }?.let { detail -> TaskFailureMessage(detail) { shownReply = detail } }
-                TaskProgressContent(TaskKey(TaskKind.TRANSLATION, job.id), job.progressSummary, runtime, running)
-            }
+    TaskRowScaffold(
+        title = "${job.title} · ${stringResource(job.operation.labelRes)}",
+        badgeText = status,
+        badgeTone = when {
+            stopped -> StatusTone.Neutral
+            running -> StatusTone.Active
+            job.status == DownloadStatus.FAILED -> StatusTone.Error
+            else -> StatusTone.Success
         },
-        trailingContent = {
+        trailing = {
             when {
                 running -> TextButton(onClick = onCancel) { Text(stringResource(R.string.common_stop)) }
                 job.status == DownloadStatus.FAILED -> Column(horizontalAlignment = Alignment.End) {
@@ -679,11 +645,19 @@ private fun TranslationJobRow(
                     TextButton(onClick = onDelete) { Text(stringResource(R.string.download_delete_record)) }
             }
         },
-    )
-    shownReply?.let { ReplyDialog(it) { shownReply = null } }
+    ) {
+        replyText?.takeIf { it != status }?.let { detail -> TaskFailureMessage(detail) { shownReply = detail } }
+        TaskProgressContent(
+            key = taskKey,
+            rawSummary = job.progressSummary,
+            runtime = runtime,
+            active = running,
+            decodedSummary = decodedSummary,
+        )
+    }
+    shownReply?.let { TaskReplyDialog(it) { shownReply = null } }
 }
 
-@Composable
 private fun toneFor(status: DownloadStatus) = when (status) {
     DownloadStatus.QUEUED -> StatusTone.Neutral
     DownloadStatus.RUNNING -> StatusTone.Active
@@ -699,21 +673,4 @@ private fun whisperTone(job: WhisperJobEntity, translating: Boolean, stopped: Bo
     job.status == DownloadStatus.DONE -> StatusTone.Success
     job.status == DownloadStatus.RUNNING -> StatusTone.Active
     else -> StatusTone.Neutral
-}
-
-@Composable
-private fun ReplyDialog(text: String, onDismiss: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.download_error_details_title)) },
-        text = {
-            Text(
-                text,
-                modifier = Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
-            )
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_close)) }
-        },
-    )
 }

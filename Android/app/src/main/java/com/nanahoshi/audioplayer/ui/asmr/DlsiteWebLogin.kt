@@ -23,11 +23,11 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import com.nanahoshi.audioplayer.ui.components.RoundedProgress
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -145,7 +145,7 @@ internal fun DlsiteWebLoginDialog(
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                 )
                 if (pageLoading || loading) {
-                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                    RoundedProgress(progress = null)
                 }
                 val message = error ?: localError
                 if (message != null) {

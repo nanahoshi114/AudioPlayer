@@ -4,7 +4,6 @@ import androidx.annotation.StringRes
 import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.japaneseasmr.jaPostId
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import java.security.MessageDigest
 
 internal enum class ClipboardSource(@param:StringRes val labelRes: Int) {
     BILIBILI(R.string.clipboard_source_bilibili),
@@ -23,8 +22,7 @@ internal data class ClipboardImportCandidate(
             // 保留明确编号的旧摘要。忽略纯数字后，仍可复制明确的 RJ 号查询同一作品。
             val prefix = if (requiresLookupConfirmation) "bare-rj:" else ""
             val identity = "$prefix${target.source}:${target.id}:$timestamp"
-            return MessageDigest.getInstance("SHA-256").digest(identity.toByteArray())
-                .joinToString("") { "%02x".format(it) }
+            return sha256Hex(identity)
         }
 }
 
@@ -33,6 +31,7 @@ private val clipboardExplicitId = Regex("(?<![A-Za-z0-9])BV[0-9A-Za-z]{10}(?![A-
 private val clipboardBareRj = Regex("(?<![0-9])(?:01[0-9]{6}|[0-9]{6})(?![0-9])")
 private val clipboardUrl = Regex("(?:https?://|(?<![A-Za-z0-9./])(?:www\\.|m\\.|music\\.)?(?:youtube\\.com|youtu\\.be)/)[^\\s<>\"'（）【】]+", RegexOption.IGNORE_CASE)
 private val youtubeId = Regex("[A-Za-z0-9_-]{11}")
+private val embeddedBv = Regex("BV[0-9A-Za-z]{10}")
 
 /** 分享文字中的明确链接优先于标题里附带的编号；一次只处理一个条目。 */
 internal fun clipboardImportTarget(raw: String): ClipboardTarget? {
@@ -46,7 +45,7 @@ internal fun clipboardImportTarget(raw: String): ClipboardTarget? {
         if (host == "bilibili.com" || host.endsWith(".bilibili.com")) {
             val path = url.pathSegments
             val index = path.indexOf("video")
-            path.getOrNull(index + 1)?.takeIf { index >= 0 && Regex("BV[0-9A-Za-z]{10}").matches(it) }?.let {
+            path.getOrNull(index + 1)?.takeIf { index >= 0 && embeddedBv.matches(it) }?.let {
                 return ClipboardTarget(ClipboardSource.BILIBILI, it)
             }
         }

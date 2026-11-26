@@ -12,15 +12,7 @@ class LibraryRemovalRejected(
 class LibraryRemovalPolicy(folders: List<FolderEntity>) {
     private val byId = folders.associateBy { it.id }
 
-    private fun ancestors(id: Long?): Sequence<FolderEntity> = sequence {
-        var current = id
-        val visited = mutableSetOf<Long>()
-        while (current != null && visited.add(current)) {
-            val folder = byId[current] ?: break
-            yield(folder)
-            current = folder.parentId
-        }
-    }
+    private fun ancestors(id: Long?): Sequence<FolderEntity> = FolderTree.ancestorChain(id, byId)
 
     fun canRemoveEntry(parentId: Long?): Boolean = ancestors(parentId).none { (!it.asmrSourceId.isNullOrBlank() || it.biliBvid != null) }
 

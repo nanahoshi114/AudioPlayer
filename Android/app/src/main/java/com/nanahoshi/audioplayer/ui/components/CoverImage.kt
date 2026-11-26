@@ -23,6 +23,12 @@ import com.nanahoshi.audioplayer.data.toHttps
 import com.nanahoshi.audioplayer.ui.theme.LocalReduceMotion
 import java.io.File
 
+internal fun imageModelOf(uri: String?): Any? = when {
+    uri.isNullOrBlank() -> null
+    uri.startsWith("/") -> File(uri)
+    else -> uri.toHttps()
+}
+
 @Composable
 fun CoverImage(
     uri: String?,
@@ -30,11 +36,7 @@ fun CoverImage(
     size: Dp? = 48.dp,
     shape: Shape = RoundedCornerShape(12.dp),
 ) {
-    val model = when {
-        uri.isNullOrBlank() -> null
-        uri.startsWith("/") -> File(uri)
-        else -> uri.toHttps()
-    }
+    val model = imageModelOf(uri)
     val reduceMotion = LocalReduceMotion.current
     val sized = if (size != null) Modifier.size(size) else Modifier
     Box(

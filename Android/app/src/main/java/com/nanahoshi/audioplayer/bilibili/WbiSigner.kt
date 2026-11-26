@@ -1,7 +1,6 @@
 package com.nanahoshi.audioplayer.bilibili
 
 import java.net.URLEncoder
-import java.security.MessageDigest
 
 object WbiSigner {
     private val mixinTab = intArrayOf(
@@ -20,22 +19,28 @@ object WbiSigner {
         }.take(32)
     }
 
-    fun sign(params: Map<String, String>, mixinKey: String): Map<String, String> {
-        val withTime = params + ("wts" to (System.currentTimeMillis() / 1000).toString())
-        val filtered = withTime.mapValues { (_, value) ->
-            value.filterNot { it in "!'()*" }
-        }.toSortedMap()
-        val query = filtered.entries.joinToString("&") { (key, value) ->
-            "${encode(key)}=${encode(value)}"
-        }
+    fun sign(params: Map<String, String>, mixinKey: String): Map<String, String> =
+        signAt(params, mixinKey, System.currentTimeMillis() / 1000)
+
+    /** 固定时间戳的签名入口，便于用已知向量验证；生产请求始终走 [sign]。 */
+    internal fun signAt(params: Map<String, String>, mixinKey: String, timestampSeconds: Long): Map<String, String> {
+        val withTime = params + ("wts" to timestampSeconds.toString())
+        val filtered = signedParams(withTime)
+        val query = canonicalQuery(filtered)
         return filtered + ("w_rid" to md5(query + mixinKey))
     }
+
+    /** 过滤后按字典序编码的规范化查询串；Wbi 签名要求昵称等字段先去掉 `!'()*`。 */
+    internal fun canonicalQuery(params: Map<String, String>): String =
+        signedParams(params).entries.joinToString("&") { (key, value) ->
+            "${encode(key)}=${encode(value)}"
+        }
+
+    private fun signedParams(params: Map<String, String>): Map<String, String> =
+        params.mapValues { (_, value) -> value.filterNot { it in "!'()*" } }.toSortedMap()
 
     private fun encode(value: String): String =
         URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
 
-    private fun md5(value: String): String {
-        val digest = MessageDigest.getInstance("MD5").digest(value.toByteArray())
-        return digest.joinToString("") { "%02x".format(it) }
-    }
+    private fun md5(value: String): String = com.nanahoshi.audioplayer.data.md5Hex(value)
 }

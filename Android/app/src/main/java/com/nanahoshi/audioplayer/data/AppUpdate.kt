@@ -4,7 +4,7 @@ import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.text.TextRef
 import com.nanahoshi.audioplayer.text.UserFacingError
 import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.serialization.json.*
+import kotlinx.serialization.json.JsonArray
 import okhttp3.*
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import java.io.IOException
@@ -28,6 +28,8 @@ internal class AppUpdateException(
     constructor(message: String) : this(TextRef.Raw(message))
 }
 internal enum class UpdateRelation { AVAILABLE, CURRENT, LOCAL_NEWER, UNKNOWN }
+
+private val VERSION_PATTERN = Regex("[vV]?([0-9]+(?:\\.[0-9]+)*)(?:-([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?")
 
 /** 按数字段比较，省略的段按 0，支持 v 前缀、预发布和构建标识。 */
 internal data class AppVersionNumber(val parts: List<BigInteger>, val preview: List<String>) : Comparable<AppVersionNumber> {
@@ -54,8 +56,7 @@ internal data class AppVersionNumber(val parts: List<BigInteger>, val preview: L
     }
     companion object {
         fun parse(raw: String): AppVersionNumber? {
-            val match = Regex("[vV]?([0-9]+(?:\\.[0-9]+)*)(?:-([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?")
-                .matchEntire(raw.trim()) ?: return null
+            val match = VERSION_PATTERN.matchEntire(raw.trim()) ?: return null
             return AppVersionNumber(match.groupValues[1].split('.').map { it.toBigInteger() },
                 match.groupValues[2].takeIf { it.isNotEmpty() }?.split('.').orEmpty())
         }
@@ -74,29 +75,25 @@ internal fun updateRelation(currentVersion: String, release: AppRelease): Update
 }
 
 internal fun parseAndroidRelease(raw: String): AppRelease {
-    val releases = try { Json.parseToJsonElement(raw) as? JsonArray } catch (_: Exception) { null }
+    val releases = parseJsonOrNull(raw) as? JsonArray
         ?: throw AppUpdateException(TextRef.Res(R.string.update_read_failed))
-    val root = releases.mapNotNull { it as? JsonObject }.firstOrNull { release ->
-        val tag = (release["tag_name"] as? JsonPrimitive)?.contentOrNull.orEmpty()
-        tag.startsWith(ANDROID_RELEASE_PREFIX) &&
-            (release["draft"] as? JsonPrimitive)?.contentOrNull != "true" &&
-            (release["prerelease"] as? JsonPrimitive)?.contentOrNull != "true"
+    val root = releases.jsonObjects().firstOrNull { release ->
+        release.jsonStringOrEmpty("tag_name").startsWith(ANDROID_RELEASE_PREFIX) &&
+            release.jsonString("draft") != "true" &&
+            release.jsonString("prerelease") != "true"
     } ?: throw AppUpdateException(TextRef.Res(R.string.update_no_android_release))
-    fun value(key: String) = (root[key] as? JsonPrimitive)?.contentOrNull.orEmpty()
-    val apk = (root["assets"] as? JsonArray).orEmpty().any { item ->
-        val asset = item as? JsonObject ?: return@any false
-        (asset["name"] as? JsonPrimitive)?.contentOrNull?.endsWith(".apk", true) == true &&
-            (asset["state"] as? JsonPrimitive)?.contentOrNull == "uploaded"
+    val apk = root.jsonArray("assets").jsonObjects().any { asset ->
+        asset.jsonStringOrEmpty("name").endsWith(".apk", true) && asset.jsonString("state") == "uploaded"
     }
     if (!apk) throw AppUpdateException(TextRef.Res(R.string.update_no_apk))
-    val tag = value("tag_name").trim()
-    val version = listOf(tag.removePrefix(ANDROID_RELEASE_PREFIX), value("name"))
+    val tag = root.jsonStringOrEmpty("tag_name").trim()
+    val version = listOf(tag.removePrefix(ANDROID_RELEASE_PREFIX), root.jsonStringOrEmpty("name"))
         .firstOrNull { AppVersionNumber.parse(it) != null }
     return AppRelease(tag, version)
 }
 
 /** 独立匿名客户端，只取 GitHub 版本 JSON，不带应用账号信息，不请求 APK。 */
-internal class AppUpdateClient(http: OkHttpClient = OkHttpClient()) {
+internal class AppUpdateClient(http: OkHttpClient = HttpRoots.shared) {
     private val http = http.newBuilder().connectTimeout(10, TimeUnit.SECONDS).readTimeout(15, TimeUnit.SECONDS)
         .callTimeout(20, TimeUnit.SECONDS).followRedirects(false).followSslRedirects(false).build()
     suspend fun latest(): AppRelease = suspendCancellableCoroutine { continuation ->

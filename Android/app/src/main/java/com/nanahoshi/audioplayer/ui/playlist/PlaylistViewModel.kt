@@ -5,7 +5,6 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.graph
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.map
@@ -43,15 +42,7 @@ class PlaylistViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 在线列表的编辑限制由仓储层抛出，这里转成提示而不是崩溃。 */
     private fun edit(block: suspend () -> Unit) {
-        viewModelScope.launch {
-            try {
-                block()
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (failure: Exception) {
-                graph.showError(failure, R.string.playlist_operation_failed)
-            }
-        }
+        graph.launchGuarded(viewModelScope, R.string.playlist_operation_failed, block = block)
     }
 
     fun playReplacing(playlistId: Long) {

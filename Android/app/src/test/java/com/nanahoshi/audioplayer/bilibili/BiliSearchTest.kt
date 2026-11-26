@@ -130,6 +130,12 @@ class BiliSearchTest {
         catch (_: CancellationException) { }
         assertEquals(1,calls)
     }
+    @Test fun plainTextDecodesEntitiesAndDropsHighlightMarkup() {
+        assertEquals("A & B 'C' <D>", biliPlainText("A &amp; B &#39;C&#39; &lt;D&gt;"))
+        assertEquals("昵称", biliPlainText("<em class='keyword'>昵称</em>"))
+        assertEquals("", biliPlainText("  <b> </b> "))
+        assertEquals("简介", biliPlainText("简介"))
+    }
     @Test fun pagesDeduplicateWithoutLosingOrderOrLoadingForever() {
         val merged = mergeBiliPage(listOf("a","b"),BiliPage(listOf("b","c","c"),true)) { it }
         assertEquals(listOf("a","b","c"),merged.items);assertTrue(merged.hasMore)

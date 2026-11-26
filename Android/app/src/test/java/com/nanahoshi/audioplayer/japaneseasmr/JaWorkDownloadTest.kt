@@ -827,6 +827,45 @@ class JaWorkDownloadTest {
         assertNull(normalizeJaWorkPath("folder/CON.txt"))
     }
 
+    @Test fun unknownLengthWithoutChecksumSurvivesFinallyAndLongNameUsesShortVersionMarker() = runBlocking {
+        val payload = "verified-audio".toByteArray()
+        val client = client { request -> reply(request, 200, payload.toResponseBody()) }
+        val slot = temporary.newFolder()
+        val longName = "a".repeat(248)
+        val destination = File(slot, longName)
+        val remote = JaRemoteFile(
+            relativePath = longName,
+            size = null,
+            sha256 = null,
+            transfer = JaFileTransfer.Buzz("https://buzzheavier.com/a/download?t=fixture".toHttpUrl(), null),
+        )
+        client.download(remote, destination) {}
+        assertTrue(destination.isFile)
+        assertArrayEquals(payload, destination.readBytes())
+        assertFalse(File(slot, "$longName.version").exists())
+    }
+
+    @Test fun longFilenameWritesTheVersionMarkerBesideTheParentNotAsPartOfTheName() = runBlocking {
+        val payload = "verified-audio"
+        val bytes = payload.toByteArray()
+        val hash = jaHash(payload)
+        val client = client { request -> reply(request, 200, bytes.toResponseBody()) }
+        val slot = temporary.newFolder()
+        val longName = "b".repeat(248)
+        val destination = File(slot, longName)
+        val remote = JaRemoteFile(
+            relativePath = longName,
+            size = bytes.size.toLong(),
+            sha256 = hash,
+            transfer = JaFileTransfer.Buzz("https://buzzheavier.com/b/download?t=fixture".toHttpUrl(), null),
+        )
+        client.download(remote, destination) {}
+        assertTrue(destination.isFile)
+        assertArrayEquals(bytes, destination.readBytes())
+        assertEquals("${bytes.size}:$hash", File(slot, ".version").readText())
+        assertFalse(File(slot, "$longName.version").exists())
+    }
+
     private fun client(response: (Request) -> Response) =
         JaWorkClient(OkHttpClient.Builder().addInterceptor { response(it.request()) }.build())
 

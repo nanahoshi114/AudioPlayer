@@ -195,7 +195,7 @@ class JapaneseAsmrClient(
 
         fun postUrl(postId: String): String = "$BASE$postId/"
 
-        private fun clientBuilder() = OkHttpClient.Builder()
+        private fun clientBuilder() = com.nanahoshi.audioplayer.data.HttpRoots.japaneseAsmr.newBuilder()
             .protocols(listOf(Protocol.HTTP_1_1))
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)

@@ -261,4 +261,7 @@
     <string name="subtitle_file_bound_notice">已将字幕关联到《%1$s》</string>
     <string name="a11y_show_subtitle_files">切换显示字幕文件</string>
     <string name="a11y_batch_subtitle_pick_row">为《%1$s》选择字幕</string>
+    <string name="a11y_search_tag">搜索标签：%1$s</string>
+    <string name="a11y_search_circle">搜索社团：%1$s</string>
+    <string name="a11y_search_va">搜索声优：%1$s</string>
 </resources>

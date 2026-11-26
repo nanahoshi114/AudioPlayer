@@ -11,7 +11,8 @@
 #   public *;
 #}
 
-# sherpa-onnx 的 JNI 类依赖原生方法名不被混淆
+# sherpa-onnx 的 JNI 类依赖原生方法名及配置类字段不被混淆
 -keepclasseswithmembernames class com.k2fsa.sherpa.onnx.** {
     native <methods>;
 }
+-keep class com.k2fsa.sherpa.onnx.** { *; }

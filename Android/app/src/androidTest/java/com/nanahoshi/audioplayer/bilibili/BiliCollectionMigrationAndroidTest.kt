@@ -6,7 +6,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.nanahoshi.audioplayer.data.TrackSource
 import com.nanahoshi.audioplayer.data.db.*
-import com.nanahoshi.audioplayer.data.removeV24SchemaChanges
+import com.nanahoshi.audioplayer.data.downgradeTo16
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Test
@@ -30,41 +30,12 @@ class BiliCollectionMigrationAndroidTest {
             status = DownloadStatus.DONE, error = null,
         ))
         seed.close()
-        // Reconstruct the schema from before the collection and subtitle task migrations.
+        // Reconstruct the v16 schema without ALTER TABLE ... DROP COLUMN (unsupported on API 24–33).
         SQLiteDatabase.openDatabase(context.getDatabasePath(name).path, null, SQLiteDatabase.OPEN_READWRITE).use {
-            it.removeV24SchemaChanges()
-            it.execSQL("ALTER TABLE queue_items DROP COLUMN mediaKind")
-            it.execSQL("ALTER TABLE queue_items DROP COLUMN mediaPathHash")
-            it.execSQL("DROP TABLE japaneseasmr_download_entries")
-            it.execSQL("DROP TABLE japaneseasmr_download_packages")
-            it.execSQL("DROP TABLE japaneseasmr_download_works")
-            it.execSQL("ALTER TABLE downloads DROP COLUMN jaEntryKey")
-            it.execSQL("ALTER TABLE downloads DROP COLUMN jaReplace")
-            it.execSQL("ALTER TABLE downloads DROP COLUMN jaForce")
-            it.execSQL("DROP TABLE japaneseasmr_media")
-            it.execSQL("DROP TABLE japaneseasmr_posts")
-            it.execSQL("DROP TABLE subtitle_publications")
-            it.execSQL("ALTER TABLE downloads DROP COLUMN dismissedAt")
-            it.execSQL("ALTER TABLE whisper_jobs DROP COLUMN createdAt")
-            it.execSQL("ALTER TABLE whisper_jobs DROP COLUMN dismissedAt")
-            it.execSQL("ALTER TABLE translation_jobs DROP COLUMN createdAt")
-            it.execSQL("ALTER TABLE translation_jobs DROP COLUMN dismissedAt")
-            val addedColumns = mapOf(
-                "downloads" to listOf("workFolderId", "pendingBiliSubtitle", "progressSummary"),
-                "whisper_jobs" to listOf("remoteSubmittedAt", "progressSummary"),
-                "translation_jobs" to listOf("kind", "generatedFingerprint", "sourceFingerprint", "bvid", "cid", "localUri", "progressSummary"),
-            )
-            for ((table, columns) in addedColumns) {
-                for (column in columns) it.execSQL("ALTER TABLE $table DROP COLUMN $column")
-            }
-            it.execSQL("DROP TABLE bili_collection_videos")
-            it.execSQL("DROP TABLE bili_collections")
-            // v19 起 fresh 库不再含该表，但 17_18 仍会 DELETE 它；逆向 fixture 须补回 v16 结构。
-            it.execSQL("CREATE TABLE bili_import_intents (bvid TEXT NOT NULL PRIMARY KEY, batchId TEXT NOT NULL, requestJson TEXT NOT NULL)")
-            it.execSQL("CREATE UNIQUE INDEX index_bili_import_intents_batchId ON bili_import_intents (batchId)")
+            it.downgradeTo16()
             it.version = 16
         }
-        val migrated = Room.databaseBuilder(context, AppDatabase::class.java, name).addMigrations(AppDatabase.MIGRATION_16_17, AppDatabase.MIGRATION_17_18, AppDatabase.MIGRATION_18_19, AppDatabase.MIGRATION_19_20, AppDatabase.MIGRATION_20_21, AppDatabase.MIGRATION_21_22, AppDatabase.MIGRATION_22_23, AppDatabase.MIGRATION_23_24).build()
+        val migrated = Room.databaseBuilder(context, AppDatabase::class.java, name).addMigrations(*AppDatabase.ALL_MIGRATIONS).build()
         val fresh = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
         try {
             assertEquals(track, migrated.playlists().items(playlist).single().trackId)

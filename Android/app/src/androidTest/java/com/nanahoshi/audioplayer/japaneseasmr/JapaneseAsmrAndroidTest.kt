@@ -26,7 +26,7 @@ import com.nanahoshi.audioplayer.data.TaskKey
 import com.nanahoshi.audioplayer.data.TaskKind
 import com.nanahoshi.audioplayer.data.TaskProgressTracker
 import com.nanahoshi.audioplayer.data.TrackSource
-import com.nanahoshi.audioplayer.data.removeV24SchemaChanges
+import com.nanahoshi.audioplayer.data.downgradeTo21
 import com.nanahoshi.audioplayer.data.db.AppDatabase
 import com.nanahoshi.audioplayer.data.db.DownloadEntity
 import com.nanahoshi.audioplayer.data.db.DownloadStatus
@@ -100,25 +100,12 @@ class JapaneseAsmrAndroidTest {
         original.whisper().insert(WhisperJobEntity(title = "fixture", fingerprint = "fixture", trackId = id,
             localPath = "/voice.wav", remoteJobId = null, status = DownloadStatus.DONE, progress = 1f, error = null, awaitRemoteUrl = null))
         original.close()
+        // 用重建旧表替代 DROP COLUMN，兼容 API 24–33。
         SQLiteDatabase.openDatabase(app.getDatabasePath(name).path, null, SQLiteDatabase.OPEN_READWRITE).use { old ->
-            old.removeV24SchemaChanges()
-            old.execSQL("ALTER TABLE downloads DROP COLUMN jaEntryKey")
-            old.execSQL("ALTER TABLE downloads DROP COLUMN jaReplace")
-            old.execSQL("ALTER TABLE downloads DROP COLUMN jaForce")
-            old.execSQL("ALTER TABLE queue_items DROP COLUMN mediaPathHash")
-            old.execSQL("DROP TABLE japaneseasmr_download_entries")
-            old.execSQL("DROP TABLE japaneseasmr_download_packages")
-            old.execSQL("DROP TABLE japaneseasmr_download_works")
-            old.execSQL("DROP INDEX index_japaneseasmr_media_postId_pathHash")
-            old.execSQL("ALTER TABLE japaneseasmr_media DROP COLUMN pathHash")
-            old.execSQL("ALTER TABLE downloads DROP COLUMN dismissedAt")
-            old.execSQL("ALTER TABLE whisper_jobs DROP COLUMN createdAt")
-            old.execSQL("ALTER TABLE whisper_jobs DROP COLUMN dismissedAt")
-            old.execSQL("ALTER TABLE translation_jobs DROP COLUMN createdAt")
-            old.execSQL("ALTER TABLE translation_jobs DROP COLUMN dismissedAt")
+            old.downgradeTo21()
             old.version = 21
         }
-        val upgraded = Room.databaseBuilder(app, AppDatabase::class.java, name).addMigrations(AppDatabase.MIGRATION_21_22, AppDatabase.MIGRATION_22_23, AppDatabase.MIGRATION_23_24).build()
+        val upgraded = Room.databaseBuilder(app, AppDatabase::class.java, name).addMigrations(*AppDatabase.ALL_MIGRATIONS).build()
         val fresh = Room.inMemoryDatabaseBuilder(app, AppDatabase::class.java).build()
         try {
             val restored = upgraded.queue().snapshot().single()

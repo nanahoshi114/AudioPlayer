@@ -20,6 +20,8 @@ import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.data.db.FolderEntity
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -29,6 +31,7 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class BiliVideoRowAndroidTest {
     @get:Rule val compose = createComposeRule()
+    private val strings = InstrumentationRegistry.getInstrumentation().targetContext
     private val video = FolderEntity(
         id = 1,
         name = "统一导入的多 P 视频",
@@ -63,8 +66,8 @@ class BiliVideoRowAndroidTest {
         }
         // Import publishes a new animated folder row into the existing list.
         compose.runOnIdle { folders.value = listOf(video) }
-        compose.onNodeWithText("B站").assertIsDisplayed()
-        compose.onNodeWithText("多P").assertIsDisplayed()
+        compose.onNodeWithText(strings.getString(R.string.library_badge_bilibili)).assertIsDisplayed()
+        compose.onNodeWithText(strings.getString(R.string.library_badge_multi_part)).assertIsDisplayed()
         compose.onNodeWithText("测试 UP 主").assertIsDisplayed()
         compose.onNodeWithTag("video-row").performClick()
         compose.runOnIdle { assertEquals(1, opened) }
@@ -74,11 +77,11 @@ class BiliVideoRowAndroidTest {
         compose.waitForIdle()
         compose.runOnIdle { folders.value = listOf(video) }
         compose.onNodeWithText(video.name).assertIsDisplayed()
-        compose.onNodeWithContentDescription("视频操作").performClick()
-        compose.onNodeWithText("从音频库移除").performClick()
+        compose.onNodeWithContentDescription(strings.getString(R.string.a11y_video_actions)).performClick()
+        compose.onNodeWithText(strings.getString(R.string.library_remove_from_library)).performClick()
         compose.runOnIdle { assertEquals(1, removed) }
         compose.onNodeWithTag("video-row").performTouchInput { longClick() }
-        compose.onNodeWithText("多P").assertIsDisplayed()
+        compose.onNodeWithText(strings.getString(R.string.library_badge_multi_part)).assertIsDisplayed()
     }
 
     @Test fun groupedBadgesCanMeasureAtNarrowWidthsAndLargeFontSizes() {
@@ -106,11 +109,11 @@ class BiliVideoRowAndroidTest {
                 }
             }
         }
-        compose.onNodeWithText("UP 主未知").assertIsDisplayed()
+        compose.onNodeWithText(strings.getString(R.string.library_uploader_unknown)).assertIsDisplayed()
         compose.runOnIdle { width.value = 240.dp; fontScale.value = 2f }
-        compose.onNodeWithText("B站").assertExists()
-        compose.onNodeWithText("多P").assertExists()
+        compose.onNodeWithText(strings.getString(R.string.library_badge_bilibili)).assertExists()
+        compose.onNodeWithText(strings.getString(R.string.library_badge_multi_part)).assertExists()
         compose.runOnIdle { width.value = 320.dp; fontScale.value = 1f }
-        compose.onNodeWithText("多P").assertIsDisplayed()
+        compose.onNodeWithText(strings.getString(R.string.library_badge_multi_part)).assertIsDisplayed()
     }
 }

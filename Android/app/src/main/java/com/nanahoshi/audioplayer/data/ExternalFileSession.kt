@@ -17,14 +17,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.CoroutineStart
-import kotlinx.coroutines.awaitCancellation
-import okhttp3.Call
-import okhttp3.Callback
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -32,11 +25,9 @@ import okhttp3.Response
 import java.io.File
 import java.io.IOException
 import java.util.UUID
-import kotlin.coroutines.resume
 import com.nanahoshi.audioplayer.R
 import com.nanahoshi.audioplayer.text.TextRef
 import com.nanahoshi.audioplayer.text.UserFacingError
-import kotlin.coroutines.resumeWithException
 
 class ExternalFileException(
     override val userText: TextRef,
@@ -103,11 +94,14 @@ class ExternalFileSession internal constructor(
 }
 
 internal class ExternalFileDownloader(
-    client: OkHttpClient = OkHttpClient(),
+    client: OkHttpClient = HttpRoots.shared,
     private val usableSpace: (File) -> Long = { it.parentFile!!.usableSpace },
     private val sign: suspend (String, String) -> SignedPlayFile,
 ) {
-    private val client = client.newBuilder().followRedirects(false).followSslRedirects(false).build()
+    private val client = client.newBuilder()
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .build()
 
     suspend fun download(preview: RemotePreview, partial: File, progress: (Long, Long?) -> Unit) =
         download(preview, partial, Long.MAX_VALUE, progress)
@@ -145,6 +139,11 @@ internal class ExternalFileDownloader(
         response.body?.byteStream()?.readRemoteTextPreview(limit) ?: RemoteTextPreview("")
     }
 
+    suspend fun readFullText(preview: RemotePreview, maxBytes: Int = MAX_SUBTITLE_TEXT_BYTES): String =
+        transfer(preview) { response ->
+            response.body?.byteStream()?.readFullText(maxBytes).orEmpty()
+        }
+
     private suspend fun <T : Any> transfer(preview: RemotePreview, consume: suspend (Response) -> T): T {
         for (attempt in 0 until if (preview.authed) 2 else 1) {
             currentCoroutineContext().ensureActive()
@@ -176,10 +175,10 @@ internal class ExternalFileDownloader(
                 val result = client.newCall(builder.build()).withResponse { response ->
                     when {
                         response.code in 300..399 -> {
-                            url = response.header("Location")?.let(url::resolve)
-                                ?: throw ExternalFileException(TextRef.Res(R.string.external_file_redirect_invalid))
-                            null
-                        }
+                        url = HttpRedirect.resolve(url, response)
+                            ?: throw ExternalFileException(TextRef.Res(R.string.external_file_redirect_invalid))
+                        null
+                    }
                         preview.authed && attempt == 0 && response.code in setOf(401, 403) -> {
                             retryAuthorization = true
                             null
@@ -205,44 +204,17 @@ internal class ExternalFileDownloader(
 internal suspend fun copyExternalBytes(
     input: InputStream, output: java.io.OutputStream, total: Long?, maxBytes: Long = Long.MAX_VALUE, progress: (Long, Long?) -> Unit,
 ) {
-    val context = currentCoroutineContext()
-    val buffer = ByteArray(64 * 1024)
-    var done = 0L
-    var reported = 0L
-    while (true) {
-        context.ensureActive()
-        val count = input.read(buffer)
-        if (count < 0) break
-        if (count > maxBytes - done) throw ExternalFileException(TextRef.Res(R.string.library_file_image_failed))
-        output.write(buffer, 0, count)
-        done += count
-        if (done - reported >= 256 * 1024 || done == total) { progress(done, total); reported = done }
+    try {
+        copyStreamToFile(input, output, total, maxBytes, progress = progress)
+    } catch (_: StreamCopyLimitExceededException) {
+        throw ExternalFileException(TextRef.Res(R.string.library_file_image_failed))
+    } catch (error: StreamCopyIncompleteException) {
+        throw ExternalFileException(TextRef.Res(R.string.external_file_read_failed), error)
     }
-    check(done > 0 && (total == null || total == done))
-    progress(done, total)
 }
 
 internal fun externalFileMime(name: String): String = MimeTypeMap.getSingleton()
     .getMimeTypeFromExtension(fileExtension(name)) ?: "*/*"
-
-private suspend fun Call.awaitHeaders(): Response = suspendCancellableCoroutine { continuation ->
-    continuation.invokeOnCancellation { cancel() }
-    enqueue(object : Callback {
-        override fun onFailure(call: Call, e: IOException) {
-            if (continuation.isActive) continuation.resumeWithException(e)
-        }
-        override fun onResponse(call: Call, response: Response) {
-            continuation.resume(response) { _, value, _ -> value.close() }
-        }
-    })
-}
-
-internal suspend fun <T> Call.withResponse(block: suspend (Response) -> T): T = coroutineScope {
-    val watcher = launch(start = CoroutineStart.UNDISPATCHED) {
-        try { awaitCancellation() } finally { this@withResponse.cancel() }
-    }
-    try { awaitHeaders().use { block(it) } } finally { watcher.cancel() }
-}
 
 internal data class RemoteTextPreview(val text: String, val clipped: Boolean = false)
 
@@ -252,13 +224,21 @@ internal fun InputStream.readRemoteTextPreview(limit: Int = 512 * 1024): RemoteT
 }
 
 internal fun readLocalTextPreview(context: Context, location: String): RemoteTextPreview? {
-    val stream = when {
-        location.startsWith("content:") -> context.contentResolver.openInputStream(Uri.parse(location))
-        location.startsWith("file:") -> Uri.parse(location).path?.let { File(it).inputStream() }
-        location.startsWith("/") -> File(location).inputStream()
-        else -> null
-    }
+    val stream = openLocalTextStream(context, location)
     return stream?.use { it.readRemoteTextPreview() }
+}
+
+internal fun readLocalTextFull(
+    context: Context,
+    location: String,
+    maxBytes: Int = MAX_SUBTITLE_TEXT_BYTES,
+): String? = openLocalTextStream(context, location)?.use { it.readFullText(maxBytes) }
+
+private fun openLocalTextStream(context: Context, location: String): InputStream? = when {
+    location.startsWith("content:") -> context.contentResolver.openInputStream(Uri.parse(location))
+    location.startsWith("file:") -> Uri.parse(location).path?.let { File(it).inputStream() }
+    location.startsWith("/") -> File(location).inputStream()
+    else -> null
 }
 
 internal fun libraryFilePreview(

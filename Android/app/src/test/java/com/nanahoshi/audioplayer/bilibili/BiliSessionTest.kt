@@ -1,6 +1,7 @@
 package com.nanahoshi.audioplayer.bilibili
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -45,5 +46,18 @@ class BiliSessionTest {
     fun correspondPathIsLowerHex() {
         val path = correspondPath(1_684_466_082_562)
         assertTrue(path.matches(Regex("[0-9a-f]{256}")))
+    }
+
+    @Test
+    fun missingOrExpiredLoginIsReported() {
+        assertTrue(biliNeedsLogin(hasSession = false, loginMid = 0L))
+        // Cookie 还在、但接口已经不认这个登录态。
+        assertTrue(biliNeedsLogin(hasSession = true, loginMid = 0L))
+        assertTrue(biliNeedsLogin(hasSession = false, loginMid = 12345L))
+    }
+
+    @Test
+    fun loggedInOrNoSubtitleIsNotLoginProblem() {
+        assertFalse(biliNeedsLogin(hasSession = true, loginMid = 12345L))
     }
 }

@@ -3,7 +3,6 @@ package com.nanahoshi.audioplayer.data
 import android.content.Context
 import androidx.annotation.StringRes
 import com.nanahoshi.audioplayer.R
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
 enum class ThemeMode(@param:StringRes val labelRes: Int) {
@@ -32,18 +31,18 @@ data class Appearance(
 const val DEFAULT_PRESET_ID = "indigo"
 
 class AppearancePreferences(context: Context) {
-    private val prefs = context.getSharedPreferences("appearance", Context.MODE_PRIVATE)
-    private val _state = MutableStateFlow(read())
-    val state: StateFlow<Appearance> = _state
+    private val prefs = appPreferences(context, "appearance")
+    private val reactive = PreferenceFlow(read())
+    val state: StateFlow<Appearance> = reactive.state
 
     fun setThemeMode(mode: ThemeMode) {
         prefs.edit().putString(KEY_MODE, mode.name).apply()
-        _state.value = _state.value.copy(themeMode = mode)
+        reactive.set(reactive.value.copy(themeMode = mode))
     }
 
-    fun useSystemAccent() = setAccent(AccentMode.SYSTEM, _state.value.presetId)
+    fun useSystemAccent() = setAccent(AccentMode.SYSTEM, reactive.value.presetId)
 
-    fun useCoverAccent() = setAccent(AccentMode.COVER, _state.value.presetId)
+    fun useCoverAccent() = setAccent(AccentMode.COVER, reactive.value.presetId)
 
     fun usePreset(id: String) = setAccent(AccentMode.PRESET, id)
 
@@ -52,7 +51,7 @@ class AppearancePreferences(context: Context) {
             .putString(KEY_ACCENT, mode.name)
             .putString(KEY_PRESET, presetId)
             .apply()
-        _state.value = _state.value.copy(accentMode = mode, presetId = presetId)
+        reactive.set(reactive.value.copy(accentMode = mode, presetId = presetId))
     }
 
     private fun read(): Appearance = Appearance(

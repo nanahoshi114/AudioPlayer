@@ -20,6 +20,7 @@ import com.nanahoshi.audioplayer.playback.SubtitleCue
 import com.nanahoshi.audioplayer.playback.GeneratedSubtitles
 import com.nanahoshi.audioplayer.playback.LoadedSubtitles
 import com.nanahoshi.audioplayer.playback.encodeGeneratedCues
+import com.nanahoshi.audioplayer.playback.canGenerateTranslation
 import com.nanahoshi.audioplayer.playback.hasTranslation
 import com.nanahoshi.audioplayer.playback.parseGeneratedSubtitles
 import com.nanahoshi.audioplayer.playback.usesJapaneseCorrection
@@ -40,6 +41,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
+import okhttp3.OkHttpClient
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
@@ -55,11 +57,12 @@ class TranslateCenter internal constructor(
     private val requests: ForegroundTaskRequests<SubtitleTask>,
     private val recovery: Job,
     internal val progress: TaskProgressCenter = TaskProgressCenter(db),
+    http: OkHttpClient = HttpRoots.shared,
     private val notice: (String) -> Unit = {},
 ) {
     private val appContext = context.applicationContext
     private val calls = InflightCalls()
-    private val client = TranslateClient(credentials, calls)
+    private val client = TranslateClient(credentials, calls, http)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     internal suspend fun close() {
         scope.coroutineContext[Job]?.cancelAndJoin()
@@ -80,8 +83,8 @@ class TranslateCenter internal constructor(
 
     fun readyToTranslate(fingerprint: String): Boolean {
         if (!credentials.hasTranslate()) return false
-        val cues = readGenerated(fingerprint)?.displayCues ?: return false
-        return cues.isNotEmpty() && !cues.hasTranslation()
+        val document = readGenerated(fingerprint) ?: return false
+        return canGenerateTranslation(document.displayCues, document.language)
     }
 
     fun stopForWhisper(jobId: Long) {
@@ -117,7 +120,7 @@ class TranslateCenter internal constructor(
             if (document.cues.isEmpty() || !generatedSubtitlesMatch(document, model, job.endpoint, job)) {
                 return@withTransaction GeneratedRetryResult.MissingSource
             }
-            if (document.displayCues.hasTranslation()) return@withTransaction GeneratedRetryResult.AlreadyTranslated
+            if (!canGenerateTranslation(document.displayCues, document.language)) return@withTransaction GeneratedRetryResult.AlreadyTranslated
             if (hasActiveGenerated(job.fingerprint)) return@withTransaction GeneratedRetryResult.Duplicate
 
             val nextSummary = decodeProgressSummary(job.progressSummary).without(ProgressPart.TRANSLATION).encodeOrNull()
@@ -155,10 +158,11 @@ class TranslateCenter internal constructor(
         try {
             return execution.run {
                 if (db.whisper().startQueuedTranslation(jobId) == 0) throw CancellationException()
-                report.metadata(credentials.translateModel(), appContext.getString(credentials.translatePlatform().labelRes))
+                val config = credentials.translateConfig()
+                report.metadata(config.model, appContext.getString(config.platform.labelRes))
                 report.phase(ProgressPhase.TRANSLATING)
                 val ticket = calls.prepare("whisper-$jobId", report)
-                calls.cancelWithCoroutine(ticket) { applyGenerated(jobId, fingerprint, ticket, report) }
+                calls.cancelWithCoroutine(ticket) { applyGenerated(jobId, fingerprint, ticket, report, config) }
             }
         } finally {
             withContext(NonCancellable) { progress.end(report) }
@@ -170,20 +174,21 @@ class TranslateCenter internal constructor(
         fingerprint: String,
         ticket: InflightCalls.Ticket,
         report: TaskReporter,
+        config: TranslateConfig,
     ): String? {
         return try {
             val document = readGenerated(fingerprint) ?: return appContext.getString(R.string.translate_no_japanese)
             val job = db.whisper().get(jobId) ?: throw CancellationException()
             val model = knownWhisperModel(job.model) ?: return appContext.getString(R.string.translate_model_changed)
             if (!generatedSubtitlesMatch(document, model, job.endpoint, job)) return appContext.getString(R.string.translate_subtitle_updated)
-            if (!credentials.hasTranslate()) return appContext.getString(R.string.translate_config_required)
+            if (config.token.isNullOrBlank()) return appContext.getString(R.string.translate_config_required)
             val cues = document.cues
-            if (cues.isEmpty() || document.displayCues.hasTranslation()) return appContext.getString(R.string.translate_nothing)
+            if (cues.isEmpty() || !canGenerateTranslation(document.displayCues, document.language)) return appContext.getString(R.string.translate_nothing)
             if (!whisperTranslating(jobId)) throw CancellationException()
-            val translated = translateAll(cues, null, MergeLimits.forModel(document.origin?.model), ticket)
+            val translated = translateAll(cues, document.language, MergeLimits.forModel(document.origin?.model), ticket, config)
             val lines = translated.cues ?: return appContext.resolveNoUrl(translated.detail, R.string.translate_status_failed)
             if (!whisperTranslating(jobId)) throw CancellationException()
-            val finished = finishWithPolish(lines, ticket) { whisperTranslating(jobId) }
+            val finished = finishWithPolish(lines, ticket, config) { whisperTranslating(jobId) }
             if (!whisperTranslating(jobId)) throw CancellationException()
             ticket.progress?.phase(ProgressPhase.SAVING_TRANSLATION)
             if (!commitTranslated(jobId, fingerprint, document, finished, report)) return appContext.getString(R.string.translate_subtitle_updated)
@@ -207,7 +212,7 @@ class TranslateCenter internal constructor(
         report: TaskReporter,
     ): Boolean = subtitles.generatedWriteLock.withLock {
         if (!progress.isCurrent(report) || readGenerated(fingerprint) != expected) return@withLock false
-        val payload = encodeGeneratedCues(expected.cues, expected.origin, revisedCues = cues)
+        val payload = encodeGeneratedCues(expected.cues, expected.origin, revisedCues = cues, language = expected.language)
         subtitles.publishTranslation(generatedFile(fingerprint), payload, jobId, null)
     }
 
@@ -265,7 +270,7 @@ class TranslateCenter internal constructor(
                     if (runners.containsKey(id)) return@withSubmissionLock
                     val job = db.translations().get(id) ?: return@withSubmissionLock
                     if (job.status != DownloadStatus.FAILED || job.operation != task) return@withSubmissionLock
-                    val row = restoreRow(job) ?: error(appContext.getString(R.string.translate_source_missing))
+                    val row = restoreRow(job) ?: throw UserFacingException(TextRef.Res(R.string.translate_source_missing))
                     if (db.translations().active().any { it.sameTarget(job) } ||
                         job.generatedFingerprint?.let { db.whisper().activeTranslation(it) != null } == true) {
                         noticeDuplicate()
@@ -329,9 +334,10 @@ class TranslateCenter internal constructor(
     private suspend fun executeRow(id: Long, row: QueuedTrack, task: SubtitleTask, expected: LoadedSubtitles?, report: TaskReporter): Boolean {
         if (db.translations().startQueued(id) == 0) return false
         val job = db.translations().get(id) ?: return false
-        report.metadata(credentials.translateModel(), appContext.getString(credentials.translatePlatform().labelRes))
+        val config = credentials.translateConfig()
+        report.metadata(config.model, appContext.getString(config.platform.labelRes))
         report.phase(ProgressPhase.PREPARING)
-        if (!credentials.hasTranslate()) throw UserFacingException(TextRef.Res(R.string.translate_config_required))
+        if (config.token.isNullOrBlank()) throw UserFacingException(TextRef.Res(R.string.translate_config_required))
         val loaded = when {
             job.targetKind == SubtitleTranslationTarget.OVERLAY -> subtitles.loadNonGenerated(row)
             job.generatedFingerprint != null ->
@@ -365,13 +371,13 @@ class TranslateCenter internal constructor(
             when (task) {
                 SubtitleTask.POLISH -> {
                     if (!loaded.unshiftedCues.hasTranslation()) throw UserFacingException(TextRef.Res(R.string.translate_no_polish_text))
-                    val polished = polishAll(loaded.unshiftedCues, ticket)
+                    val polished = polishAll(loaded.unshiftedCues, ticket, config)
                     polished.cues ?: throw UserFacingException(polished.detail)
                 }
                 else -> {
                     if (!loaded.canTranslate) throw UserFacingException(TextRef.Res(R.string.translate_no_text))
-                    val translated = translateAll(loaded.sourceCues, loaded.language, MergeLimits.forModel(loaded.origin?.model), ticket)
-                    finishWithPolish(translated.cues ?: throw UserFacingException(translated.detail), ticket) {
+                    val translated = translateAll(loaded.sourceCues, loaded.language, MergeLimits.forModel(loaded.origin?.model), ticket, config)
+                    finishWithPolish(translated.cues ?: throw UserFacingException(translated.detail), ticket, config) {
                         translationActive(id)
                     }
                 }
@@ -467,16 +473,21 @@ class TranslateCenter internal constructor(
     private suspend fun finishWithPolish(
         cues: List<SubtitleCue>,
         ticket: InflightCalls.Ticket,
+        config: TranslateConfig,
         stillActive: suspend () -> Boolean,
     ): List<SubtitleCue> {
         if (!credentials.translateAutoPolish()) return cues
         if (!stillActive()) throw CancellationException()
-        val polished = polishAll(cues, ticket).cues ?: run { ticket.progress?.polishFallback(); return cues }
+        val polished = polishAll(cues, ticket, config).cues ?: run { ticket.progress?.polishFallback(); return cues }
         if (!stillActive()) throw CancellationException()
         return polished
     }
 
-    private fun polishAll(cues: List<SubtitleCue>, ticket: InflightCalls.Ticket): TranslatedCues {
+    private fun polishAll(
+        cues: List<SubtitleCue>,
+        ticket: InflightCalls.Ticket,
+        config: TranslateConfig,
+    ): TranslatedCues {
         val updated = cues.toMutableList()
         val indexed = cues.mapIndexedNotNull { index, cue ->
             val translation = cue.translation?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapIndexedNotNull null
@@ -489,7 +500,7 @@ class TranslateCenter internal constructor(
         var processed = 0L
         batches.forEachIndexed { batchIndex, batch ->
             ticket.progress?.batch(batchIndex + 1, batches.size)
-            val reply = client.polish(batch.map { it.second }, ticket)
+            val reply = client.polish(batch.map { it.second }, ticket, config)
             val lines = reply.lines
             if (lines == null || lines.size != batch.size) return TranslatedCues(detail = failureDetail(reply.error, reply.raw, reply.diagnostic))
             batch.forEachIndexed { offset, (index, _) ->
@@ -508,37 +519,46 @@ class TranslateCenter internal constructor(
         language: String?,
         limits: MergeLimits,
         ticket: InflightCalls.Ticket,
+        config: TranslateConfig,
     ): TranslatedCues {
         val updated = mutableListOf<SubtitleCue>()
-        val correctJapanese = usesJapaneseCorrection(cues, language)
-        val autoCorrect = credentials.translateAutoCorrect()
-        val batches = cues.chunked(if (correctJapanese) JAPANESE_BATCH else BATCH)
+        val options = if (usesJapaneseCorrection(cues, language)) {
+            JapaneseTranslateOptions(
+                proofread = credentials.translateJapaneseProofread(),
+                merge = credentials.translateJapaneseMerge(),
+            )
+        } else {
+            JapaneseTranslateOptions()
+        }
+        val structured = options.usesStructuredProtocol
+        val autoCorrect = options.merge && credentials.translateAutoCorrect()
+        val batches = cues.chunked(if (structured) JAPANESE_BATCH else BATCH)
         ticket.progress?.phase(ProgressPhase.TRANSLATING)
         ticket.progress?.units(0, cues.size.toLong())
         var processed = 0L
         for ((batchIndex, batch) in batches.withIndex()) {
             ticket.progress?.phase(ProgressPhase.TRANSLATING)
             ticket.progress?.batch(batchIndex + 1, batches.size)
-            if (correctJapanese) {
+            if (structured) {
                 // 每批最多 2 次请求：首次 + 一次后续（结构损坏盲目重试，或软违规定向调优）。
                 // 同 ticket 连续请求安全（前一个 call 已 end）；取消以异常传播，不会误入后续请求。
-                val first = client.translateJapanese(batch, limits, ticket)
+                val first = client.translateJapanese(batch, limits, ticket, options, config)
                 val delivered = if (first.cues == null) {
                     ticket.progress?.retry()
-                    val retry = client.translateJapanese(batch, limits, ticket)
+                    val retry = client.translateJapanese(batch, limits, ticket, options, config)
                     retry.cues ?: return TranslatedCues(detail = failureDetail(retry.error, retry.raw, retry.diagnostic))
                 } else if (first.violations.isNotEmpty() && autoCorrect) {
                     // 调优只能改善交付：结构损坏时回退首次结果，软限制违规直接交付。
                     ticket.progress?.retry()
                     ticket.progress?.phase(ProgressPhase.CORRECTING)
-                    val corrected = client.correctJapanese(batch, limits, first.raw.orEmpty(), first.violations, ticket)
+                    val corrected = client.correctJapanese(batch, limits, first.raw.orEmpty(), first.violations, ticket, options, config)
                     corrected.cues ?: first.cues
                 } else {
                     first.cues
                 }
                 updated += delivered
             } else {
-                val reply = client.translate(batch.map { it.text }, ticket)
+                val reply = client.translate(batch.map { it.text }, ticket, config)
                 val lines = reply.lines ?: return TranslatedCues(detail = failureDetail(reply.error, reply.raw, reply.diagnostic))
                 updated += batch.zip(lines) { cue, line -> cue.copy(translation = line) }
             }
